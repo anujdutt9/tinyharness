@@ -11,7 +11,10 @@ Output is split in two:
       ⎿ Read 120 lines
     ● Edit  src/app.py, -1/+4 lines
       ⎿ edited src/app.py (1 replacement)
-    ⠼ Thinking… 4s · ctrl+c to interrupt
+    ⠼ Working… 4s · ctrl+c to interrupt
+
+The spinner says "Working" while waiting on the model, and "Thinking" only once the
+model reports that it is actually reasoning (many replies involve none).
 """
 
 from __future__ import annotations
@@ -34,12 +37,15 @@ from tinyharness.events import (
     Done,
     Event,
     PermissionDecision,
+    Reasoning,
     TodosUpdated,
     ToolResult,
     ToolsDispatched,
     ToolUse,
 )
 from tinyharness.permissions import Decision, PermissionRequest
+
+WAITING = "Working"
 
 # Decisions worth surfacing even though the user wasn't asked.
 _NOTABLE_AUTO_ALLOW = {"rule", "hook", "classifier"}
@@ -58,12 +64,10 @@ def summarize_output(tool: str, output: str) -> str:
     if not text:
         return "done"
     lines = text.splitlines()
-    if text.startswith("(no "):
-        return "no matches"
     if tool == "Read":
         return f"Read {len(lines)} lines"
-    if tool in ("Glob", "Grep"):
-        return f"{len(lines)} result{'s' if len(lines) != 1 else ''}"
+    if tool in ("Glob", "Grep"):  # they start with a summary: "3 match(es):" or "(no matches …)"
+        return "no matches" if text.startswith("(") else lines[0].rstrip(":")
     first = lines[0]
     return first if len(first) <= 100 else first[:99] + "…"
 
@@ -147,7 +151,7 @@ class Renderer:
     # -- permanent output -----------------------------------------------------
 
     def _print(self, renderable: RenderableType) -> None:
-        self.console.print(renderable, highlight=False, soft_wrap=True)
+        self.console.print(renderable, highlight=False)
 
     def _block(self, renderable: RenderableType) -> None:
         """Print a block with a blank line before it, so turns read as distinct steps."""
@@ -181,7 +185,7 @@ class Renderer:
 
     async def render(self, events: AsyncGenerator[Event, None]) -> None:
         self._turn_started, self._tools_used = time.monotonic(), 0
-        self.wait("Thinking")
+        self.wait(WAITING)
         self._start_live()
         try:
             async with aclosing(events) as stream:
@@ -195,6 +199,9 @@ class Renderer:
 
     def handle(self, event: Event) -> None:
         match event:
+            case Reasoning():
+                if self._activity == WAITING:
+                    self.wait("Thinking")
             case AssistantText(text=text):
                 self.stop_waiting()
                 self._streaming += text
@@ -223,7 +230,7 @@ class Renderer:
                     result = Text(summarize_output(name, output), style="muted")
                 self._finish_tool(name, result)
                 if not self._running:
-                    self.wait("Thinking")
+                    self.wait(WAITING)
             case TodosUpdated(todos=todos):
                 self._block(
                     Group(
@@ -231,7 +238,7 @@ class Renderer:
                         Text("  ").append(f"{ELBOW} ", style="subtle").append(format_todos(todos)),
                     )
                 )
-                self.wait("Thinking")
+                self.wait(WAITING)
             case Compacted(kind=kind, count=n):
                 self._block(Text(f"↻ {_COMPACTION_MESSAGES[kind].format(n=n)}", style="subtle"))
             case Done(reason=reason):

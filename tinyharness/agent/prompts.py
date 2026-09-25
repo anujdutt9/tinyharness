@@ -37,8 +37,25 @@ def load_agent_md(working_dir: Path) -> str:
     return "\n\n---\n\n".join(chunks)
 
 
-def build_system_prompt(working_dir: Path, scratch_dir: Path, extra: str = "") -> str:
-    parts = [load_prompt("system", working_dir=working_dir, scratch_dir=scratch_dir)]
+def build_system_prompt(
+    working_dir: Path,
+    scratch_dir: Path,
+    *,
+    model_name: str,
+    model_id: str,
+    provider: str,
+    extra: str = "",
+) -> str:
+    parts = [
+        load_prompt(
+            "system",
+            working_dir=working_dir,
+            scratch_dir=scratch_dir,
+            model_name=model_name,
+            model_id=model_id,
+            provider=provider,
+        )
+    ]
     if context := load_agent_md(working_dir):
         parts.append(f"# User context (AGENT.md)\n\n{context}")
     if extra:

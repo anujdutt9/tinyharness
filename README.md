@@ -50,12 +50,12 @@ Added `--verbose` (alias `-v`).
 | **Agent loop** | Streaming, parallel dispatch of read-only tools, argument validation, step limit, Ctrl-C to interrupt a turn |
 | **Tools** | `Read` `Write` `Edit` `Glob` `Grep` `Pdf` `TodoWrite` `Agent`; each one is a class plus a pydantic input model |
 | **Permissions** | Reads inside the project never ask; edits ask with a diff preview. Answers are Yes / Yes, don't ask again / No + feedback. Shift+Tab cycles modes (`default` → `acceptEdits` → `plan`); plus `auto` (LLM classifier) and `bypassPermissions`. Persistent `allow`/`deny` rules in config |
-| **Security** | Tools refuse to read secret-shaped files (`.env`, SSH keys, …), hook processes never see API keys, symlinks are resolved before permission checks |
+| **Security** | API keys never reach the model: tools refuse to read secret-shaped files (`.env`, SSH keys, …), configured key values are masked in every tool result, and a key pasted into the chat is caught before sending. Hook processes never see keys; symlinks are resolved before permission checks |
 | **Context management** | Three tiers: cap oversized messages → stub old tool output → summarize history. Each message changes at most once, so provider prompt caches stay valid |
 | **Skills** | `SKILL.md` directories, loaded progressively; compatible with Claude Code skills |
 | **Subagents** | Isolated context windows; built-in `explore` / `plan` / `general-purpose`, plus your own in Markdown |
 | **Hooks and plugins** | Shell or Python hooks on 5 lifecycle events; plugins bundle skills, agents and hooks |
-| **Providers** | 8 built-in providers plus any OpenAI-compatible gateway; `/model` lists every model you have a key for and can search a provider's full catalog; first-run setup asks for a key |
+| **Providers** | Each provider through its own current API: Anthropic Messages, OpenAI Responses, Gemini Interactions, and Chat Completions for the rest, plus any gateway. Reasoning carries across tool calls (signed/encrypted state is sent back unchanged). No per-model special cases: models, context windows and capabilities come from each provider's own model list |
 | **Two interfaces** | Interactive CLI (streamed Markdown, live tool status, `/` autocomplete, pickers, mode-colored input box) and an async Python SDK, both consuming the same typed event stream |
 | **Transcripts** | Every session is logged as append-only JSONL in `.tinyharness/sessions/` |
 
@@ -79,8 +79,8 @@ main ones:
 | Command | |
 |---|---|
 | `/model` | pick a model from any provider you have a key for, or search a provider's full list |
-| `/provider`, `/login` | switch provider, or add an API key |
-| `/think` | set the reasoning budget |
+| `/provider` | switch provider |
+| `/effort` | set how hard the model reasons (`low` … `max`), the same way for every model |
 | `/mode` | change the permission mode (or press Shift+Tab) |
 | `/skills`, `/<skill> [args]` | list or run skills |
 | `/context`, `/clear` | show context usage, or start a fresh conversation |
@@ -116,7 +116,7 @@ a permission policy with hooks, and skills.
 
 ```
  CLI (cli/) ──┐
-              ├──► Session (session.py) ──► agent loop (agent/loop.py) ──► LLM (llm/client.py)
+              ├──► Session (session.py) ──► agent loop (agent/loop.py) ──► LLM (llm/client.py ─ llm/adapters/)
  SDK ─────────┘        wires components          │
                                                  ├─ compaction (agent/compaction.py)
                                                  ├─ permission gate (permissions/gate.py) ── hooks
@@ -132,24 +132,40 @@ Suggested reading order:
 | 3 | [`permissions/gate.py`](tinyharness/permissions/gate.py) | The layered permission check |
 | 4 | [`agent/compaction.py`](tinyharness/agent/compaction.py) | Staying inside the context window without breaking the prompt cache |
 | 5 | [`session.py`](tinyharness/session.py) | Wiring it all together; state that persists between prompts |
-| 6 | [`subagents/runner.py`](tinyharness/subagents/runner.py) | Subagents are the same loop with a fresh history |
-| 7 | [`skills/skill.py`](tinyharness/skills/skill.py), [`hooks/hooks.py`](tinyharness/hooks/hooks.py) | Extensibility |
-| 8 | [`cli/`](tinyharness/cli) | Rendering events (`render.py`), the REPL, slash commands; colors live in `theme.py` |
+| 6 | [`llm/adapters/`](tinyharness/llm/adapters) | One small adapter per provider API; the rest of the code never sees a provider's format |
+| 7 | [`subagents/runner.py`](tinyharness/subagents/runner.py) | Subagents are the same loop with a fresh history |
+| 8 | [`skills/skill.py`](tinyharness/skills/skill.py), [`hooks/hooks.py`](tinyharness/hooks/hooks.py) | Extensibility |
+| 9 | [`cli/`](tinyharness/cli) | Rendering events (`render.py`), the REPL, slash commands; colors live in `theme.py` |
 
 All prompts sent to the model (the system prompt, the compaction summary, the safety classifier and the built-in subagents) are Markdown files in [`tinyharness/prompts/`](tinyharness/prompts). Tool descriptions stay in each tool's class, next to the input schema they describe.
 
 ## Configuration
 
-The first time you run `tinyharness` with no API key, it asks you to pick a provider
-and paste a key, and saves it to `~/.config/tinyharness/.env`. After that,
+tinyharness needs an API key for at least one provider. Run it once with no key and it
+shows where to get one and creates `~/.config/tinyharness/.env` with a commented-out
+line per provider: uncomment one and add your key (or `export` it in your shell).
+Keys added while it's running are picked up by `/provider` and `/model`. After that,
 everything is optional: `/model` switches models (and remembers your choice), and
 one file, `~/.config/tinyharness/config.toml`, holds any defaults you want. See
 [`examples/config.toml`](examples/config.toml). API keys never go in the config file.
 
-**Providers.** Built in: Anthropic, OpenAI, OpenRouter, Google Gemini, xAI, DeepSeek,
-Mistral and Groq, each with a short list of recommended models
-([`llm/providers.toml`](tinyharness/llm/providers.toml)). Any OpenAI-compatible
-gateway can be added in the config file:
+**Providers.** Each one is used through its own current API:
+
+| API format | Providers |
+|---|---|
+| Anthropic Messages | Anthropic |
+| OpenAI Responses | OpenAI, xAI |
+| Gemini Interactions | Google Gemini |
+| OpenAI Chat Completions | OpenRouter, DeepSeek, Mistral, Groq, and custom gateways |
+
+[`llm/providers.toml`](tinyharness/llm/providers.toml) holds only how to connect to
+each one. Models are listed live from the provider (cached for a day), and whatever
+the provider reports about a model (context window, output limit, reasoning support)
+is used as-is; nothing is special-cased by model name. When a provider doesn't say
+(OpenAI doesn't publish context windows), a default applies, and if a request is
+ever rejected as too long, the history is summarized and the request retried.
+
+A gateway is one table in the config file:
 
 ```toml
 model = "gateway:claude-sonnet-5"
@@ -157,7 +173,7 @@ model = "gateway:claude-sonnet-5"
 [providers.gateway]
 base_url = "https://llm.internal.example.com/v1"
 api_key_env = "GATEWAY_API_KEY"
-models = ["claude-sonnet-5", "gpt-6-sol"]
+api = "chat"   # or "responses", "anthropic", "gemini"
 ```
 
 | Location | Contents |

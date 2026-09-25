@@ -22,6 +22,11 @@ class AssistantText:
 
 
 @dataclass(frozen=True)
+class Reasoning:
+    """The model started reasoning before answering (not every reply does)."""
+
+
+@dataclass(frozen=True)
 class ToolUse:
     """The model asked to call a tool (before the permission check)."""
 
@@ -75,6 +80,7 @@ class Done:
 
 Event = (
     AssistantText
+    | Reasoning
     | ToolUse
     | PermissionDecision
     | ToolsDispatched

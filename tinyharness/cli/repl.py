@@ -39,11 +39,14 @@ from rich.text import Text
 from tinyharness.cli.commands import COMMANDS
 from tinyharness.cli.render import Renderer
 from tinyharness.cli.theme import MODE_LABEL, MODE_STYLE, PROMPT, PT_STYLE, SUBTLE
+from tinyharness.cli.widgets import pick
+from tinyharness.config import user_env_path
 from tinyharness.events import Event
 from tinyharness.llm.client import LLMError
 from tinyharness.llm.tokens import count_message_tokens
-from tinyharness.paths import home_dir
+from tinyharness.paths import home_dir, pretty_path
 from tinyharness.permissions import PermissionMode
+from tinyharness.security import find_api_key
 from tinyharness.session import Session
 
 log = logging.getLogger(__name__)
@@ -106,6 +109,7 @@ class Repl:
         self.running = True
         self.context_used = 0.0  # fraction of the context window, refreshed after each turn
         self._exit_armed_until = 0.0  # a second Ctrl-C before this time exits
+        self._draft = ""  # pre-filled into the next prompt (a message that wasn't sent)
 
     # -- input ----------------------------------------------------------------
 
@@ -119,14 +123,16 @@ class Repl:
             ("class:toolbar.key", "shift+tab"),
             ("class:toolbar.dim", " to switch"),
         ]
-        right_text = f"{self.session.config.model_info.display} · {self.context_used:.0%} context  "
+        effort = self.session.config.effort or "default"
+        right_text = f"{self.session.model_label} · {effort} effort · {self.context_used:.0%} context  "
         width = get_app().output.get_size().columns
         used = sum(len(t) for _, t, *_ in left)
         gap = max(width - used - len(right_text), 2)
         return [*left, ("", " " * gap), ("class:toolbar.dim", right_text)]
 
     def _prompt_session(self) -> PromptSession[str]:
-        """Enter submits; Alt+Enter or Ctrl-J inserts a newline; Shift+Tab cycles the mode.
+        """Enter submits; Alt+Enter or Ctrl-J inserts a newline; Tab accepts a suggestion;
+        Shift+Tab cycles the mode.
         Ctrl-C clears the input, or on an empty prompt, exits when pressed twice."""
         keys = KeyBindings()
 
@@ -150,6 +156,21 @@ class Repl:
         @keys.add("c-j")
         def _newline(event: KeyPressEvent) -> None:
             event.current_buffer.insert_text("\n")
+
+        @keys.add("tab")
+        def _accept(event: KeyPressEvent) -> None:
+            """Tab takes the gray suggestion, or the highlighted (else first) menu entry."""
+            buffer = event.current_buffer
+            if buffer.suggestion and buffer.suggestion.text:
+                buffer.insert_text(buffer.suggestion.text)
+            elif buffer.complete_state:
+                completion = buffer.complete_state.current_completion or next(
+                    iter(buffer.complete_state.completions), None
+                )
+                if completion:
+                    buffer.apply_completion(completion)
+            elif buffer.text.startswith("/"):
+                buffer.start_completion(select_first=False)
 
         @keys.add("s-tab")
         def _cycle_mode(event: KeyPressEvent) -> None:
@@ -189,7 +210,8 @@ class Repl:
         while self.running:
             try:
                 # show_frame must be passed here: prompt_async() resets it (prompt_toolkit 3.0.52).
-                line = (await prompt.prompt_async(show_frame=True)).strip()
+                draft, self._draft = self._draft, ""
+                line = (await prompt.prompt_async(show_frame=True, default=draft)).strip()
             except (EOFError, KeyboardInterrupt):
                 break  # Ctrl-D, or Ctrl-C twice
             if line:
@@ -200,7 +222,8 @@ class Repl:
 
     async def handle(self, line: str) -> None:
         if not line.startswith("/"):
-            await self.run_turn(self.session.run(line))
+            if await self._safe_to_send(line):
+                await self.run_turn(self.session.run(line))
             return
 
         name, _, arg = line.partition(" ")
@@ -211,11 +234,31 @@ class Repl:
             if inspect.isawaitable(result):
                 await result
         elif self.session.skills.get(name[1:]):
-            await self.run_turn(self.session.run_skill(name[1:], arg))
+            if await self._safe_to_send(line):
+                await self.run_turn(self.session.run_skill(name[1:], arg))
         else:
             self.console.print(
                 f"\n  Unknown command [bold]{name}[/]. Type [key]/[/] to see what's available."
             )
+
+    async def _safe_to_send(self, line: str) -> bool:
+        """Catch an API key pasted into the chat before it reaches the model."""
+        if (key := find_api_key(line)) is None:
+            return True
+        self.console.print(
+            f"\n  [warn]⚠ Your message contains what looks like an API key[/] [muted]({key})[/]\n"
+            f"  [muted]Anything you send goes to the model. Keys belong in[/] {pretty_path(user_env_path())}\n"
+        )
+        choice = await pick(
+            "Send it anyway?",
+            [("edit", "No, let me edit it"), ("send", "Yes, send it")],
+            "edit",
+            mark_current=False,
+        )
+        if choice == "send":
+            return True
+        self._draft = line  # back into the input box, to edit
+        return False
 
     # -- turns ----------------------------------------------------------------
 
@@ -238,8 +281,8 @@ class Repl:
 
     def _measure_context(self) -> None:
         with contextlib.suppress(Exception):  # the toolbar is a nicety; never fail a turn over it
-            used = count_message_tokens(self.session.history.to_openai())
-            self.context_used = used / self.session.config.context_window
+            used = count_message_tokens(self.session.history.to_dicts())
+            self.context_used = used / self.session.context_window
 
 
 def report_error(console: Console, error: Exception) -> None:
@@ -247,7 +290,7 @@ def report_error(console: Console, error: Exception) -> None:
     if isinstance(error, TimeoutError) or "Timeout" in type(error).__name__:
         hint = (
             "The model took longer than `request_timeout` to answer. Files already written are kept.\n"
-            "Try a faster model (/model), less reasoning (/think off), or a larger request_timeout."
+            "Try a faster model (/model), less reasoning (/effort low), or a larger request_timeout."
         )
     elif isinstance(error, LLMError) and "auth" in str(error):
         hint = "Check your API key with /whoami and /ping."

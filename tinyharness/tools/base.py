@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
+from tinyharness.llm.types import ToolSpec
+
 if TYPE_CHECKING:
     from tinyharness.config import Config
     from tinyharness.workspace import Scratch, Workspace
@@ -74,15 +76,9 @@ class Tool(ABC, Generic[InputT]):
         defs = schema.pop("$defs", {})
         return _strip_titles(_inline_refs(schema, defs))
 
-    def to_openai(self) -> dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.input_schema(),
-            },
-        }
+    def spec(self) -> ToolSpec:
+        """The tool as the model sees it; each provider adapter formats this its own way."""
+        return ToolSpec(self.name, self.description, self.input_schema())
 
 
 def _inline_refs(schema: Any, defs: dict[str, Any]) -> Any:

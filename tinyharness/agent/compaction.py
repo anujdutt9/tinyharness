@@ -14,6 +14,7 @@ prompt-prefix cache valid on later turns.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from tinyharness.agent.history import History, Message
@@ -37,18 +38,24 @@ class Compactor:
         self,
         llm: LLMClient,
         *,
-        context_window: int = 200_000,
+        context_window: int | Callable[[], int] = 200_000,
         threshold: float = 0.90,
         max_message_tokens: int = 16_000,
         stub_tool_results_over: int = 6_000,
         keep_tail_messages: int = 12,
     ) -> None:
         self.llm = llm
-        self.context_window = context_window
+        self._context_window = context_window
         self.threshold = threshold
         self.max_message_tokens = max_message_tokens
         self.stub_tool_results_over = stub_tool_results_over
         self.keep_tail = keep_tail_messages
+
+    @property
+    def context_window(self) -> int:
+        """May be a callable: the window is only known once the provider's model list is."""
+        window = self._context_window
+        return window() if callable(window) else window
 
     def budget_cap(self, history: History) -> int:
         """Truncate messages larger than `max_message_tokens`. Returns how many were capped."""
@@ -62,6 +69,7 @@ class Compactor:
                 continue
             keep_chars = self.max_message_tokens * 4  # ~4 chars per token
             m.content = f"{TRUNCATED_MARK} kept ~{self.max_message_tokens} of {tokens} tokens]\n\n{content[:keep_chars]}"
+            m.state = None  # the provider's saved copy would bring the full text back
             capped += 1
         return capped
 

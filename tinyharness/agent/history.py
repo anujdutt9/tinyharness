@@ -1,4 +1,10 @@
-"""Conversation state in the OpenAI Chat Completions message shape."""
+"""Conversation state, independent of any provider's API format.
+
+Adapters (tinyharness/llm/adapters) translate these messages into each provider's
+format. An assistant message can also carry `state`: data its provider requires
+back on the next request (signed or encrypted reasoning). It is opaque here and
+only ever sent back to the exact provider and model that produced it.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +20,7 @@ class ToolCall:
     name: str
     arguments: str = ""  # raw JSON string, exactly as the model produced it
 
-    def to_openai(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "type": "function",
@@ -23,18 +29,26 @@ class ToolCall:
 
 
 @dataclass
+class ReasoningState:
+    owner: str  # "provider:model" that produced it
+    data: Any
+
+
+@dataclass
 class Message:
     role: Role
     content: str | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_call_id: str | None = None  # set on role="tool" replies
+    state: ReasoningState | None = None  # assistant only; see the module docstring
 
-    def to_openai(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
+        """A plain dict (for token counting and transcripts); not any provider's format."""
         d: dict[str, Any] = {"role": self.role}
         if self.content is not None:
             d["content"] = self.content
         if self.tool_calls:
-            d["tool_calls"] = [tc.to_openai() for tc in self.tool_calls]
+            d["tool_calls"] = [tc.to_dict() for tc in self.tool_calls]
         if self.tool_call_id:
             d["tool_call_id"] = self.tool_call_id
         return d
@@ -53,8 +67,8 @@ class History:
     def reset(self) -> None:
         self.messages.clear()
 
-    def to_openai(self) -> list[dict[str, Any]]:
-        return [m.to_openai() for m in self.messages]
+    def to_dicts(self) -> list[dict[str, Any]]:
+        return [m.to_dict() for m in self.messages]
 
     def repair(self) -> int:
         """Answer any tool calls left without a result (e.g. the user hit Ctrl-C

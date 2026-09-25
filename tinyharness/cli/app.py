@@ -15,10 +15,11 @@ from rich.table import Table
 from rich.text import Text
 
 from tinyharness import __version__
-from tinyharness.cli import setup
 from tinyharness.cli.render import Renderer
 from tinyharness.cli.repl import Repl, report_error
+from tinyharness.cli.setup import print_key_guide
 from tinyharness.cli.theme import BRAND, LOGO, MODE_HINT, MODE_LABEL, MODE_STYLE, THEME, gradient
+from tinyharness.paths import pretty_path
 from tinyharness.permissions import PermissionMode
 from tinyharness.session import MissingAPIKeyError, Session, SessionOptions
 from tinyharness.skills import import_skills
@@ -68,9 +69,9 @@ def print_banner(console: Console, session: Session) -> None:
     details.add_column()
     details.add_row(
         "model",
-        Text.assemble((cfg.model_info.display, "bold"), (f"  via {cfg.provider_info.label}", "muted")),
+        Text.assemble((session.model_label, "bold"), (f"  via {cfg.provider_info.label}", "muted")),
     )
-    details.add_row("project", _home_relative(cfg.working_dir))
+    details.add_row("project", pretty_path(cfg.working_dir, limit=60))
     details.add_row(
         "mode",
         Text.assemble((MODE_LABEL[mode], f"bold {MODE_STYLE[mode]}"), (f" · {MODE_HINT[mode]}", "muted")),
@@ -86,23 +87,6 @@ def print_banner(console: Console, session: Session) -> None:
     )
 
 
-def _home_relative(path: Path | str, limit: int = 60) -> str:
-    """~/code/app, or …/last/parts when the path is too long for the banner."""
-    path = Path(path)
-    try:
-        text = f"~/{path.relative_to(Path.home())}"
-    except ValueError:
-        text = str(path)
-    if len(text) <= limit:
-        return text
-    parts = path.parts
-    for i in range(1, len(parts)):
-        short = "…/" + "/".join(parts[i:])
-        if len(short) <= limit:
-            return short
-    return "…" + text[-(limit - 1) :]
-
-
 async def run(args: argparse.Namespace, console: Console) -> None:
     renderer = Renderer(console)
     options = SessionOptions(
@@ -114,7 +98,7 @@ async def run(args: argparse.Namespace, console: Console) -> None:
         permission_callback=renderer.ask_permission,
         expose_skill_tool=args.expose_skills,
     )
-    session = await open_session(options, console, interactive=not args.prompt and sys.stdin.isatty())
+    session = open_session(options, console, interactive=not args.prompt and sys.stdin.isatty())
     if session is None:
         return
     renderer.root = f"{session.workspace.root}/"
@@ -129,21 +113,16 @@ async def run(args: argparse.Namespace, console: Console) -> None:
         session.close()
 
 
-async def open_session(options: SessionOptions, console: Console, *, interactive: bool) -> Session | None:
-    """Start a session; with no API key, walk the user through connecting a provider."""
+def open_session(options: SessionOptions, console: Console, *, interactive: bool) -> Session | None:
+    """Start a session. With no API key at all, explain how to add one instead."""
     try:
         return Session(options)
     except MissingAPIKeyError:
-        if not interactive:
-            raise
-    provider = await setup.first_run(console, options.resolve_config())
-    if provider is None:
-        console.print("  [muted]No provider connected. Run[/] tinyharness [muted]again when you're ready.[/]")
+        config = options.resolve_config()
+        if not interactive or any(config.has_key(name) for name in config.providers):
+            raise  # a key exists, just not for the chosen provider: the error says which
+        print_key_guide(console, config)
         return None
-    options.provider = provider
-    if options.model and ":" not in options.model:
-        options.model = None  # a bare model id belonged to the provider without a key
-    return Session(options)
 
 
 def main(argv: list[str] | None = None) -> None:

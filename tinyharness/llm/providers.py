@@ -1,15 +1,17 @@
-"""Model providers: the built-in catalog, user-defined gateways, and live model lists.
+"""Model providers: the built-in catalog and user-defined gateways.
 
-The catalog lives in `providers.toml` next to this file. A user's config can add a
-provider or adjust a built-in one with a `[providers.<name>]` table:
+The catalog lives in `providers.toml` next to this file and holds only how to
+connect to each provider. Which models exist, and what they support, comes from
+the provider itself (see models.py). A user's config can add a provider or adjust
+a built-in one with a `[providers.<name>]` table:
 
     [providers.gateway]            # any OpenAI-compatible endpoint
     base_url = "https://llm.internal.example.com/v1"
     api_key_env = "GATEWAY_KEY"
-    models = ["claude-sonnet-5", "gpt-6-sol"]
+    default_model = "claude-sonnet-5"
 
-    [providers.openai]             # built-ins merge: this only adds a model
-    models = ["o5-mini"]
+    [providers.openrouter]         # built-ins merge: this only changes one field
+    small_model = "google/gemini-3.5-flash-lite"
 """
 
 from __future__ import annotations
@@ -17,36 +19,31 @@ from __future__ import annotations
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-import httpx
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from tinyharness.llm.types import ModelInfo
+
 CATALOG_PATH = Path(__file__).with_name("providers.toml")
-DEFAULT_CONTEXT = 128_000
+DEFAULT_CONTEXT = 128_000  # when neither the provider nor the config says otherwise
 
-
-class ModelInfo(BaseModel):
-    id: str
-    label: str = ""
-    note: str = ""
-    context: int = DEFAULT_CONTEXT
-
-    @property
-    def display(self) -> str:
-        return self.label or self.id
+Api = Literal["chat", "responses", "anthropic", "gemini"]
 
 
 class Provider(BaseModel):
     name: str
     label: str = ""
+    api: Api = "chat"  # wire format; see tinyharness/llm/adapters
     base_url: str
     api_key_env: str
     key_url: str = ""
     default_model: str = ""
-    small_model: str = ""
+    small_model: str = ""  # cheap model for background work (the auto-mode classifier)
     extra_headers: dict[str, str] = Field(default_factory=dict)
-    models: list[ModelInfo] = Field(default_factory=list)
+    extra_body: dict[str, Any] = Field(default_factory=dict)  # merged into every request
+    effort_param: str = "reasoning_effort"  # chat API only: where the reasoning effort goes
+    models: list[ModelInfo] = Field(default_factory=list)  # for endpoints without a model list
 
     @field_validator("models", mode="before")
     @classmethod
@@ -78,48 +75,15 @@ class Provider(BaseModel):
     def api_key(self) -> str:
         return os.environ.get(self.api_key_env, "")
 
-    def model(self, model_id: str) -> ModelInfo:
-        """Catalog info for a model; unknown ids get defaults."""
-        return next((m for m in self.models if m.id == model_id), ModelInfo(id=model_id))
-
-    def add_model(self, model_id: str) -> None:
-        if all(m.id != model_id for m in self.models):
-            self.models.append(ModelInfo(id=model_id))
-
 
 def load_catalog(overrides: dict[str, dict[str, Any]] | None = None) -> dict[str, Provider]:
     """Built-in providers merged with the user's `[providers.*]` tables.
 
-    For a built-in, user fields replace the catalog's, except `models`, which are
-    added to the built-in list. A new name defines a new provider (it needs at least
-    `base_url` and `api_key_env`).
+    For a built-in, the user's fields replace the catalog's. A new name defines a
+    new provider (it needs at least `base_url` and `api_key_env`).
     """
     with CATALOG_PATH.open("rb") as f:
         raw: dict[str, dict[str, Any]] = tomllib.load(f)
     for name, fields in (overrides or {}).items():
-        base = raw.setdefault(name, {})
-        extra_models = fields.get("models", [])
-        base.update({k: v for k, v in fields.items() if k != "models"})
-        base["models"] = [*base.get("models", []), *extra_models]
-    catalog = {name: Provider(name=name, **fields) for name, fields in raw.items()}
-    for provider in catalog.values():  # user-added ids may repeat catalog ones; first wins
-        unique: dict[str, ModelInfo] = {}
-        for m in provider.models:
-            unique.setdefault(m.id, m)
-        provider.models = list(unique.values())
-    return catalog
-
-
-async def fetch_models(provider: Provider, api_key: str, timeout: float = 15.0) -> list[str]:
-    """Every model id the provider serves, from its `GET /models` endpoint."""
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "x-api-key": api_key,  # Anthropic's /models reads this header instead
-        **provider.extra_headers,
-    }
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(f"{provider.base_url.rstrip('/')}/models", headers=headers)
-    resp.raise_for_status()
-    data = resp.json().get("data") or resp.json().get("models") or []
-    ids = {str(item.get("id") or item.get("name", "")).removeprefix("models/") for item in data}
-    return sorted(i for i in ids if i)
+        raw.setdefault(name, {}).update(fields)
+    return {name: Provider(name=name, **fields) for name, fields in raw.items()}

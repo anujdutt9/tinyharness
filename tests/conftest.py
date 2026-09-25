@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from tinyharness.agent.history import Message
 from tinyharness.config import Config
 from tinyharness.llm.client import StreamChunk
 from tinyharness.llm.providers import load_catalog
@@ -49,13 +50,13 @@ class ScriptedLLM:
 
     def __init__(self, turns: list[str | list[tuple[str, str]]]) -> None:
         self.turns = list(turns)
-        self.requests: list[list[dict[str, Any]]] = []
+        self.requests: list[list[Message]] = []
         self.model = "fake"
 
     async def stream(
-        self, messages: list[dict[str, Any]], tools: Any = None, **_: Any
+        self, messages: list[Message], tools: Any = None, **_: Any
     ) -> AsyncIterator[StreamChunk]:
-        self.requests.append(messages)
+        self.requests.append(list(messages))
         turn = self.turns.pop(0) if self.turns else "done"
         if isinstance(turn, str):
             yield StreamChunk(text=turn, finish_reason="stop")

@@ -4,11 +4,13 @@ import pytest
 
 from tinyharness.config import (
     Config,
+    forget_model,
     load_config,
     load_dotenv_files,
     parse_dotenv,
+    recent_models,
     remember_model,
-    save_api_key,
+    write_env_template,
 )
 from tinyharness.llm.providers import load_catalog
 from tinyharness.permissions import PermissionMode
@@ -40,6 +42,12 @@ def test_parse_dotenv(tmp_path):
         "EXPORTED": "yes",
         "EMPTY": "",
     }
+
+
+def test_dotenv_inline_comments(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text('A=sk-123   # my key\nB="has # inside"\n')
+    assert parse_dotenv(f) == {"A": "sk-123", "B": "has # inside"}
 
 
 def test_real_env_wins_over_dotenv(tmp_path, monkeypatch):
@@ -113,13 +121,6 @@ def test_only_known_provider_names_count_as_a_prefix():
     assert (cfg.provider, cfg.model) == ("openrouter", "meta-llama/llama-4:free")
 
 
-def test_unknown_models_are_accepted_and_listed():
-    cfg = Config(provider="openai")
-    cfg.select("gpt-7-preview")
-    assert cfg.model == "gpt-7-preview"
-    assert "gpt-7-preview" in [m.id for m in cfg.provider_info.models]
-
-
 def test_use_provider_switches_to_its_default_model():
     cfg = Config(provider="anthropic")
     cfg.use_provider("groq")
@@ -127,14 +128,6 @@ def test_use_provider_switches_to_its_default_model():
     assert cfg.model == load_catalog()["groq"].default_model
     with pytest.raises(ValueError):
         cfg.use_provider("nope")
-
-
-def test_context_window_follows_the_model():
-    cfg = Config(model="anthropic:claude-haiku-4-5")
-    assert cfg.context_window == 200_000
-    cfg.select("claude-sonnet-5")
-    assert cfg.context_window == 1_000_000
-    assert Config(model="anthropic:x", context_window_tokens=50_000).context_window == 50_000
 
 
 def test_env_model_pins_active_model(tmp_path, monkeypatch):
@@ -158,6 +151,14 @@ def test_last_picked_model_is_ignored_without_its_key(tmp_path):
     assert load_config(write_config(tmp_path)).model != "gpt-6-luna"
 
 
+def test_recent_models_are_most_recent_first_and_can_be_forgotten():
+    for spec in ("openai:a", "openai:b", "openai:a"):
+        remember_model(*spec.split(":"))
+    assert recent_models() == ["openai:a", "openai:b"]
+    forget_model("openai:b")
+    assert recent_models() == ["openai:a"]
+
+
 # ---- custom providers ----
 
 
@@ -169,33 +170,49 @@ def test_custom_gateway_from_config(tmp_path, monkeypatch):
     )
     cfg = load_config(write_config(tmp_path, body))
     assert (cfg.provider, cfg.model, cfg.base_url) == ("gateway", "m-large", "https://llm.example.com/v1")
+    assert cfg.provider_info.api == "chat"  # the default format for custom endpoints
     assert cfg.resolve_api_key() == "gk"
-    cfg.select("m-small")
-    assert cfg.context_window == 32_000
+    assert cfg.provider_info.models[1].context == 32_000
 
 
-def test_config_extends_a_builtin_provider(tmp_path):
-    body = '[providers.openai]\nmodels = ["o9"]\nsmall_model = "o9"\n'
-    cfg = load_config(write_config(tmp_path, body))
+def test_config_adjusts_a_builtin_provider(tmp_path):
+    cfg = load_config(write_config(tmp_path, '[providers.openai]\nsmall_model = "o9"\n'))
     openai = cfg.providers["openai"]
-    ids = [m.id for m in openai.models]
-    assert ids[-1] == "o9" and "gpt-6-sol" in ids  # added, not replaced
     assert openai.small_model == "o9"
-    assert openai.base_url == load_catalog()["openai"].base_url
+    assert openai.base_url == load_catalog()["openai"].base_url  # the rest is untouched
+    assert openai.api == "responses"
 
 
-# ---- saving keys ----
+def test_every_builtin_provider_uses_a_known_api():
+    from tinyharness.llm.adapters import ADAPTERS
+
+    assert {p.api for p in load_catalog().values()} <= set(ADAPTERS)
 
 
-def test_save_api_key_adds_and_replaces(tmp_path, monkeypatch):
-    env = tmp_path / "keys.env"
-    env.write_text("# mine\nOTHER=1\nOPENAI_API_KEY=old\n")
-    save_api_key("OPENAI_API_KEY", "new", env)
-    save_api_key("GROQ_API_KEY", "g", env)
-    assert parse_dotenv(env) == {"OTHER": "1", "OPENAI_API_KEY": "new", "GROQ_API_KEY": "g"}
-    assert env.stat().st_mode & 0o777 == 0o600
-    assert os.environ["GROQ_API_KEY"] == "g"
-    monkeypatch.delenv("OPENAI_API_KEY")
+# ---- key file ----
+
+
+def test_env_template_lists_every_provider_and_is_private(tmp_path):
+    path = write_env_template(load_catalog(), tmp_path / "keys.env")
+    text = path.read_text()
+    assert "# ANTHROPIC_API_KEY=" in text and "# OPENROUTER_API_KEY=" in text
+    assert parse_dotenv(path) == {}  # everything commented out
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_env_template_never_overwrites(tmp_path):
+    path = tmp_path / "keys.env"
+    path.write_text("OPENAI_API_KEY=mine\n")
+    write_env_template(load_catalog(), path)
+    assert path.read_text() == "OPENAI_API_KEY=mine\n"
+
+
+def test_keys_in_the_user_key_file_are_found(tmp_path, monkeypatch):
+    user_env = tmp_path / "_user" / ".config" / "tinyharness" / ".env"
+    user_env.parent.mkdir(parents=True)
+    user_env.write_text("GROQ_API_KEY=gk\n")
+    cfg = load_config(write_config(tmp_path))
+    assert cfg.provider == "groq"
     monkeypatch.delenv("GROQ_API_KEY")
 
 

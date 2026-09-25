@@ -12,6 +12,7 @@ without an argument.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -20,11 +21,9 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
-from tinyharness.cli import setup
 from tinyharness.cli.theme import MODE_HINT, MODE_LABEL, MODE_STYLE
 from tinyharness.cli.widgets import ask, pick
-from tinyharness.config import remember_model
-from tinyharness.llm.providers import fetch_models
+from tinyharness.config import forget_model, recent_models, remember_model
 from tinyharness.llm.tokens import count_message_tokens
 from tinyharness.permissions import PermissionMode
 from tinyharness.security import redact
@@ -107,6 +106,7 @@ def help_(repl: Repl, arg: str) -> None:
     repl.console.print(Text("  Shortcuts", style="brand"))
     table = _grid(width)
     for keys, what in [
+        ("tab", "accept the gray suggestion or the highlighted command"),
         ("shift+tab", "switch permission mode"),
         ("alt+enter", "new line"),
         ("↑ / ↓", "previous messages"),
@@ -133,8 +133,8 @@ def clear(repl: Repl, arg: str) -> None:
 
 @command("/context", "show how much of the context window is used", group="Session")
 def context(repl: Repl, arg: str) -> None:
-    used = count_message_tokens(repl.session.history.to_openai())
-    window = repl.session.config.context_window
+    used = count_message_tokens(repl.session.history.to_dicts())
+    window = repl.session.context_window
     fraction = min(used / window, 1.0)
     width = 30
     filled = round(fraction * width)
@@ -155,105 +155,111 @@ def cwd(repl: Repl, arg: str) -> None:
 
 
 _SEARCH = "__search__"
-_ADD_PROVIDER = "__add_provider__"
 
 
-@command("/model", "pick a model (any provider you have a key for)", group="Model", usage="[provider:]model")
+@command(
+    "/model", "pick a model from any provider you have a key for", group="Model", usage="[provider:]model"
+)
 async def model(repl: Repl, arg: str) -> None:
+    repl.session.reload_keys()
     cfg = repl.session.config
     current = f"{cfg.provider}:{cfg.model}"
-    spec = arg or await pick("Choose a model", _model_options(repl), current)
+    recent = [current, *(r for r in recent_models() if r != current and cfg.has_key(r.partition(":")[0]))]
+    spec = arg
+    if not spec:
+        options = [(r, _model_label(repl, r)) for r in recent[:8]]
+        options.append((_SEARCH, "Search all models…"))
+        spec = await pick("Choose a model", options, current) or ""
     if spec == _SEARCH:
         spec = await _search_models(repl)
-    elif spec == _ADD_PROVIDER:
-        if (provider := await setup.connect(repl.console, cfg)) is None:
-            return
-        spec = f"{provider}:"
     if spec:
-        _switch(repl, lambda: repl.session.set_model(spec))
+        await _switch(repl, spec)
 
 
-def _model_options(repl: Repl) -> list[tuple[str, str]]:
-    """Recommended models of every provider with a key, current provider first."""
-    cfg = repl.session.config
-    names = [cfg.provider, *(n for n in cfg.providers if n != cfg.provider and cfg.has_key(n))]
-    rows = [(n, m) for n in names for m in cfg.providers[n].models]
-    width = max((len(m.display) for _, m in rows), default=10)
-    pwidth = max(len(cfg.providers[n].label) for n in names)
-    options = [
-        (f"{n}:{m.id}", f"{m.display:<{width}}  {cfg.providers[n].label:<{pwidth}}  {m.note}".rstrip())
-        for n, m in rows
-    ]
-    options.append((_SEARCH, f"Search all {cfg.provider_info.label} models…"))
-    options.append((_ADD_PROVIDER, "Connect another provider…"))
-    return options
+def _model_label(repl: Repl, spec: str) -> str:
+    provider, _, model_id = spec.partition(":")
+    info = repl.session.client_for(provider).model_info(model_id)
+    name = info.label if info and info.label else model_id
+    return f"{name}  [{repl.session.config.providers[provider].label}]"
 
 
 async def _search_models(repl: Repl) -> str:
+    """Every model of every provider with a key, fetched live (cached for a day)."""
     cfg = repl.session.config
-    info = cfg.provider_info
-    try:
-        with repl.console.status(f"[muted]Fetching models from {info.label}…[/]", spinner="dots"):
-            ids = await fetch_models(info, cfg.resolve_api_key())
-    except Exception as e:  # any failure just means no suggestions
-        ids = []
-        repl.console.print(
-            f"  [warn]Couldn't list {info.label} models ({type(e).__name__}); type an id instead.[/]"
+    keyed = [name for name in cfg.providers if cfg.has_key(name)]
+    with repl.console.status("[muted]Loading model lists…[/]", spinner="dots"):
+        results = await asyncio.gather(
+            *(repl.session.client_for(name).list_models() for name in keyed), return_exceptions=True
         )
-    hint = f"type to search {len(ids)} models" if ids else "e.g. " + info.default_model
-    model_id = await ask("Model id", choices=ids, hint=hint)
-    return f"{cfg.provider}:{model_id}" if model_id else ""
+    specs: dict[str, str] = {}
+    for name, result in zip(keyed, results, strict=True):
+        label = cfg.providers[name].label
+        if isinstance(result, BaseException):
+            repl.console.print(f"  [warn]Couldn't list {label} models ({type(result).__name__}).[/]")
+            continue
+        for m in result:
+            context = f" · {m.context // 1000:,}k context" if m.context else ""
+            specs[f"{name}:{m.id}"] = f"{m.label or label}{context}"
+    hint = (
+        f"type to search {len(specs):,} models"
+        if specs
+        else "provider:model, e.g. " + f"{cfg.provider}:{cfg.model}"
+    )
+    return await ask("Model", choices=list(specs), meta=specs, hint=hint)
 
 
 @command("/provider", "pick a provider (uses its default model)", group="Model", usage="[name]")
 async def provider(repl: Repl, arg: str) -> None:
+    repl.session.reload_keys()
     cfg = repl.session.config
-    name = arg or await pick("Choose a provider", setup.provider_options(cfg), cfg.provider)
-    if not name:
-        return
-    if name in cfg.providers and not cfg.has_key(name) and not await setup.connect(repl.console, cfg, name):
-        return
-    _switch(repl, lambda: repl.session.set_provider(name))
+    name = arg or await pick("Choose a provider", _provider_options(repl), cfg.provider)
+    if name:
+        await _switch(repl, f"{name}:")
 
 
-@command("/login", "add or replace a provider's API key", group="Model", usage="[provider]")
-async def login(repl: Repl, arg: str) -> None:
+def _provider_options(repl: Repl) -> list[tuple[str, str]]:
     cfg = repl.session.config
-    if arg and arg not in cfg.providers:
-        _fail(repl, f"unknown provider {arg!r}; choose one of: {', '.join(cfg.providers)}")
-        return
-    name = await setup.connect(repl.console, cfg, arg or None)
-    if name and name != cfg.provider:
-        repl.console.print(
-            f"  [muted]Switch to it with[/] /provider {name} [muted]or pick one of its models in[/] /model"
-        )
+    width = max(len(p.label) for p in cfg.providers.values())
+    return [
+        (name, f"{p.label:<{width}}  " + ("✔ key set" if cfg.has_key(name) else f"needs {p.api_key_env}"))
+        for name, p in cfg.providers.items()
+    ]
 
 
-def _switch(repl: Repl, apply: Callable[[], None]) -> None:
+async def _switch(repl: Repl, spec: str) -> None:
+    """Check the model answers, then switch to it. `spec` is "provider:model" ("provider:" = its default)."""
+    session = repl.session
     try:
-        apply()
+        with repl.console.status("[muted]Checking the model…[/]", spinner="dots"):
+            check = await session.check_model(spec)
+        if check.model_unusable:
+            forget_model(spec)
+            _fail(repl, f"Can't use that model: {check.message}")
+            repl.console.print(f"  [muted]Still using {escape(session.model_label)}.[/]")
+            return
+        session.set_model(spec)
     except (ValueError, MissingAPIKeyError) as e:
         _fail(repl, str(e))
         return
-    cfg = repl.session.config
-    remember_model(cfg.provider, cfg.model)
+    remember_model(session.config.provider, session.config.model)
     repl.context_used = 0.0
-    window = f"{cfg.context_window // 1000:,}k context"
-    _ok(
-        repl,
-        f"Using [bold]{escape(cfg.model_info.display)}[/] [muted]via {cfg.provider_info.label} · {window}[/]",
-    )
+    window = f"{session.context_window // 1000:,}k context"
+    label = escape(session.model_label)
+    _ok(repl, f"Using [bold]{label}[/] [muted]via {session.config.provider_info.label} · {window}[/]")
+    if not check.ok:  # inconclusive (timeout, server error, ...): switched, but say so
+        repl.console.print(f"  [warn]Couldn't confirm it responds ({escape(check.message)}).[/]")
 
 
 @command("/whoami", "show provider, endpoint, model and API key source", group="Model")
 def whoami(repl: Repl, arg: str) -> None:
-    cfg = repl.session.config
+    session, cfg = repl.session, repl.session.config
     table = _grid()
     for label, value in [
         ("provider", f"{cfg.provider_info.label} ({cfg.provider})"),
-        ("endpoint", cfg.base_url),
+        ("api", f"{cfg.provider_info.api} · {session.llm.endpoint}"),
         ("model", cfg.model),
-        ("context", f"{cfg.context_window:,} tokens"),
+        ("context", f"{session.context_window:,} tokens"),
+        ("effort", cfg.effort or "model default"),
         ("key from", "api_key (config)" if cfg.api_key else f"${cfg.api_key_env}"),
         ("key", redact(cfg.resolve_api_key())),
     ]:
@@ -261,35 +267,44 @@ def whoami(repl: Repl, arg: str) -> None:
     repl.console.print(table)
 
 
-@command("/ping", "check that the API key works", group="Model")
+@command("/ping", "check that the API key and model work", group="Model")
 async def ping(repl: Repl, arg: str) -> None:
     with repl.console.status("[muted]Pinging…[/]", spinner="dots"):
-        ok, detail = await repl.session.llm.ping()
-    (_ok if ok else _fail)(repl, escape(detail) if ok else detail)
-
-
-_THINKING_PRESETS = {"off": 0, "low": 1024, "medium": 4096, "high": 16384}
-
-
-@command("/think", "set the reasoning budget", group="Model", usage="[off|low|medium|high|<tokens>]")
-async def think(repl: Repl, arg: str) -> None:
-    arg = arg.lower()
-    if not arg:
-        current = repl.session.config.thinking_budget
-        preset = next((k for k, v in _THINKING_PRESETS.items() if v == current), None)
-        options = [(k, f"{k:<7} {f'{v:,} tokens' if v else ''}") for k, v in _THINKING_PRESETS.items()]
-        arg = await pick("Reasoning budget", options, preset) or ""
-        if not arg:
-            return
-    if arg in _THINKING_PRESETS:
-        budget = _THINKING_PRESETS[arg]
-    elif arg.isdigit():
-        budget = int(arg)
+        check = await repl.session.llm.ping()
+    if check.ok:
+        _ok(repl, f"{escape(repl.session.model_label)} answered · {check.message}")
     else:
-        _fail(repl, "usage: /think off|low|medium|high|<tokens>")
+        _fail(repl, f"{check.status or 'no answer'} — {check.message}")
+
+
+_EFFORT_HELP = {
+    "default": "whatever the model does on its own",
+    "low": "quick answers, least reasoning",
+    "medium": "balanced",
+    "high": "more reasoning for harder problems",
+    "max": "the most the model offers",
+}
+
+
+@command(
+    "/effort",
+    "set how hard the model reasons",
+    group="Model",
+    usage="[default|low|medium|high|max]",
+    aliases=("/think",),
+)
+async def effort(repl: Repl, arg: str) -> None:
+    current = repl.session.config.effort or "default"
+    choice = arg.lower() or await pick(
+        "Reasoning effort", [(k, f"{k:<8} {v}") for k, v in _EFFORT_HELP.items()], current
+    )
+    if not choice:
         return
-    repl.session.set_thinking_budget(budget)
-    _ok(repl, f"Thinking {f'budget set to [bold]{budget:,}[/] tokens' if budget else 'turned off'}")
+    if choice not in _EFFORT_HELP:
+        _fail(repl, f"usage: /effort {'|'.join(_EFFORT_HELP)}")
+        return
+    repl.session.set_effort(None if choice == "default" else choice)  # type: ignore[arg-type]
+    _ok(repl, f"Reasoning effort set to [bold]{choice}[/]")
 
 
 # --------------------------------------------------------------------- permissions, tools, skills

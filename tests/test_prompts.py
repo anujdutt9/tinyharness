@@ -8,7 +8,7 @@ from tinyharness.subagents import builtin_agents
 
 # Every prompt file and the variables its caller provides.
 PROMPT_VARIABLES = {
-    "system": {"working_dir", "scratch_dir"},
+    "system": {"working_dir", "scratch_dir", "model_name", "model_id", "provider"},
     "compaction": set(),
     "classifier": set(),
 }
@@ -36,7 +36,14 @@ def test_json_braces_are_left_alone():
 
 def test_system_prompt_includes_agent_md(tmp_path):
     (tmp_path / "AGENT.md").write_text("Always use tabs.")
-    prompt = build_system_prompt(tmp_path, tmp_path / "scratch", extra="Be brief.")
+    prompt = build_system_prompt(
+        tmp_path,
+        tmp_path / "scratch",
+        model_name="Model X",
+        model_id="x-1",
+        provider="Acme",
+        extra="Be brief.",
+    )
     assert f"Working directory: {tmp_path}" in prompt
     assert "Always use tabs." in prompt
     assert prompt.endswith("Be brief.")
@@ -48,3 +55,14 @@ def test_builtin_agents_load_from_markdown():
     assert "Write" not in agents["explore"].tools
     assert agents["general-purpose"].permission_mode == "default"
     assert all(a.description and a.system_prompt for a in agents.values())
+
+
+def test_system_prompt_names_the_model(tmp_path):
+    prompt = build_system_prompt(
+        tmp_path,
+        tmp_path / "s",
+        model_name="Claude Opus 5.5",
+        model_id="claude-opus-5-5",
+        provider="Anthropic",
+    )
+    assert "Claude Opus 5.5 (model id `claude-opus-5-5`, provided by Anthropic)" in prompt

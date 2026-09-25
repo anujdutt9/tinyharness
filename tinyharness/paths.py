@@ -34,3 +34,20 @@ def search_dirs(working_dir: Path, name: str) -> list[Path]:
     Order matters: later entries take precedence when names collide.
     """
     return [home_dir() / name, project_dir(working_dir) / name]
+
+
+def pretty_path(path: Path | str, limit: int | None = None) -> str:
+    """For display: ~/code/app, or …/last/parts when longer than `limit` characters."""
+    path = Path(path)
+    try:
+        text = f"~/{path.relative_to(Path.home())}"
+    except ValueError:
+        text = str(path)
+    if limit is None or len(text) <= limit:
+        return text
+    parts = path.parts
+    for i in range(1, len(parts)):
+        short = "…/" + "/".join(parts[i:])
+        if len(short) <= limit:
+            return short
+    return "…" + text[-(limit - 1) :]

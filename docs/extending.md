@@ -107,3 +107,29 @@ A plugin bundles skills, agents and hooks into one directory you can share:
   agents/<name>.md
   hooks.toml
 ```
+
+## Providers
+
+A provider that speaks one of the four supported API formats is just config (see
+[`examples/config.toml`](../examples/config.toml)):
+
+```toml
+[providers.gateway]
+api = "chat"            # "chat" | "responses" | "anthropic" | "gemini"
+base_url = "https://llm.internal.example.com/v1"
+api_key_env = "GATEWAY_API_KEY"
+default_model = "claude-sonnet-5"
+```
+
+A new API format is a new adapter in [`tinyharness/llm/adapters/`](../tinyharness/llm/adapters):
+subclass `Adapter`, implement `payload()` (a provider-neutral `Request` to your API's
+body), `parser()` (your stream events to `StreamChunk`s) and `ping_payload()`, and
+override `parse_models()` if the model list isn't OpenAI-shaped. Register it in
+`adapters/__init__.py`. Two rules keep every model treated the same:
+
+- Never branch on model names. Per-model behavior comes only from the provider's
+  model list (`ModelInfo`), e.g. its context window or supported reasoning efforts.
+- If the API returns data it needs back next turn (signed or encrypted reasoning),
+  return it from `StreamParser.state()` and send it back unchanged when
+  `request.echo(message)` returns it. The client only hands it back to the same
+  provider and model.

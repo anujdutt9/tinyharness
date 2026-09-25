@@ -24,19 +24,21 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from tinyharness.agent.history import History, Message, ToolCall
+from tinyharness.agent.history import History, Message, ReasoningState, ToolCall
 from tinyharness.events import (
     AssistantText,
     Compacted,
     Done,
     Event,
     PermissionDecision,
+    Reasoning,
     TodosUpdated,
     ToolResult,
     ToolsDispatched,
     ToolUse,
 )
-from tinyharness.llm.client import ToolCallAccumulator
+from tinyharness.llm.client import ContextOverflowError, ToolCallAccumulator
+from tinyharness.security import mask_secrets
 from tinyharness.tools.base import Tool, ToolContext, ToolError
 
 if TYPE_CHECKING:
@@ -86,6 +88,7 @@ class _Batch:
 class _Turn:
     text: list[str] = field(default_factory=list)
     calls: ToolCallAccumulator = field(default_factory=ToolCallAccumulator)
+    state: ReasoningState | None = None
 
 
 async def run_agent_loop(prompt: str, history: History, deps: LoopDeps) -> AsyncGenerator[Event, None]:
@@ -97,21 +100,25 @@ async def run_agent_loop(prompt: str, history: History, deps: LoopDeps) -> Async
         async for event in _compact(history, deps):
             yield event
 
-        # 1. Ask the model, streaming text to the caller as it arrives.
+        # 1. Ask the model, streaming text to the caller as it arrives. If the provider
+        #    says the conversation no longer fits, summarize it and ask once more.
         available = {t.name: t for t in deps.tools.available(deps.gate.mode, deps.allowed_tools)}
         turn = _Turn()
-        async for chunk in deps.llm.stream(
-            history.to_openai(), [t.to_openai() for t in available.values()], model=deps.model
-        ):
-            if chunk.text:
-                turn.text.append(chunk.text)
-                yield AssistantText(chunk.text)
-            if chunk.tool_call_delta:
-                turn.calls.add(chunk.tool_call_delta)
+        try:
+            async for event in _ask_model(history, available, deps, turn):
+                yield event
+        except ContextOverflowError:
+            if not await deps.compactor.summarize(history):
+                raise
+            deps.transcript.write("compaction", kind="summary", reason="context overflow")
+            yield Compacted("summary")
+            turn = _Turn()
+            async for event in _ask_model(history, available, deps, turn):
+                yield event
 
         text, calls = "".join(turn.text), turn.calls.calls()
-        deps.transcript.write("assistant", text=text, tool_calls=[c.to_openai() for c in calls])
-        history.append(Message(role="assistant", content=text or None, tool_calls=calls))
+        deps.transcript.write("assistant", text=text, tool_calls=[c.to_dict() for c in calls])
+        history.append(Message(role="assistant", content=text or None, tool_calls=calls, state=turn.state))
 
         # 2. No tool calls means the model is finished.
         if not calls:
@@ -152,8 +159,10 @@ async def run_agent_loop(prompt: str, history: History, deps: LoopDeps) -> Async
         else:
             results = [await _execute(a, deps) for a in approved]
 
-        # 5. Feed results back in the order the model asked for them.
-        for item, (output, is_error) in zip(approved, results, strict=True):
+        # 5. Feed results back in the order the model asked for them, with any
+        #    credential values masked so they never enter the model's context.
+        for item, (raw_output, is_error) in zip(approved, results, strict=True):
+            output = mask_secrets(raw_output, _config_key(deps))
             await _fire_hook(
                 deps,
                 "PostToolUse",
@@ -170,6 +179,22 @@ async def run_agent_loop(prompt: str, history: History, deps: LoopDeps) -> Async
                 yield TodosUpdated(list(deps.ctx.todos))
 
     yield Done(reason="max_steps")
+
+
+async def _ask_model(
+    history: History, available: dict[str, Tool[Any]], deps: LoopDeps, turn: _Turn
+) -> AsyncGenerator[Event, None]:
+    tools = [t.spec() for t in available.values()]
+    async for chunk in deps.llm.stream(history.messages, tools, model=deps.model):
+        if chunk.reasoning:
+            yield Reasoning()
+        if chunk.text:
+            turn.text.append(chunk.text)
+            yield AssistantText(chunk.text)
+        if chunk.tool_call_delta:
+            turn.calls.add(chunk.tool_call_delta)
+        if chunk.state is not None:
+            turn.state = chunk.state
 
 
 async def _compact(history: History, deps: LoopDeps) -> AsyncGenerator[Event, None]:
@@ -247,6 +272,12 @@ async def _execute(item: _ApprovedCall, deps: LoopDeps) -> tuple[str, bool]:
 async def _fire_hook(deps: LoopDeps, event: str, payload: dict[str, Any]) -> None:
     if deps.hooks is not None:
         await deps.hooks.fire(event, payload)
+
+
+def _config_key(deps: LoopDeps) -> dict[str, str]:
+    """A key passed directly to the SDK isn't in the environment; mask it too."""
+    key = deps.ctx.config.api_key
+    return {"api_key": key} if key else {}
 
 
 def _tail(history: History, messages: int = 6, chars: int = 500) -> str:

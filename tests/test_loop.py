@@ -153,3 +153,65 @@ async def test_saying_no_with_feedback_redirects_the_agent(tmp_path):
     assert events[-1] == Done()
     assert [m.role for m in history.messages[-3:]] == ["tool", "user", "assistant"]
     assert history.messages[-2].content == "use notes.md instead"
+
+
+async def test_keys_in_tool_output_never_reach_the_model(tmp_path, monkeypatch):
+    key = "sk-ant-api03-" + "k" * 40
+    monkeypatch.setenv("ANTHROPIC_API_KEY", key)
+
+    class Leaky(Tool[ToolInput]):
+        name, description, Input, read_only = "Leaky", "prints a file", ToolInput, True
+
+        async def run(self, args, ctx):
+            return f"API_KEY = '{key}'"
+
+    events, history = await run(tmp_path, ScriptedLLM([[("Leaky", "{}")], "ok"]), [Leaky()])
+    [result] = [e for e in events if isinstance(e, ToolResult)]
+    assert result.output == "API_KEY = '[REDACTED ANTHROPIC_API_KEY]'"
+    assert key not in str(history.to_dicts())
+    assert key not in (tmp_path / ".tinyharness").joinpath("sessions", "test.jsonl").read_text()
+
+
+async def test_context_overflow_summarizes_and_retries(tmp_path):
+    from tinyharness.events import Compacted
+    from tinyharness.llm.types import ContextOverflowError
+
+    class OverflowOnce(ScriptedLLM):
+        async def stream(self, messages, tools=None, **kw):
+            if not self.requests:
+                self.requests.append(list(messages))
+                raise ContextOverflowError("prompt is too long")
+            async for chunk in super().stream(messages, tools, **kw):
+                yield chunk
+
+    llm = OverflowOnce(["answer after compaction"])
+    history = History(
+        [Message(role="system", content="test")]
+        + [Message(role=r, content=f"old {i}") for i in range(20) for r in ("user", "assistant")]
+    )
+    with Transcript(tmp_path, "test") as transcript:
+        deps = LoopDeps(
+            llm=llm,
+            tools=ToolRegistry([]),
+            gate=PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS),
+            compactor=Compactor(llm, keep_tail_messages=4),
+            transcript=transcript,
+            ctx=make_ctx(tmp_path),
+        )
+        events = [e async for e in run_agent_loop("go", history, deps)]
+    assert any(isinstance(e, Compacted) and e.kind == "summary" for e in events)
+    assert "".join(e.text for e in events if isinstance(e, AssistantText)) == "answer after compaction"
+    assert len(llm.requests[1]) < len(llm.requests[0])  # the retry sent the shorter history
+
+
+async def test_reasoning_state_is_kept_on_the_reply(tmp_path):
+    from tinyharness.agent.history import ReasoningState
+    from tinyharness.llm.types import StreamChunk
+
+    class Reasoning(ScriptedLLM):
+        async def stream(self, messages, tools=None, **kw):
+            yield StreamChunk(text="hi")
+            yield StreamChunk(state=ReasoningState("p:m", ["signed"]))
+
+    _, history = await run(tmp_path, Reasoning([]), [])
+    assert history.messages[-1].state == ReasoningState("p:m", ["signed"])

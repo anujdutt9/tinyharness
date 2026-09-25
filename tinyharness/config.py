@@ -10,6 +10,7 @@ Which model runs is decided in this order (first match wins):
 A model can be named with its provider, `provider:model` (e.g. `openai:gpt-6-sol`),
 which also switches provider. API keys never go in the config file: they are read
 from the environment, and `.env` files are loaded into it first (real env wins).
+The user's own key file is ~/.config/tinyharness/.env.
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ from typing import Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
-from tinyharness.llm.providers import ModelInfo, Provider, load_catalog
+from tinyharness.llm.providers import Provider, load_catalog
+from tinyharness.llm.types import Effort
 from tinyharness.paths import default_config_path, home_dir
 from tinyharness.permissions.modes import PermissionMode
 
@@ -47,9 +49,8 @@ class Config(BaseModel):
     model: str = ""  # "" = the provider's default; "provider:model" also picks the provider
     api_key: str = Field(default="", repr=False)  # literal key (SDK use); normally from the env
     providers: dict[str, Provider] = Field(default_factory=load_catalog)
+    effort: Effort | None = None  # reasoning effort: low | medium | high | max; None = the model's default
     request_timeout: float = 1800.0  # seconds; slow reasoning models can take minutes per turn
-    prompt_caching: bool = True
-    thinking_budget: int = Field(default=0, ge=0)
 
     # --- workspace & permissions ---
     working_dir: Path = Field(
@@ -62,7 +63,7 @@ class Config(BaseModel):
     scratch_max_age_hours: int = 24
 
     # --- context management ---
-    context_window_tokens: int | None = None  # None = the model's window from the catalog
+    context_window_tokens: int | None = None  # None = what the provider reports for the model
     auto_compact_threshold: float = Field(default=0.90, gt=0, le=1)
 
     @field_validator("working_dir", mode="after")
@@ -84,10 +85,6 @@ class Config(BaseModel):
         return self.providers[self.provider]
 
     @property
-    def model_info(self) -> ModelInfo:
-        return self.provider_info.model(self.model)
-
-    @property
     def base_url(self) -> str:
         return self.provider_info.base_url
 
@@ -103,10 +100,6 @@ class Config(BaseModel):
     def small_model(self) -> str:
         """Cheap model for background work, such as the auto-mode classifier."""
         return self.provider_info.small_model or self.model
-
-    @property
-    def context_window(self) -> int:
-        return self.context_window_tokens or self.model_info.context
 
     def resolve_api_key(self) -> str:
         return self.api_key or self.provider_info.api_key
@@ -129,10 +122,8 @@ class Config(BaseModel):
         provider, model = self.parse_model(spec)
         if provider not in self.providers:  # only possible for a bad `provider` in the config
             raise ValueError(f"unknown provider {provider!r}; choose one of: {', '.join(self.providers)}")
-        info = self.providers[provider]
         self.provider = provider
-        self.model = model or info.default_model
-        info.add_model(self.model)
+        self.model = model or self.providers[provider].default_model
 
     def use_provider(self, name: str) -> None:
         """Switch provider, using its default model."""
@@ -147,7 +138,8 @@ class Config(BaseModel):
 
 
 def parse_dotenv(path: Path) -> dict[str, str]:
-    """Minimal .env parser: KEY=value, quoted values, `export` prefix, # comments."""
+    """Minimal .env parser: KEY=value, quoted values, `export` prefix, # comments
+    (whole-line, or after an unquoted value)."""
     out: dict[str, str] = {}
     try:
         text = path.read_text(encoding="utf-8")
@@ -164,12 +156,15 @@ def parse_dotenv(path: Path) -> dict[str, str]:
         val = val.strip()
         if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
             val = val[1:-1]
+        else:
+            val = val.split(" #", 1)[0].rstrip()  # inline comment
         out[key.strip()] = val
     return out
 
 
 def load_dotenv_files(*paths: Path, override: bool = False) -> dict[str, str]:
-    """Load .env files into os.environ. Later files win; real env wins unless override."""
+    """Load .env files into os.environ. Later files win; real env wins unless override.
+    Safe to call again (e.g. after the user adds a key): existing values are kept."""
     merged: dict[str, str] = {}
     for p in paths:
         if p.exists():
@@ -186,49 +181,93 @@ def load_dotenv_files(*paths: Path, override: bool = False) -> dict[str, str]:
 
 
 def user_env_path() -> Path:
-    """Where setup saves API keys: a .env next to the config file."""
+    """The user's key file: a .env next to the config file."""
     return default_config_path().parent / ".env"
 
 
-def save_api_key(env_var: str, key: str, path: Path | None = None) -> Path:
-    """Add or replace `env_var` in a .env file (created private) and in os.environ."""
+def write_env_template(providers: dict[str, Provider], path: Path | None = None) -> Path:
+    """Create the key file with a commented-out line per provider (never overwrites)."""
     path = path or user_env_path()
+    if path.exists():
+        return path
+    lines = [
+        "# tinyharness API keys. Uncomment a line and paste your key after the `=`.",
+        "# One provider is enough. This file is only readable by you, and the agent",
+        "# can't read it. Keys set in your shell take priority over this file.",
+        "",
+    ]
+    for p in providers.values():
+        if p.key_url:
+            lines.append(f"# {p.label}: {p.key_url}")
+        lines.extend([f"# {p.api_key_env}=", ""])
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    entry = f"{env_var}={key}"
-    for i, line in enumerate(lines):
-        if line.strip().removeprefix("export ").partition("=")[0].strip() == env_var:
-            lines[i] = entry
-            break
-    else:
-        lines.append(entry)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     path.chmod(0o600)
-    os.environ[env_var] = key
     return path
+
+
+def dotenv_paths(config_path: Path | None = None, working_dir: Path | None = None) -> list[Path]:
+    """Where keys are looked for, lowest priority first (the real environment beats all)."""
+    config_path = config_path or default_config_path()
+    paths = [user_env_path(), config_path.parent / ".env", Path.cwd() / ".env"]
+    if working_dir is not None:
+        paths.append(Path(working_dir).expanduser() / ".env")
+    return list(dict.fromkeys(paths))
 
 
 def _state_path() -> Path:
     return home_dir() / "state.json"
 
 
+RECENT_MODELS = 8
+
+
 def remember_model(provider: str, model: str) -> None:
-    """Make the next session start with this model (unless the config pins one)."""
+    """Make the next session start with this model (unless the config pins one),
+    and put it first in the recently used list."""
     path = _state_path()
+    spec = f"{provider}:{model}"
     try:
         state = json.loads(path.read_text()) if path.exists() else {}
-        state["last_model"] = f"{provider}:{model}"
+        state["last_model"] = spec
+        recent = [s for s in state.get("recent_models", []) if s != spec]
+        state["recent_models"] = [spec, *recent][:RECENT_MODELS]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(state, indent=2))
     except (OSError, ValueError) as e:
         log.debug("could not save the last model: %s", e)
 
 
-def _last_model() -> str:
+def forget_model(spec: str) -> None:
+    """Drop a model from the recently used list (e.g. after it failed to respond)."""
+    path = _state_path()
+    state = _state()
+    if spec not in state.get("recent_models", []):
+        return
+    state["recent_models"] = [s for s in state["recent_models"] if s != spec]
+    if state.get("last_model") == spec:
+        state.pop("last_model")
     try:
-        return str(json.loads(_state_path().read_text()).get("last_model", ""))
+        path.write_text(json.dumps(state, indent=2))
+    except OSError as e:
+        log.debug("could not update the recent models: %s", e)
+
+
+def _state() -> dict[str, Any]:
+    try:
+        data = json.loads(_state_path().read_text())
     except (OSError, ValueError):
-        return ""
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _last_model() -> str:
+    return str(_state().get("last_model", ""))
+
+
+def recent_models() -> list[str]:
+    """Recently used models as "provider:model", most recent first."""
+    return [str(s) for s in _state().get("recent_models", [])]
 
 
 # ---------------------------------------------------------------------------
@@ -248,10 +287,7 @@ def load_config(path: Path | None = None) -> Config:
     data = _read_toml(path)
 
     working_dir = data.get("working_dir") or data.get("sandbox_root")
-    dotenv_candidates = [Path.cwd() / ".env", path.parent / ".env", user_env_path()]
-    if working_dir:
-        dotenv_candidates.append(Path(working_dir).expanduser() / ".env")
-    load_dotenv_files(*dotenv_candidates)
+    load_dotenv_files(*dotenv_paths(path, Path(working_dir) if working_dir else None))
 
     unknown = set(data) - set(Config.model_fields) - {"sandbox_root"}
     if unknown:

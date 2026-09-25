@@ -23,11 +23,14 @@ from tinyharness.agent.history import History, Message
 from tinyharness.agent.loop import LoopDeps, run_agent_loop
 from tinyharness.agent.prompts import build_system_prompt
 from tinyharness.agent.transcript import Transcript
-from tinyharness.config import Config, load_config
+from tinyharness.config import Config, dotenv_paths, load_config, load_dotenv_files, user_env_path
 from tinyharness.events import Event
 from tinyharness.hooks import Hook, HookRunner, load_hooks
-from tinyharness.llm.client import LLMClient
-from tinyharness.llm.providers import Provider
+from tinyharness.llm.client import LLMClient, Ping
+from tinyharness.llm.models import ModelDirectory
+from tinyharness.llm.providers import DEFAULT_CONTEXT, Provider
+from tinyharness.llm.types import Effort
+from tinyharness.paths import home_dir
 from tinyharness.permissions import PermissionCallback, PermissionGate, PermissionMode, PermissionRules
 from tinyharness.permissions.classifier import AutoModeClassifier
 from tinyharness.plugins import load_plugins
@@ -45,8 +48,8 @@ class MissingAPIKeyError(RuntimeError):
     def __init__(self, provider: Provider) -> None:
         self.provider = provider
         super().__init__(
-            f"No API key for {provider.label}. Set ${provider.api_key_env} "
-            "(in your shell or a .env file), or run `tinyharness` to set one up."
+            f"No API key for {provider.label}. Add {provider.api_key_env}=<your key> to "
+            f"{user_env_path()} (or export it in your shell)."
         )
 
 
@@ -59,7 +62,7 @@ class SessionOptions:
     provider: str | None = None
     model: str | None = None
     permission_mode: PermissionMode | str | None = None
-    thinking_budget: int | None = None
+    effort: Effort | None = None
     api_key: str | None = None
 
     permission_callback: PermissionCallback | None = None
@@ -84,8 +87,8 @@ class SessionOptions:
             cfg.select(self.model)
         if self.permission_mode:
             cfg.permission_mode = PermissionMode.parse(self.permission_mode)
-        if self.thinking_budget is not None:
-            cfg.thinking_budget = self.thinking_budget
+        if self.effort is not None:
+            cfg.effort = self.effort
         if self.api_key:
             cfg.api_key = self.api_key
         return cfg
@@ -139,6 +142,7 @@ class Session:
             scratch=self.scratch,
         )
 
+        self.models = ModelDirectory(home_dir() / "cache" / "models")
         self._connect_llm()
         self._started = False
         self.transcript.write("session_start", model=cfg.model, mode=self.mode, working_dir=str(root))
@@ -152,17 +156,16 @@ class Session:
         if not api_key:
             raise MissingAPIKeyError(cfg.provider_info)
         self.llm = LLMClient(
-            cfg.base_url,
+            cfg.provider_info,
             api_key,
             cfg.model,
-            extra_headers=cfg.extra_headers,
+            models=self.models,
+            effort=cfg.effort,
             timeout=cfg.request_timeout,
-            prompt_caching=cfg.prompt_caching,
-            thinking_budget=cfg.thinking_budget,
         )
         self.gate.classifier = AutoModeClassifier(self.llm, model=cfg.small_model)
         self.compactor = Compactor(
-            self.llm, context_window=cfg.context_window, threshold=cfg.auto_compact_threshold
+            self.llm, context_window=lambda: self.context_window, threshold=cfg.auto_compact_threshold
         )
 
     async def _spawn_subagent(self, spec: AgentSpec, task: str, ctx: ToolContext) -> str:
@@ -171,6 +174,18 @@ class Session:
         return await run_subagent(spec, task, ctx=ctx, llm=self.llm, tools=self.tools, gate=gate)
 
     # ------------------------------------------------------------------ settings
+
+    def reload_keys(self) -> None:
+        """Re-read the .env files, in case a key was added while the session was running."""
+        load_dotenv_files(*dotenv_paths(self.options.config_path, self.config.working_dir))
+
+    async def check_model(self, spec: str) -> Ping:
+        """Send a tiny test request to a model before switching to it ("provider:" = its default).
+        Raises ValueError / MissingAPIKeyError like set_model, without changing anything."""
+        provider, model = self.config.parse_model(spec)
+        self._require_key(provider)
+        info = self.config.providers[provider]
+        return await self.client_for(provider).ping(model or info.default_model)
 
     def set_model(self, spec: str) -> None:
         """Switch model; `provider:model` switches provider too. The conversation is kept."""
@@ -182,14 +197,33 @@ class Session:
         self._switch(lambda: self.config.use_provider(name), name)
 
     def _switch(self, apply: Callable[[], None], provider: str) -> None:
+        self._require_key(provider)
+        apply()
+        self._connect_llm()
+        # The system prompt names the model; keep it true. (A new model starts a new
+        # prompt cache anyway, so this costs nothing extra.)
+        if self.history.messages and self.history.messages[0].role == "system":
+            self.history.messages[0].content = self._system_prompt()
+
+    def _system_prompt(self) -> str:
+        return build_system_prompt(
+            self.workspace.root,
+            self.scratch.dir,
+            model_name=self.model_label,
+            model_id=self.config.model,
+            provider=self.config.provider_info.label,
+            extra=self.options.extra_system,
+        )
+
+    def _require_key(self, provider: str) -> None:
         if provider not in self.config.providers:
             raise ValueError(
                 f"unknown provider {provider!r}; choose one of: {', '.join(self.config.providers)}"
             )
         if not self.config.has_key(provider):
+            self.reload_keys()
+        if not self.config.has_key(provider):
             raise MissingAPIKeyError(self.config.providers[provider])
-        apply()
-        self._connect_llm()
 
     @property
     def mode(self) -> PermissionMode:
@@ -198,9 +232,29 @@ class Session:
     def set_mode(self, mode: PermissionMode | str) -> None:
         self.gate.mode = PermissionMode.parse(mode)
 
-    def set_thinking_budget(self, tokens: int) -> None:
-        self.config.thinking_budget = max(0, tokens)
-        self.llm.thinking_budget = self.config.thinking_budget
+    def set_effort(self, effort: Effort | None) -> None:
+        """Reasoning effort for every model: low | medium | high | max, or None for the model's default."""
+        self.config.effort = effort
+        self.llm.effort = effort
+
+    @property
+    def model_label(self) -> str:
+        """The model's display name from the provider's list, else its id."""
+        info = self.llm.model_info()
+        return info.label if info and info.label else self.config.model
+
+    @property
+    def context_window(self) -> int:
+        """The configured window, else what the provider reports for the model, else a default."""
+        info = self.llm.model_info()
+        return self.config.context_window_tokens or (
+            info.context if info and info.context else DEFAULT_CONTEXT
+        )
+
+    def client_for(self, provider: str) -> LLMClient:
+        """A client for another provider (e.g. to list its models), sharing the model cache."""
+        info = self.config.providers[provider]
+        return LLMClient(info, info.api_key, info.default_model, models=self.models)
 
     def clear(self) -> None:
         """Forget the conversation (permissions and scratch space are kept)."""
@@ -213,8 +267,7 @@ class Session:
             await self.hooks.fire("SessionStart", {"session_id": self.id})
             self._started = True
         if not self.history.messages:
-            system = build_system_prompt(self.workspace.root, self.scratch.dir, self.options.extra_system)
-            self.history.append(Message(role="system", content=system))
+            self.history.append(Message(role="system", content=self._system_prompt()))
 
         deps = LoopDeps(
             llm=self.llm,

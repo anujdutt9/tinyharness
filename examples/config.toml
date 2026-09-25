@@ -8,22 +8,24 @@
 # provider = "anthropic"
 # model = "claude-sonnet-5"            # or "openai:gpt-6-sol" to name the provider too
 
-# Add models to a built-in provider, or change its small (background) model:
+# effort = "high"                      # low | medium | high | max; default: the model's own
+
+# Models come live from each provider's model list (/model searches them). Adjust a
+# built-in provider, e.g. its small (background) model:
 # [providers.openrouter]
-# models = ["qwen/qwen3.8-max", { id = "z-ai/glm-5.3-flash", note = "tiny + cheap", context = 1310720 }]
 # small_model = "google/gemini-3.5-flash-lite"
 
-# Any OpenAI-compatible gateway (LiteLLM, Portkey, a company proxy, ...) is a provider:
+# Any gateway is a provider. `api` is its format: "chat" (OpenAI Chat Completions,
+# the default), "responses", "anthropic" or "gemini".
 # [providers.gateway]
 # label = "Company gateway"
 # base_url = "https://llm.internal.example.com/v1"
 # api_key_env = "GATEWAY_API_KEY"      # the variable's NAME; the key itself goes in .env
-# models = ["claude-sonnet-5", "gpt-6-sol"]
+# default_model = "claude-sonnet-5"
+# models = ["claude-sonnet-5", { id = "gpt-6-sol", context = 1050000 }]  # if it has no model list
 # extra_headers = { "x-team" = "platform" }
 
 # request_timeout = 1800     # seconds per model call
-# thinking_budget = 0        # reasoning tokens per turn (0 = off); /think changes it at runtime
-# prompt_caching = true
 
 # --- Workspace & permissions -------------------------------------------------
 # working_dir = "~/code/project"   # default: the directory you launch from
@@ -36,5 +38,5 @@
 # deny = ["Edit(*.lock)", "Read(*/secrets/*)"]
 
 # --- Context management ------------------------------------------------------
-# context_window_tokens = 200000  # default: the model's window from the catalog
+# context_window_tokens = 200000  # default: what the provider reports for the model
 # auto_compact_threshold = 0.90   # summarize older history above this fraction of the window
