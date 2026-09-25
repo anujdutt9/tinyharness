@@ -64,6 +64,7 @@ class SessionOptions:
     permission_mode: PermissionMode | str | None = None
     effort: Effort | None = None
     api_key: str | None = None
+    use_last_model: bool = False  # start with the model last picked in the CLI (`/model`)
 
     permission_callback: PermissionCallback | None = None
     hooks: list[Hook] = field(default_factory=list)
@@ -77,7 +78,7 @@ class SessionOptions:
     expose_skill_tool: bool = False  # let the model invoke skills itself (costs tokens every turn)
 
     def resolve_config(self) -> Config:
-        cfg = load_config(self.config_path)
+        cfg = load_config(self.config_path, use_last_model=self.use_last_model)
         if self.working_dir is not None:
             cfg.working_dir = Path(self.working_dir)
             cfg.working_dir.mkdir(parents=True, exist_ok=True)

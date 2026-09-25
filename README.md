@@ -59,15 +59,32 @@ Added `--verbose` (alias `-v`).
 | **Two interfaces** | Interactive CLI (streamed Markdown, live tool status, `/` autocomplete, pickers, mode-colored input box) and an async Python SDK, both consuming the same typed event stream |
 | **Transcripts** | Every session is logged as append-only JSONL in `.tinyharness/sessions/` |
 
-## Quick start
+## Install
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.11+. Install the command with [uv](https://docs.astral.sh/uv/) (or
+[pipx](https://pipx.pypa.io)), which keeps it in its own environment:
 
 ```bash
-git clone https://github.com/<you>/tinyharness && cd tinyharness
+uv tool install tinyharness        # or: pipx install tinyharness
+```
+
+Then run `tinyharness` from inside the project you want to work on. The first run
+without an API key shows where to get one and creates `~/.config/tinyharness/.env`
+for it; one key for any supported provider is enough. `uv tool upgrade tinyharness`
+updates it.
+
+To use the SDK in your own code, add it as a dependency:
+
+```bash
+uv add tinyharness                 # or: pip install tinyharness
+```
+
+To hack on tinyharness itself:
+
+```bash
+git clone https://github.com/anujdutt9/tinyharness && cd tinyharness
 uv sync
-cp .env.example .env        # add at least one API key
-uv run tinyharness          # run it from inside the project you want to work on
+uv run tinyharness
 ```
 
 Useful flags: `-p "prompt"` (run one prompt and exit), `--mode acceptEdits`,
@@ -109,7 +126,7 @@ asyncio.run(main())
 
 For headless runs, pass `permission_callback=` (an async function taking a `PermissionRequest`
 and returning a `Decision`) to decide what would otherwise prompt.
-See [`examples/`](examples) for a one-shot query, a multi-turn session, a custom tool,
+See [`examples/`](https://github.com/anujdutt9/tinyharness/tree/main/examples) for a one-shot query, a multi-turn session, a custom tool,
 a permission policy with hooks, and skills.
 
 ## How it works
@@ -127,17 +144,17 @@ Suggested reading order:
 
 | # | File | What you'll learn |
 |---|---|---|
-| 1 | [`agent/loop.py`](tinyharness/agent/loop.py) | The core loop: stream the model, validate calls, gate them, run them, repeat |
-| 2 | [`tools/base.py`](tinyharness/tools/base.py), [`tools/read.py`](tinyharness/tools/read.py) | How tools are defined and exposed to the model |
-| 3 | [`permissions/gate.py`](tinyharness/permissions/gate.py) | The layered permission check |
-| 4 | [`agent/compaction.py`](tinyharness/agent/compaction.py) | Staying inside the context window without breaking the prompt cache |
-| 5 | [`session.py`](tinyharness/session.py) | Wiring it all together; state that persists between prompts |
-| 6 | [`llm/adapters/`](tinyharness/llm/adapters) | One small adapter per provider API; the rest of the code never sees a provider's format |
-| 7 | [`subagents/runner.py`](tinyharness/subagents/runner.py) | Subagents are the same loop with a fresh history |
-| 8 | [`skills/skill.py`](tinyharness/skills/skill.py), [`hooks/hooks.py`](tinyharness/hooks/hooks.py) | Extensibility |
-| 9 | [`cli/`](tinyharness/cli) | Rendering events (`render.py`), the REPL, slash commands; colors live in `theme.py` |
+| 1 | [`agent/loop.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/agent/loop.py) | The core loop: stream the model, validate calls, gate them, run them, repeat |
+| 2 | [`tools/base.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/tools/base.py), [`tools/read.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/tools/read.py) | How tools are defined and exposed to the model |
+| 3 | [`permissions/gate.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/permissions/gate.py) | The layered permission check |
+| 4 | [`agent/compaction.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/agent/compaction.py) | Staying inside the context window without breaking the prompt cache |
+| 5 | [`session.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/session.py) | Wiring it all together; state that persists between prompts |
+| 6 | [`llm/adapters/`](https://github.com/anujdutt9/tinyharness/tree/main/tinyharness/llm/adapters) | One small adapter per provider API; the rest of the code never sees a provider's format |
+| 7 | [`subagents/runner.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/subagents/runner.py) | Subagents are the same loop with a fresh history |
+| 8 | [`skills/skill.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/skills/skill.py), [`hooks/hooks.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/hooks/hooks.py) | Extensibility |
+| 9 | [`cli/`](https://github.com/anujdutt9/tinyharness/tree/main/tinyharness/cli) | Rendering events (`render.py`), the REPL, slash commands; colors live in `theme.py` |
 
-All prompts sent to the model (the system prompt, the compaction summary, the safety classifier and the built-in subagents) are Markdown files in [`tinyharness/prompts/`](tinyharness/prompts). Tool descriptions stay in each tool's class, next to the input schema they describe.
+All prompts sent to the model (the system prompt, the compaction summary, the safety classifier and the built-in subagents) are Markdown files in [`tinyharness/prompts/`](https://github.com/anujdutt9/tinyharness/tree/main/tinyharness/prompts). Tool descriptions stay in each tool's class, next to the input schema they describe.
 
 ## Configuration
 
@@ -147,7 +164,7 @@ line per provider: uncomment one and add your key (or `export` it in your shell)
 Keys added while it's running are picked up by `/provider` and `/model`. After that,
 everything is optional: `/model` switches models (and remembers your choice), and
 one file, `~/.config/tinyharness/config.toml`, holds any defaults you want. See
-[`examples/config.toml`](examples/config.toml). API keys never go in the config file.
+[`examples/config.toml`](https://github.com/anujdutt9/tinyharness/blob/main/examples/config.toml). API keys never go in the config file.
 
 **Providers.** Each one is used through its own current API:
 
@@ -158,7 +175,7 @@ one file, `~/.config/tinyharness/config.toml`, holds any defaults you want. See
 | Gemini Interactions | Google Gemini |
 | OpenAI Chat Completions | OpenRouter, DeepSeek, Mistral, Groq, and custom gateways |
 
-[`llm/providers.toml`](tinyharness/llm/providers.toml) holds only how to connect to
+[`llm/providers.toml`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/llm/providers.toml) holds only how to connect to
 each one. Models are listed live from the provider (cached for a day), and whatever
 the provider reports about a model (context window, output limit, reasoning support)
 is used as-is; nothing is special-cased by model name. When a provider doesn't say
@@ -184,8 +201,8 @@ api = "chat"   # or "responses", "anthropic", "gemini"
 
 ## Extending
 
-- [docs/skills.md](docs/skills.md): writing and sharing skills
-- [docs/extending.md](docs/extending.md): custom tools, hooks, subagents and plugins
+- [docs/skills.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/skills.md): writing and sharing skills
+- [docs/extending.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/extending.md): custom tools, hooks, subagents and plugins
 
 ## Development
 
@@ -193,7 +210,13 @@ api = "chat"   # or "responses", "anthropic", "gemini"
 uv sync                   # installs dev tools too
 uv run pytest             # tests use a scripted fake LLM; no API key needed
 uv run ruff check . && uv run ruff format --check . && uv run mypy
+uv build && uv run python scripts/check_dist.py   # build and smoke-test the package
 ```
+
+Releasing: bump `__version__` in `tinyharness/__init__.py`, add a
+[CHANGELOG](https://github.com/anujdutt9/tinyharness/blob/main/CHANGELOG.md) entry, then push a
+matching tag (`git tag v0.2.0 && git push --tags`). The release workflow tests, builds
+and publishes to PyPI.
 
 ## License
 

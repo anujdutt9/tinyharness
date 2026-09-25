@@ -20,7 +20,9 @@ def home_dir() -> Path:
 
 
 def default_config_path() -> Path:
-    return Path.home() / ".config" / "tinyharness" / "config.toml"
+    """~/.config/tinyharness/config.toml, or under $XDG_CONFIG_HOME when that is set."""
+    base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+    return Path(base).expanduser() / "tinyharness" / "config.toml"
 
 
 def project_dir(working_dir: Path) -> Path:

@@ -47,7 +47,7 @@ from tinyharness.llm.tokens import count_message_tokens
 from tinyharness.paths import home_dir, pretty_path
 from tinyharness.permissions import PermissionMode
 from tinyharness.security import find_api_key
-from tinyharness.session import Session
+from tinyharness.session import MissingAPIKeyError, Session
 
 log = logging.getLogger(__name__)
 
@@ -297,7 +297,7 @@ def report_error(console: Console, error: Exception) -> None:
     body = Text(str(error) or type(error).__name__)
     if hint:
         body.append(f"\n\n{hint}", style="muted")
-    if not log.isEnabledFor(logging.DEBUG):
+    if not log.isEnabledFor(logging.DEBUG) and not isinstance(error, MissingAPIKeyError):  # setup, not a bug
         body.append("\n\nRun with --debug for the full traceback.", style="subtle")
     console.print()
     console.print(

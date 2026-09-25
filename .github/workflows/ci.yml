@@ -6,18 +6,45 @@ on:
   pull_request:
 
 jobs:
-  check:
+  lint:
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+
+  test:
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         python-version: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - run: uv sync
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run mypy
+      - run: uv sync --locked
       - run: uv run pytest
+
+  # The minimum versions in pyproject.toml are promises; test them.
+  lowest-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+      - run: uv run --resolution lowest-direct --isolated --with pytest --with pytest-asyncio pytest
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+      - run: uv run python scripts/check_dist.py

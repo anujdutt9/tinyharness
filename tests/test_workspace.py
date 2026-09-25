@@ -34,3 +34,12 @@ def test_read_roots_are_trusted(tmp_path_factory):
     assert ws.in_read_root(other / "x.md")
     assert ws.is_trusted(root / "x.md")
     assert not ws.is_trusted("/etc/passwd")
+
+
+def test_config_location_follows_xdg_config_home(tmp_path, monkeypatch):
+    from tinyharness.paths import default_config_path
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    assert default_config_path() == tmp_path / "xdg" / "tinyharness" / "config.toml"
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    assert default_config_path().parts[-3:] == (".config", "tinyharness", "config.toml")

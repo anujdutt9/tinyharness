@@ -139,11 +139,21 @@ def test_env_model_pins_active_model(tmp_path, monkeypatch):
 def test_last_picked_model_is_used_unless_config_pins_one(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     remember_model("openai", "gpt-6-luna")
-    assert load_config(write_config(tmp_path)).model == "gpt-6-luna"
-    assert load_config(write_config(tmp_path, 'model = "openai:gpt-6-sol"\n')).model == "gpt-6-sol"
-    assert load_config(write_config(tmp_path, 'provider = "openai"\n')).model == "gpt-6-luna"
+
+    def load(body: str = "") -> Config:
+        return load_config(write_config(tmp_path, body), use_last_model=True)
+
+    assert load().model == "gpt-6-luna"
+    assert load('model = "openai:gpt-6-sol"\n').model == "gpt-6-sol"
+    assert load('provider = "openai"\n').model == "gpt-6-luna"
     monkeypatch.setenv("GROQ_API_KEY", "k")
-    assert load_config(write_config(tmp_path, 'provider = "groq"\n')).provider == "groq"
+    assert load('provider = "groq"\n').provider == "groq"
+
+
+def test_sdk_ignores_the_last_picked_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    remember_model("openai", "gpt-6-luna")
+    assert load_config(write_config(tmp_path)).model != "gpt-6-luna"
 
 
 def test_last_picked_model_is_ignored_without_its_key(tmp_path):

@@ -97,6 +97,7 @@ async def run(args: argparse.Namespace, console: Console) -> None:
         permission_mode=args.mode,
         permission_callback=renderer.ask_permission,
         expose_skill_tool=args.expose_skills,
+        use_last_model=True,
     )
     session = open_session(options, console, interactive=not args.prompt and sys.stdin.isatty())
     if session is None:

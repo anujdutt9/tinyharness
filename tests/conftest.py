@@ -20,7 +20,7 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "_home"
     monkeypatch.setenv("HOME", str(tmp_path / "_user"))
     monkeypatch.setenv("TINYHARNESS_HOME", str(home))
-    for var in ("TINYHARNESS_MODEL", "TINYHARNESS_ALLOW_SECRET_READS"):
+    for var in ("TINYHARNESS_MODEL", "TINYHARNESS_ALLOW_SECRET_READS", "XDG_CONFIG_HOME"):
         monkeypatch.delenv(var, raising=False)
     for provider in load_catalog().values():
         monkeypatch.delenv(provider.api_key_env, raising=False)

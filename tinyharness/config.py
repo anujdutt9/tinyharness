@@ -4,7 +4,8 @@ Which model runs is decided in this order (first match wins):
   1. explicit overrides from the CLI (`--model`, `--provider`) or SessionOptions
   2. the TINYHARNESS_MODEL environment variable
   3. `model` in the config file
-  4. the last model picked with /model (if it's from the configured `provider`, when set)
+  4. the last model picked with /model (CLI only: `load_config(use_last_model=True)`,
+     and only if it's from the configured `provider`, when one is set)
   5. the first provider (in catalog order) whose API key is set
 
 A model can be named with its provider, `provider:model` (e.g. `openai:gpt-6-sol`),
@@ -282,7 +283,9 @@ def _read_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(f)
 
 
-def load_config(path: Path | None = None) -> Config:
+def load_config(path: Path | None = None, *, use_last_model: bool = False) -> Config:
+    """Read the config file and .env files. SDK code gets the same result every time;
+    the CLI also passes `use_last_model` to resume with the model picked last."""
     path = path or default_config_path()
     data = _read_toml(path)
 
@@ -296,7 +299,7 @@ def load_config(path: Path | None = None) -> Config:
     providers = load_catalog(data.pop("providers", None))
     if pinned := os.environ.get("TINYHARNESS_MODEL", "").strip():
         data["model"] = pinned
-    elif "model" not in data and (last := _last_model()):
+    elif use_last_model and "model" not in data and (last := _last_model()):
         name = last.partition(":")[0]
         if name in providers and providers[name].api_key and data.get("provider", name) == name:
             data["model"] = last
