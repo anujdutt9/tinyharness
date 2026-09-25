@@ -19,7 +19,7 @@ from tinyharness.session import MissingAPIKeyError, Session, SessionOptions, inv
 from tinyharness.skills import Skill, import_skills, load_skills
 from tinyharness.tools import Tool, ToolContext, ToolError, ToolInput
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "AssistantText",

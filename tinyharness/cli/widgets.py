@@ -20,25 +20,31 @@ T = TypeVar("T")
 async def pick(
     title: str, options: Sequence[tuple[T, str]], current: T | None = None, *, mark_current: bool = True
 ) -> T | None:
-    """An arrow-key picker starting on `current`. Returns None on Esc / Ctrl-C."""
+    """An arrow-key picker starting on `current`, cleared from the screen once answered.
+    Returns None on Esc / Ctrl-C."""
     keys = KeyBindings()
 
     @keys.add("escape", eager=True)
     def _cancel(event: KeyPressEvent) -> None:
         event.app.exit(result=None)
 
+    picker = ChoiceInput[T | None](
+        message=FormattedText([("bold", f" {title}")]),
+        options=[
+            (value, label + ("  · current" if mark_current and value == current else ""))
+            for value, label in options
+        ],
+        default=current if any(v == current for v, _ in options) else None,
+        style=PT_STYLE,
+        symbol=PROMPT,
+        key_bindings=keys,
+    )
+    # Clear the list once answered: the caller prints what was chosen. (ChoiceInput has
+    # no option for this, so set it on the application it builds.)
+    app = picker._create_application()
+    app.erase_when_done = True
     try:
-        return await ChoiceInput[T | None](
-            message=FormattedText([("bold", f" {title}")]),
-            options=[
-                (value, label + ("  · current" if mark_current and value == current else ""))
-                for value, label in options
-            ],
-            default=current if any(v == current for v, _ in options) else None,
-            style=PT_STYLE,
-            symbol=PROMPT,
-            key_bindings=keys,
-        ).prompt_async()
+        return await app.run_async()
     except (KeyboardInterrupt, EOFError):
         return None
 
@@ -52,12 +58,13 @@ async def ask(
     secret: bool = False,
 ) -> str:
     """One line of input. `choices` enables fuzzy autocompletion (free text still allowed);
-    `secret` hides what is typed. Returns "" when cancelled with Ctrl-C / Ctrl-D."""
+    `secret` hides what is typed. Cleared from the screen once answered.
+    Returns "" when cancelled with Ctrl-C / Ctrl-D."""
     completer = (
         FuzzyWordCompleter(list(choices), meta_dict=meta, WORD=True) if choices else None
     )  # ids contain - / . :
     try:
-        text = await PromptSession[str]().prompt_async(
+        text = await PromptSession[str](erase_when_done=True).prompt_async(
             FormattedText([(f"{BRAND} bold", f" {PROMPT} "), ("bold", question), ("", " ")]),
             completer=completer,
             complete_while_typing=bool(choices),

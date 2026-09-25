@@ -23,7 +23,7 @@ from rich.text import Text
 
 from tinyharness.cli.theme import MODE_HINT, MODE_LABEL, MODE_STYLE
 from tinyharness.cli.widgets import ask, pick
-from tinyharness.config import forget_model, recent_models, remember_model
+from tinyharness.config import RECENT_MODELS, forget_model, recent_models, remember_model
 from tinyharness.llm.tokens import count_message_tokens
 from tinyharness.permissions import PermissionMode
 from tinyharness.security import redact
@@ -74,8 +74,9 @@ def _grid(first_width: int | None = None) -> Table:
 
 
 def _ok(repl: Repl, message: str) -> None:
-    """`message` may use rich markup."""
-    repl.console.print(f"  [ok]✔[/] {message}")
+    """`message` may use rich markup. No automatic highlighting: it would color the
+    digits in names like "Qwen3.8"."""
+    repl.console.print(f"  [ok]✔[/] {message}", highlight=False)
 
 
 def _fail(repl: Repl, message: str) -> None:
@@ -167,7 +168,7 @@ async def model(repl: Repl, arg: str) -> None:
     recent = [current, *(r for r in recent_models() if r != current and cfg.has_key(r.partition(":")[0]))]
     spec = arg
     if not spec:
-        options = [(r, _model_label(repl, r)) for r in recent[:8]]
+        options = [(r, _model_label(repl, r)) for r in recent[:RECENT_MODELS]]
         options.append((_SEARCH, "Search all models…"))
         spec = await pick("Choose a model", options, current) or ""
     if spec == _SEARCH:

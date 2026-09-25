@@ -97,6 +97,12 @@ PT_STYLE = Style.from_dict(
         "completion-menu.completion.current": f"bg:{BRAND} #111111 bold",
         "completion-menu.meta.completion": "bg:#1f2130 #8b8fa3",
         "completion-menu.meta.completion.current": f"bg:{BRAND} #111111",
+        # While typing a search: the rest of each name stays readable (prompt_toolkit's
+        # default is a near-invisible #444444) and the typed letters stand out.
+        "completion-menu.completion fuzzymatch.outside": "#c9cbd6",
+        "completion-menu.completion fuzzymatch.inside": f"{BRAND_2} bold",
+        "completion-menu.completion.current fuzzymatch.outside": "#111111",
+        "completion-menu.completion.current fuzzymatch.inside": "#111111 bold",
         # The approval prompt (ChoiceInput).
         "selected-option": f"{BRAND} bold",
         "number": SUBTLE,

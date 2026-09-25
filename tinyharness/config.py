@@ -246,7 +246,7 @@ def _state_path() -> Path:
     return home_dir() / "state.json"
 
 
-RECENT_MODELS = 8
+RECENT_MODELS = 5
 
 
 def remember_model(provider: str, model: str) -> None:
