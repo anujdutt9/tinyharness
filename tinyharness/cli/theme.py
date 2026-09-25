@@ -130,6 +130,18 @@ def _rgb(color: str) -> tuple[int, int, int]:
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
+def percent(fraction: float) -> str:
+    """A context-use percentage that never looks stuck at 0% on a huge window:
+    "0%", "<0.1%", "0.5%", "3.2%", "45%"."""
+    if fraction <= 0:
+        return "0%"
+    if fraction < 0.001:
+        return "<0.1%"
+    if fraction < 0.1:
+        return f"{fraction:.1%}"
+    return f"{fraction:.0%}"
+
+
 def split_summary(summary: str) -> tuple[str, str]:
     """ "Edit(src/app.py, -1/+4 lines)" -> ("Edit", "src/app.py, -1/+4 lines")."""
     name, paren, rest = summary.partition("(")

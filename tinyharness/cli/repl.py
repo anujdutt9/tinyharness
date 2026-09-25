@@ -38,7 +38,7 @@ from rich.text import Text
 
 from tinyharness.cli.commands import COMMANDS
 from tinyharness.cli.render import Renderer
-from tinyharness.cli.theme import MODE_LABEL, MODE_STYLE, PROMPT, PT_STYLE, SUBTLE
+from tinyharness.cli.theme import MODE_LABEL, MODE_STYLE, PROMPT, PT_STYLE, SUBTLE, percent
 from tinyharness.cli.widgets import pick
 from tinyharness.config import user_env_path
 from tinyharness.events import Event
@@ -124,7 +124,7 @@ class Repl:
             ("class:toolbar.dim", " to switch"),
         ]
         effort = self.session.config.effort or "default"
-        right_text = f"{self.session.model_label} · {effort} effort · {self.context_used:.0%} context  "
+        right_text = f"{self.session.model_label} · {effort} effort · {percent(self.context_used)} context  "
         width = get_app().output.get_size().columns
         used = sum(len(t) for _, t, *_ in left)
         gap = max(width - used - len(right_text), 2)

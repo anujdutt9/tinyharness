@@ -103,3 +103,18 @@ async def test_summary_keeps_system_prompt_and_starts_tail_at_user():
 async def test_summary_noop_when_nothing_to_cut():
     h = history(user("only message"))
     assert not await compactor(keep_tail_messages=4).summarize(h)
+
+
+async def test_summary_can_keep_just_the_latest_exchange():
+    h = history(
+        Message(role="system", content="you are a coding agent"),
+        user("first"),
+        assistant("one"),
+        user("second"),
+        assistant("", "tc1"),
+        tool("tc1", "file content"),
+        assistant("two"),
+    )
+    assert await compactor(keep_tail_messages=12).summarize(h, keep_tail=1)
+    assert [m.content for m in h.messages[2:]] == ["second", None, "file content", "two"]
+    assert h.messages[1].content.startswith(SUMMARY_MARK)

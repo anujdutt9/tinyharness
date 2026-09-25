@@ -75,3 +75,20 @@ def test_spinner_says_thinking_only_when_the_model_reasons():
     plain.wait(WAITING)
     plain.handle(AssistantText("hello"))
     assert plain._activity is None  # text arrived; never claimed to be thinking
+
+
+@pytest.mark.parametrize(
+    ("fraction", "shown"),
+    [
+        (0, "0%"),
+        (0.0004, "<0.1%"),
+        (4_839 / 1_048_576, "0.5%"),
+        (0.032, "3.2%"),
+        (0.45, "45%"),
+        (1.0, "100%"),
+    ],
+)
+def test_context_percent_never_looks_stuck_at_zero(fraction, shown):
+    from tinyharness.cli.theme import percent
+
+    assert percent(fraction) == shown

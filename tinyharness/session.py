@@ -29,6 +29,7 @@ from tinyharness.hooks import Hook, HookRunner, load_hooks
 from tinyharness.llm.client import LLMClient, Ping
 from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.providers import DEFAULT_CONTEXT, Provider
+from tinyharness.llm.tokens import count_message_tokens
 from tinyharness.llm.types import Effort
 from tinyharness.paths import home_dir
 from tinyharness.permissions import PermissionCallback, PermissionGate, PermissionMode, PermissionRules
@@ -256,6 +257,23 @@ class Session:
         """A client for another provider (e.g. to list its models), sharing the model cache."""
         info = self.config.providers[provider]
         return LLMClient(info, info.api_key, info.default_model, models=self.models)
+
+    async def compact(self) -> bool:
+        """Summarize the conversation now, keeping only the latest exchange as is (the
+        automatic version runs when the context nears full). False if there was nothing to do,
+        including when a short conversation's summary would be longer than the conversation."""
+        self.compactor.budget_cap(self.history)
+        self.compactor.microcompact(self.history)
+        before = list(self.history.messages)
+        if not await self.compactor.summarize(self.history, keep_tail=1):
+            return False
+        if count_message_tokens(self.history.to_dicts()) >= count_message_tokens(
+            [m.to_dict() for m in before]
+        ):
+            self.history.messages = before  # the summary didn't save anything: keep the original
+            return False
+        self.transcript.write("compacted", kind="manual")
+        return True
 
     def clear(self) -> None:
         """Forget the conversation (permissions and scratch space are kept)."""

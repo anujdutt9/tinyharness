@@ -92,8 +92,9 @@ class Compactor:
         total = sum(count_tokens(m.content or "") for m in history.messages)
         return total >= self.context_window * self.threshold
 
-    async def summarize(self, history: History) -> bool:
+    async def summarize(self, history: History, *, keep_tail: int | None = None) -> bool:
         """Replace everything before the recent tail with an LLM-written summary.
+        `keep_tail` overrides how many recent messages stay (at least, back to a user message).
 
         The tail always starts at a user message, so an assistant tool call is
         never separated from its tool result (providers reject orphaned pairs).
@@ -105,7 +106,7 @@ class Compactor:
         ]
         body = messages[len(system) :]
 
-        cut = max(0, len(body) - self.keep_tail)
+        cut = max(0, len(body) - (self.keep_tail if keep_tail is None else keep_tail))
         while cut > 0 and body[cut].role != "user":
             cut -= 1
         if cut == 0:

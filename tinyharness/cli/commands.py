@@ -21,7 +21,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
-from tinyharness.cli.theme import MODE_HINT, MODE_LABEL, MODE_STYLE
+from tinyharness.cli.theme import MODE_HINT, MODE_LABEL, MODE_STYLE, percent
 from tinyharness.cli.widgets import ask, pick
 from tinyharness.config import RECENT_MODELS, forget_model, recent_models, remember_model
 from tinyharness.llm.tokens import count_message_tokens
@@ -141,10 +141,31 @@ def context(repl: Repl, arg: str) -> None:
     filled = round(fraction * width)
     color = "ok" if fraction < 0.6 else "warn" if fraction < 0.85 else "err"
     bar = Text("  ").append("█" * filled, style=color).append("░" * (width - filled), style="subtle")
-    bar.append(f"  {fraction:.0%}", style="bold")
+    bar.append(f"  {percent(fraction)}", style="bold")
     repl.console.print(bar)
     n = len(repl.session.history.messages)
     repl.console.print(f"  [muted]{used:,} of {window:,} tokens · {n} messages[/]")
+
+
+@command("/compact", "summarize the conversation so far to free up context", group="Session")
+async def compact(repl: Repl, arg: str) -> None:
+    session = repl.session
+    before = count_message_tokens(session.history.to_dicts())
+    try:
+        with repl.console.status("[muted]Summarizing the conversation…[/]", spinner="dots"):
+            done = await session.compact()
+    except Exception as e:  # e.g. the model is rate-limited; the conversation is untouched
+        _fail(repl, f"Couldn't compact: {e}")
+        return
+    if not done:
+        repl.console.print("  [muted]Nothing to compact yet: the conversation is already short.[/]")
+        return
+    after = count_message_tokens(session.history.to_dicts())
+    repl._measure_context()
+    _ok(
+        repl,
+        f"Compacted: {before:,} → {after:,} tokens [muted]· now {percent(repl.context_used)} of context[/]",
+    )
 
 
 @command("/cwd", "show the working directory", group="Session")
@@ -243,7 +264,7 @@ async def _switch(repl: Repl, spec: str) -> None:
         _fail(repl, str(e))
         return
     remember_model(session.config.provider, session.config.model)
-    repl.context_used = 0.0
+    repl._measure_context()  # the same conversation, measured against the new model's window
     window = f"{session.context_window // 1000:,}k context"
     label = escape(session.model_label)
     _ok(repl, f"Using [bold]{label}[/] [muted]via {session.config.provider_info.label} · {window}[/]")

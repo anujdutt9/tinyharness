@@ -1,7 +1,10 @@
+import io
+
 import pytest
 
 from tinyharness import MissingAPIKeyError, Session, SessionOptions
 from tinyharness.agent.history import Message
+from tinyharness.llm.tokens import count_message_tokens
 
 
 @pytest.fixture(autouse=True)
@@ -107,3 +110,59 @@ async def test_the_system_prompt_follows_a_model_switch(session):
     assert f"`{session.config.model}`" in session.history.messages[0].content
     session.set_model("gpt-6-luna")
     assert "`gpt-6-luna`" in session.history.messages[0].content
+
+
+async def test_compact_summarizes_all_but_the_latest_exchange(session, monkeypatch):
+    from tinyharness.agent.compaction import SUMMARY_MARK
+    from tinyharness.agent.history import Message
+
+    async def fake_one_shot(self, prompt, **kwargs):
+        return "they asked for a game"
+
+    monkeypatch.setattr(type(session.llm), "one_shot", fake_one_shot)
+    assert not await session.compact()  # empty: nothing to do
+    for text in ("make a game", "ok", "add an AI", "done", "thanks"):
+        session.history.messages.append(
+            Message(role="user" if text != "ok" and text != "done" else "assistant", content=text)
+        )
+    assert await session.compact()
+    assert session.history.messages[0].content == f"{SUMMARY_MARK}\nthey asked for a game"
+    assert [m.content for m in session.history.messages[1:]] == ["thanks"]
+
+
+async def test_compact_keeps_the_original_when_the_summary_is_longer(session, monkeypatch):
+    from tinyharness.agent.history import Message
+
+    async def wordy(self, prompt, **kwargs):
+        return "a very long summary " * 50
+
+    monkeypatch.setattr(type(session.llm), "one_shot", wordy)
+    original = [Message(role="user", content="hello world"), Message(role="assistant", content="Hi!")]
+    original.append(Message(role="user", content="what model are you?"))
+    session.history.messages = list(original)
+    assert not await session.compact()
+    assert session.history.messages == original
+
+
+async def test_switching_models_keeps_the_context_reading(session, monkeypatch):
+    """The footer shows the same conversation against the new model's window, not 0%."""
+    from rich.console import Console
+
+    from tinyharness.agent.history import Message
+    from tinyharness.cli.commands import _switch
+    from tinyharness.cli.render import Renderer
+    from tinyharness.cli.repl import Repl
+    from tinyharness.llm.client import Ping
+
+    async def answers(spec):
+        return Ping(ok=True, status=200, message="auth ok")
+
+    monkeypatch.setattr(session, "check_model", answers)
+    session.history.messages = [Message(role="user", content="word " * 5_000)]
+    console = Console(file=io.StringIO())
+    repl = Repl(session, console, Renderer(console))
+    await _switch(repl, "openai:some-model")
+    assert repl.context_used > 0
+    assert repl.context_used == pytest.approx(
+        count_message_tokens(session.history.to_dicts()) / session.context_window
+    )
