@@ -1,0 +1,122 @@
+# Built-in providers. Every one speaks OpenAI-compatible Chat Completions.
+#
+# Order matters: with no `provider` in your config, tinyharness picks the first one
+# whose API key is set. The model lists are a curated starting point, not a limit:
+# /model can search everything a provider serves, and your config can add more.
+# (Model lists last checked September 2026.)
+#
+# Fields:
+#   label          display name
+#   base_url       OpenAI-compatible endpoint
+#   api_key_env    environment variable holding the key
+#   key_url        where to create a key (shown during setup)
+#   default_model  used when you haven't picked one
+#   small_model    cheap, fast model for background work (the auto-mode classifier)
+#   models         { id, label, note, context } — context is the window in tokens
+
+[anthropic]
+label = "Anthropic"
+base_url = "https://api.anthropic.com/v1"
+api_key_env = "ANTHROPIC_API_KEY"
+key_url = "https://console.anthropic.com/settings/keys"
+default_model = "claude-sonnet-5"
+small_model = "claude-haiku-4-5"
+extra_headers = { "anthropic-version" = "2023-06-01" }
+models = [
+  { id = "claude-sonnet-5", label = "Claude Sonnet 5", note = "best balance for coding", context = 1_000_000 },
+  { id = "claude-opus-5-5", label = "Claude Opus 5.5", note = "most capable Opus", context = 1_000_000 },
+  { id = "claude-fable-5-1", label = "Claude Fable 5.1", note = "frontier, long autonomous work", context = 1_000_000 },
+  { id = "claude-haiku-4-5", label = "Claude Haiku 4.5", note = "fastest, cheapest", context = 200_000 },
+]
+
+[openai]
+label = "OpenAI"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+key_url = "https://platform.openai.com/api-keys"
+default_model = "gpt-6-sol"
+small_model = "gpt-6-luna"
+models = [
+  { id = "gpt-6-sol", label = "GPT-6 Sol", note = "high-end, cost-efficient", context = 1_050_000 },
+  { id = "gpt-6-astra", label = "GPT-6 Astra", note = "flagship", context = 1_050_000 },
+  { id = "gpt-6-luna", label = "GPT-6 Luna", note = "fast, cheap", context = 1_050_000 },
+]
+
+[openrouter]
+label = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+key_url = "https://openrouter.ai/settings/keys"
+default_model = "anthropic/claude-sonnet-5"
+small_model = "anthropic/claude-haiku-4.5"
+models = [
+  { id = "anthropic/claude-sonnet-5", label = "Claude Sonnet 5", note = "best balance for coding", context = 1_000_000 },
+  { id = "anthropic/claude-opus-5.5", label = "Claude Opus 5.5", note = "most capable Opus", context = 1_000_000 },
+  { id = "openai/gpt-6-sol", label = "GPT-6 Sol", note = "OpenAI, high-end", context = 1_050_000 },
+  { id = "google/gemini-3.8-flash", label = "Gemini 3.8 Flash", note = "Google, fast", context = 1_048_576 },
+  { id = "x-ai/grok-4.7", label = "Grok 4.7", note = "xAI flagship", context = 500_000 },
+  { id = "moonshotai/kimi-k3", label = "Kimi K3", note = "open weights", context = 1_048_576 },
+  { id = "z-ai/glm-5.3", label = "GLM-5.3", note = "open weights", context = 1_310_720 },
+  { id = "deepseek/deepseek-v4.1-flash", label = "DeepSeek V4.1 Flash", note = "very cheap", context = 1_048_576 },
+]
+
+[gemini]
+label = "Google Gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+api_key_env = "GEMINI_API_KEY"
+key_url = "https://aistudio.google.com/apikey"
+default_model = "gemini-3.8-flash"
+small_model = "gemini-3.5-flash-lite"
+models = [
+  { id = "gemini-3.8-flash", label = "Gemini 3.8 Flash", note = "fast, strong at coding", context = 1_048_576 },
+  { id = "gemini-3.1-pro-preview", label = "Gemini 3.1 Pro (preview)", note = "deeper reasoning", context = 1_048_576 },
+  { id = "gemini-3.5-flash-lite", label = "Gemini 3.5 Flash Lite", note = "cheapest", context = 1_048_576 },
+]
+
+[xai]
+label = "xAI"
+base_url = "https://api.x.ai/v1"
+api_key_env = "XAI_API_KEY"
+key_url = "https://console.x.ai"
+default_model = "grok-4.7"
+small_model = "grok-4.7"
+models = [
+  { id = "grok-4.7", label = "Grok 4.7", note = "flagship", context = 500_000 },
+]
+
+[deepseek]
+label = "DeepSeek"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+key_url = "https://platform.deepseek.com/api_keys"
+default_model = "deepseek-chat"
+small_model = "deepseek-chat"
+models = [
+  { id = "deepseek-chat", label = "DeepSeek Chat", note = "latest chat model", context = 128_000 },
+  { id = "deepseek-reasoner", label = "DeepSeek Reasoner", note = "thinks before answering", context = 128_000 },
+]
+
+[mistral]
+label = "Mistral"
+base_url = "https://api.mistral.ai/v1"
+api_key_env = "MISTRAL_API_KEY"
+key_url = "https://console.mistral.ai/api-keys"
+default_model = "mistral-medium-latest"
+small_model = "mistral-small-latest"
+models = [
+  { id = "mistral-medium-latest", label = "Mistral Medium", note = "balanced", context = 262_144 },
+  { id = "devstral-latest", label = "Devstral", note = "built for coding agents", context = 262_144 },
+  { id = "mistral-small-latest", label = "Mistral Small", note = "fast, cheap", context = 262_144 },
+]
+
+[groq]
+label = "Groq"
+base_url = "https://api.groq.com/openai/v1"
+api_key_env = "GROQ_API_KEY"
+key_url = "https://console.groq.com/keys"
+default_model = "openai/gpt-oss-120b"
+small_model = "llama-3.1-8b-instant"
+models = [
+  { id = "openai/gpt-oss-120b", label = "gpt-oss 120B", note = "very fast inference", context = 131_072 },
+  { id = "llama-3.3-70b-versatile", label = "Llama 3.3 70B", note = "very fast inference", context = 131_072 },
+]

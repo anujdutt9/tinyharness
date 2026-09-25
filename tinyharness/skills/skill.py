@@ -1,0 +1,90 @@
+"""Skills: reusable instructions packaged as `<name>/SKILL.md` (+ optional assets).
+
+Only a skill's name and description are loaded at startup. The body enters the
+model's context when the skill is invoked, and bundled reference files are read
+lazily, step by step. This is "progressive disclosure".
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from tinyharness.frontmatter import read_frontmatter_file
+from tinyharness.paths import search_dirs
+
+
+@dataclass
+class Skill:
+    name: str
+    description: str
+    body: str
+    allowed_tools: list[str] = field(default_factory=list)
+    model: str | None = None
+    source: Path | None = None  # path to SKILL.md
+
+    @property
+    def directory(self) -> Path | None:
+        return self.source.parent if self.source else None
+
+
+def parse_skill_md(path: Path) -> Skill | None:
+    parsed = read_frontmatter_file(path)
+    if parsed is None:
+        return None
+    meta, body = parsed
+    return Skill(
+        name=str(meta.get("name") or path.parent.name),
+        description=str(meta.get("description") or ""),
+        body=body,
+        allowed_tools=list(meta.get("allowed-tools") or meta.get("allowed_tools") or []),
+        model=meta.get("model"),
+        source=path,
+    )
+
+
+def scan_skills(root: Path) -> list[Skill]:
+    """All `<root>/*/SKILL.md` files that parse."""
+    if not root.is_dir():
+        return []
+    return [s for p in sorted(root.glob("*/SKILL.md")) if (s := parse_skill_md(p))]
+
+
+def load_skills(working_dir: Path) -> list[Skill]:
+    """Skills from ~/.tinyharness/skills and <working-dir>/.tinyharness/skills. The user-global
+    copy wins on a name clash, so a project can't shadow a trusted skill."""
+    seen: dict[str, Skill] = {}
+    for directory in search_dirs(working_dir, "skills"):
+        for skill in scan_skills(directory):
+            seen.setdefault(skill.name, skill)
+    return list(seen.values())
+
+
+class SkillRegistry:
+    def __init__(self, skills: list[Skill] | None = None) -> None:
+        self._skills: dict[str, Skill] = {s.name: s for s in skills or []}
+
+    def add(self, skill: Skill) -> None:
+        self._skills[skill.name] = skill
+
+    def get(self, name: str) -> Skill | None:
+        return self._skills.get(name)
+
+    def list(self) -> list[Skill]:
+        return list(self._skills.values())
+
+    def __len__(self) -> int:
+        return len(self._skills)
+
+
+def build_skill_prompt(skill: Skill, args: str = "") -> str:
+    """The instruction sent to the model when a skill is invoked."""
+    parts = [f"# Skill: {skill.name}\n{skill.description}\n\nFollow these instructions:\n\n{skill.body}"]
+    if skill.directory is not None:
+        parts.append(
+            f"(Bundled files for this skill live in `{skill.directory}`. Read each one only "
+            "when the current step needs it; do not pre-load them all.)"
+        )
+    if args:
+        parts.append(f"User arguments: {args}")
+    return "\n\n".join(parts)

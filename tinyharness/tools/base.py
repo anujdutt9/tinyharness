@@ -1,0 +1,115 @@
+"""The Tool abstraction.
+
+A tool is a class with:
+  * `name` / `description` — what the model sees
+  * `Input`                — a pydantic model; its JSON schema is sent to the model
+                             and incoming arguments are validated against it
+  * `run(args, ctx)`       — does the work and returns text for the model
+
+Two flags tell the harness how to treat it:
+  * `read_only`        — no side effects: allowed in plan mode, safe to run in parallel
+  * `needs_permission` — False for bookkeeping tools (e.g. TodoWrite) that skip the gate
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
+
+from pydantic import BaseModel, ConfigDict
+
+if TYPE_CHECKING:
+    from tinyharness.config import Config
+    from tinyharness.workspace import Scratch, Workspace
+
+
+class ToolError(Exception):
+    """A tool failed in a way the model should see and can recover from."""
+
+
+class ToolInput(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+
+InputT = TypeVar("InputT", bound=ToolInput)
+
+
+@dataclass
+class ToolContext:
+    """Per-session state shared by all tool calls."""
+
+    workspace: Workspace
+    config: Config
+    scratch: Scratch | None = None
+    read_paths: set[str] = field(default_factory=set)  # enforces read-before-write
+    todos: list[dict[str, str]] = field(default_factory=list)
+
+
+class Tool(ABC, Generic[InputT]):
+    name: ClassVar[str]
+    description: str
+    Input: type[InputT]
+    read_only: ClassVar[bool] = False
+    needs_permission: ClassVar[bool] = True
+
+    @abstractmethod
+    async def run(self, args: InputT, ctx: ToolContext) -> str: ...
+
+    def describe(self, args: InputT) -> str:
+        """One-line label shown to the user, e.g. `Read(src/main.py)`."""
+        path = self.target_path(args)
+        return f"{self.name}({path})" if path else f"{self.name}()"
+
+    def target_path(self, args: InputT) -> str | None:
+        """The filesystem path this call touches, used for permission decisions."""
+        path = getattr(args, "path", None)
+        return str(path) if path else None
+
+    def parse(self, raw: dict[str, Any]) -> InputT:
+        return self.Input.model_validate(raw)
+
+    def input_schema(self) -> dict[str, Any]:
+        schema = self.Input.model_json_schema()
+        defs = schema.pop("$defs", {})
+        return _strip_titles(_inline_refs(schema, defs))
+
+    def to_openai(self) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema(),
+            },
+        }
+
+
+def _inline_refs(schema: Any, defs: dict[str, Any]) -> Any:
+    """Replace `{"$ref": "#/$defs/X"}` with X itself; not every provider resolves $ref."""
+    if isinstance(schema, list):
+        return [_inline_refs(v, defs) for v in schema]
+    if not isinstance(schema, dict):
+        return schema
+    ref = schema.get("$ref", "")
+    if ref.startswith("#/$defs/"):
+        return _inline_refs(defs[ref.removeprefix("#/$defs/")], defs)
+    return {k: _inline_refs(v, defs) for k, v in schema.items()}
+
+
+def _strip_titles(schema: Any) -> Any:
+    """Pydantic adds a `title` to every node; it costs tokens and tells the model nothing."""
+    if isinstance(schema, list):
+        return [_strip_titles(v) for v in schema]
+    if not isinstance(schema, dict):
+        return schema
+    out: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "title" and isinstance(value, str):
+            continue
+        if key == "properties" and isinstance(value, dict):
+            # Keys here are field names — a field may legitimately be called "title".
+            out[key] = {name: _strip_titles(prop) for name, prop in value.items()}
+        else:
+            out[key] = _strip_titles(value)
+    return out

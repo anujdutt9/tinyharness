@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Any
+
+from tinyharness.permissions.modes import PermissionMode
+from tinyharness.tools.base import Tool
+from tinyharness.tools.edit import EditTool
+from tinyharness.tools.glob import GlobTool
+from tinyharness.tools.grep import GrepTool
+from tinyharness.tools.pdf import PdfTool
+from tinyharness.tools.read import ReadTool
+from tinyharness.tools.todo import TodoWriteTool
+from tinyharness.tools.write import WriteTool
+
+AnyTool = Tool[Any]
+
+
+class ToolRegistry:
+    """The set of tools a session can offer to the model."""
+
+    def __init__(self, tools: Iterable[AnyTool] = ()) -> None:
+        self._tools: dict[str, AnyTool] = {}
+        for tool in tools:
+            self.register(tool)
+
+    def register(self, tool: AnyTool) -> None:
+        self._tools[tool.name] = tool
+
+    def get(self, name: str) -> AnyTool | None:
+        return self._tools.get(name)
+
+    def names(self) -> list[str]:
+        return list(self._tools)
+
+    def available(self, mode: PermissionMode, allowed: set[str] | None = None) -> list[AnyTool]:
+        """Tools to offer the model: filtered by an allow-list and, in plan mode, to read-only tools."""
+        return [
+            tool
+            for name, tool in self._tools.items()
+            if (allowed is None or name in allowed) and (mode != PermissionMode.PLAN or tool.read_only)
+        ]
+
+
+def default_tools() -> list[AnyTool]:
+    return [ReadTool(), WriteTool(), EditTool(), PdfTool(), GlobTool(), GrepTool(), TodoWriteTool()]
+
+
+def default_registry() -> ToolRegistry:
+    return ToolRegistry(default_tools())

@@ -1,0 +1,109 @@
+# Extending tinyharness
+
+There are five extension points: tools, hooks, subagents, plugins and skills
+(see [skills.md](skills.md)). User-global extensions live in `~/.tinyharness/`.
+Project ones live in `<project>/.tinyharness/`.
+
+## Tools
+
+A tool has three parts: a pydantic model for its arguments, a description for the
+model, and an async `run`. The argument model is turned into the JSON schema sent to
+the LLM, and incoming arguments are checked against it before `run` is called.
+
+```python
+from pydantic import Field
+from tinyharness import Tool, ToolContext, ToolError, ToolInput
+
+
+class WordCountInput(ToolInput):
+    path: str = Field(description="File to count")
+
+
+class WordCount(Tool[WordCountInput]):
+    name = "WordCount"
+    description = "Count the words in a text file."
+    Input = WordCountInput
+    read_only = True  # allowed in plan mode; may run in parallel with other reads
+
+    async def run(self, args: WordCountInput, ctx: ToolContext) -> str:
+        path = ctx.workspace.resolve(args.path)
+        if path is None or not path.is_file():
+            raise ToolError(f"not a file: {args.path}")  # the model sees this and can recover
+        return f"{len(path.read_text().split())} words"
+
+
+session.tools.register(WordCount())
+```
+
+| Attribute | Effect |
+|---|---|
+| `read_only = True` | shown in plan mode; batches of read-only calls run concurrently |
+| `needs_permission = False` | skips the permission gate (only for tools with no side effects) |
+| `target_path(args)` | the path the gate checks; defaults to `args.path` |
+| `describe(args)` | the one-line label shown to the user |
+
+## Hooks
+
+Hooks run at lifecycle events. A `PreToolUse` hook can allow or deny a tool call,
+and it runs before the permission mode is applied.
+
+| Event | Payload |
+|---|---|
+| `SessionStart` | `session_id` |
+| `UserPromptSubmit` | `prompt` |
+| `PreToolUse` | `tool`, `args` |
+| `PostToolUse` | `tool`, `args`, `result` |
+| `Stop` | — |
+
+**Shell hooks** go in `hooks.toml`. The payload arrives as JSON on stdin. Print
+`{"decision": "deny", "reason": "..."}` to block the call. A non-zero exit code also
+blocks it. Hook processes never see environment variables that look like credentials.
+
+```toml
+[[hook]]
+event = "PreToolUse"
+matcher = { tool = "Write" }
+command = "./scripts/no-generated-files.sh"
+```
+
+**Python hooks** are passed through the SDK:
+
+```python
+def guard(event, payload):
+    if payload["tool"] == "Write" and payload["args"]["path"].endswith(".lock"):
+        return {"decision": "deny", "reason": "lockfiles are generated"}
+
+
+SessionOptions(hooks=[Hook(event="PreToolUse", type="python", callable=guard)])
+```
+
+## Subagents
+
+The `Agent` tool runs a task in a fresh context and returns only the final answer.
+It comes with three built-in agents: `explore` and `plan` (read-only) and
+`general-purpose`. To add your own, put a Markdown file in `agents/`:
+
+```markdown
+---
+name: reviewer
+description: Reviews a change for bugs and missing tests.
+tools: [Read, Grep, Glob]
+permission_mode: acceptEdits
+---
+You are a meticulous reviewer. Report concrete bugs with file:line references.
+```
+
+Subagents have their own permission rules and can't start further subagents.
+Their transcripts go to `.tinyharness/sidechains/`.
+
+## Plugins
+
+A plugin bundles skills, agents and hooks into one directory you can share:
+
+```
+~/.tinyharness/plugins/my-kit/
+  plugin.toml          name = "my-kit"
+  skills/<name>/SKILL.md
+  agents/<name>.md
+  hooks.toml
+```
