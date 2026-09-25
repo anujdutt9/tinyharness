@@ -44,10 +44,15 @@ async def pick(
 
 
 async def ask(
-    question: str, *, choices: Sequence[str] = (), meta: dict[str, str] | None = None, hint: str = ""
+    question: str,
+    *,
+    choices: Sequence[str] = (),
+    meta: dict[str, str] | None = None,
+    hint: str = "",
+    secret: bool = False,
 ) -> str:
-    """One line of input. `choices` enables fuzzy autocompletion (free text still allowed).
-    Returns "" when cancelled with Ctrl-C / Ctrl-D."""
+    """One line of input. `choices` enables fuzzy autocompletion (free text still allowed);
+    `secret` hides what is typed. Returns "" when cancelled with Ctrl-C / Ctrl-D."""
     completer = (
         FuzzyWordCompleter(list(choices), meta_dict=meta, WORD=True) if choices else None
     )  # ids contain - / . :
@@ -58,6 +63,7 @@ async def ask(
             complete_while_typing=bool(choices),
             placeholder=FormattedText([(SUBTLE, hint)]) if hint else None,
             style=PT_STYLE,
+            is_password=secret,
         )
     except (KeyboardInterrupt, EOFError):
         return ""

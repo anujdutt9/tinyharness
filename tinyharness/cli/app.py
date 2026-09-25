@@ -17,9 +17,10 @@ from rich.text import Text
 from tinyharness import __version__
 from tinyharness.cli.render import Renderer
 from tinyharness.cli.repl import Repl, report_error
-from tinyharness.cli.setup import print_key_guide
+from tinyharness.cli.setup import print_key_guide, run_setup
 from tinyharness.cli.theme import BRAND, LOGO, MODE_HINT, MODE_LABEL, MODE_STYLE, THEME, gradient
-from tinyharness.paths import pretty_path
+from tinyharness.config import remember_model
+from tinyharness.paths import pretty_path, source_checkout
 from tinyharness.permissions import PermissionMode
 from tinyharness.session import MissingAPIKeyError, Session, SessionOptions
 from tinyharness.skills import import_skills
@@ -33,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mode", choices=[m.value for m in PermissionMode], help="permission mode")
     p.add_argument("--cwd", type=Path, help="working directory (default: current directory)")
     p.add_argument("--config", type=Path, help="config file (default: ~/.config/tinyharness/config.toml)")
+    p.add_argument("--setup", action="store_true", help="choose a provider and add or replace its API key")
     p.add_argument("--expose-skills", action="store_true", help="let the model invoke skills on its own")
     p.add_argument("--debug", action="store_true", help="verbose logging and full tracebacks")
     p.add_argument("--version", action="version", version=f"tinyharness {__version__}")
@@ -99,7 +101,10 @@ async def run(args: argparse.Namespace, console: Console) -> None:
         expose_skill_tool=args.expose_skills,
         use_last_model=True,
     )
-    session = open_session(options, console, interactive=not args.prompt and sys.stdin.isatty())
+    interactive = not args.prompt and sys.stdin.isatty()
+    if interactive and not await first_run_setup(options, console, force=args.setup):
+        return
+    session = open_session(options, console, interactive=interactive)
     if session is None:
         return
     renderer.root = f"{session.workspace.root}/"
@@ -112,6 +117,24 @@ async def run(args: argparse.Namespace, console: Console) -> None:
         await repl.loop()
     finally:
         session.close()
+
+
+async def first_run_setup(options: SessionOptions, console: Console, *, force: bool = False) -> bool:
+    """For an installed copy, help a new user pick a provider and add its key, rather
+    than starting with whichever key happens to be set. A git checkout (development)
+    starts as before unless `force`. Returns False if the user backed out."""
+    if not force and source_checkout() is not None:
+        return True
+    config = options.resolve_config()
+    if not (force or config.auto_selected or not config.has_key(config.provider)):
+        return True
+    name = await run_setup(console, config)
+    if name is None:
+        console.print("\n  [muted]Setup cancelled. Run[/] tinyharness [muted]again any time.[/]\n")
+        return False
+    config.use_provider(name)
+    remember_model(config.provider, config.model)  # next time, start with it
+    return True
 
 
 def open_session(options: SessionOptions, console: Console, *, interactive: bool) -> Session | None:

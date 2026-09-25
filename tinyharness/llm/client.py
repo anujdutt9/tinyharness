@@ -253,6 +253,16 @@ class Ping:
             return True
         return self.status in (400, 403, 422) and "model" in self.message.lower()
 
+    @property
+    def bad_key(self) -> bool:
+        """The provider rejected the API key (Gemini says so with a 400)."""
+        if self.status == 401:
+            return True
+        return self.status in (400, 403) and bool(_BAD_KEY.search(self.message))
+
+
+_BAD_KEY = re.compile(r"api[ _-]?key|unauthori[sz]ed|authenticat|credential", re.IGNORECASE)
+
 
 def _error_message(body: str) -> str:
     """The human-readable part of an error body, whatever the provider's JSON shape."""

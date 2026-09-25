@@ -25,6 +25,13 @@ def default_config_path() -> Path:
     return Path(base).expanduser() / "tinyharness" / "config.toml"
 
 
+def source_checkout() -> Path | None:
+    """The repo root when running from a git checkout of tinyharness (development),
+    None when installed from a package: site-packages has no pyproject.toml or .git."""
+    root = Path(__file__).resolve().parent.parent
+    return root if (root / "pyproject.toml").is_file() and (root / ".git").exists() else None
+
+
 def project_dir(working_dir: Path) -> Path:
     """Per-project state: sessions, scratch space, project skills/hooks/agents."""
     return Path(working_dir) / ".tinyharness"

@@ -27,7 +27,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from tinyharness.llm.providers import Provider, load_catalog
 from tinyharness.llm.types import Effort
-from tinyharness.paths import default_config_path, home_dir
+from tinyharness.paths import default_config_path, home_dir, source_checkout
 from tinyharness.permissions.modes import PermissionMode
 
 log = logging.getLogger(__name__)
@@ -52,6 +52,9 @@ class Config(BaseModel):
     providers: dict[str, Provider] = Field(default_factory=load_catalog)
     effort: Effort | None = None  # reasoning effort: low | medium | high | max; None = the model's default
     request_timeout: float = 1800.0  # seconds; slow reasoning models can take minutes per turn
+    # True when nothing named a provider or model and one was picked from the keys found
+    # (an installed CLI then asks the user instead).
+    auto_selected: bool = Field(default=False, exclude=True)
 
     # --- workspace & permissions ---
     working_dir: Path = Field(
@@ -74,10 +77,12 @@ class Config(BaseModel):
 
     def model_post_init(self, context: Any) -> None:
         provider, model = self.parse_model(self.model) if self.model else (self.provider, "")
-        if not provider:
+        auto = not provider
+        if auto:
             provider = next((n for n in self.providers if self.has_key(n)), next(iter(self.providers)))
         self.provider = provider
         self.select(f"{provider}:{model}")
+        self.auto_selected = auto
 
     # -- the active provider and model ------------------------------------------------
 
@@ -125,6 +130,7 @@ class Config(BaseModel):
             raise ValueError(f"unknown provider {provider!r}; choose one of: {', '.join(self.providers)}")
         self.provider = provider
         self.model = model or self.providers[provider].default_model
+        self.auto_selected = False
 
     def use_provider(self, name: str) -> None:
         """Switch provider, using its default model."""
@@ -207,8 +213,28 @@ def write_env_template(providers: dict[str, Provider], path: Path | None = None)
     return path
 
 
+def save_key(env_name: str, value: str, providers: dict[str, Provider]) -> Path:
+    """Put a key in the user's key file (replacing any line for it) and use it right away."""
+    path = write_env_template(providers)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for i, raw in enumerate(lines):
+        name = raw.strip().lstrip("#").strip().removeprefix("export ").partition("=")[0].strip()
+        if name == env_name and "=" in raw:
+            lines[i] = f"{env_name}={value}"
+            break
+    else:
+        lines.append(f"{env_name}={value}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    os.environ[env_name] = value
+    return path
+
+
 def dotenv_paths(config_path: Path | None = None, working_dir: Path | None = None) -> list[Path]:
-    """Where keys are looked for, lowest priority first (the real environment beats all)."""
+    """Where keys are looked for, lowest priority first (the real environment beats all).
+    An installed copy (not a git checkout) reads only the user's key file."""
+    if source_checkout() is None:
+        return [user_env_path()]
     config_path = config_path or default_config_path()
     paths = [user_env_path(), config_path.parent / ".env", Path.cwd() / ".env"]
     if working_dir is not None:
