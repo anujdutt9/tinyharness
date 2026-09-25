@@ -63,6 +63,9 @@ ignore = [
     "RUF003",
 ]
 
+[tool.ruff.lint.isort]
+known-first-party = ["tinyharness"]  # don't infer it from which files exist
+
 [tool.mypy]
 python_version = "3.11"
 packages = ["tinyharness"]
