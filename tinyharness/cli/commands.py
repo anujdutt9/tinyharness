@@ -340,6 +340,9 @@ async def mode(repl: Repl, arg: str) -> None:
         if choice is None:
             return
         arg = choice
+    if arg == PermissionMode.AUTO and not await repl.enter_auto_mode():
+        repl.console.print(f"  [muted]Still in {MODE_LABEL[repl.session.mode]} mode.[/]")
+        return
     try:
         repl.session.set_mode(arg)
     except ValueError as e:

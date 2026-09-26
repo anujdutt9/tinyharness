@@ -11,6 +11,7 @@ from tinyharness.tools.grep import GrepTool
 from tinyharness.tools.pdf import PdfTool
 from tinyharness.tools.read import ReadTool
 from tinyharness.tools.todo import TodoWriteTool
+from tinyharness.tools.web import WebFetchTool
 from tinyharness.tools.write import WriteTool
 
 AnyTool = Tool[Any]
@@ -33,6 +34,10 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return list(self._tools)
 
+    def with_tools(self, extra: Iterable[AnyTool]) -> ToolRegistry:
+        """A copy with more tools (e.g. a team's board for its members)."""
+        return ToolRegistry([*self._tools.values(), *extra])
+
     def available(self, mode: PermissionMode, allowed: set[str] | None = None) -> list[AnyTool]:
         """Tools to offer the model: filtered by an allow-list and, in plan mode, to read-only tools."""
         return [
@@ -43,7 +48,16 @@ class ToolRegistry:
 
 
 def default_tools() -> list[AnyTool]:
-    return [ReadTool(), WriteTool(), EditTool(), PdfTool(), GlobTool(), GrepTool(), TodoWriteTool()]
+    return [
+        ReadTool(),
+        WriteTool(),
+        EditTool(),
+        PdfTool(),
+        GlobTool(),
+        GrepTool(),
+        TodoWriteTool(),
+        WebFetchTool(),
+    ]
 
 
 def default_registry() -> ToolRegistry:

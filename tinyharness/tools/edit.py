@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 from pydantic import Field
 
-from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
+from tinyharness.tools.base import LARGE_CHANGE, Tool, ToolContext, ToolError, ToolInput
 
 
 class EditInput(ToolInput):
@@ -20,6 +23,12 @@ class EditTool(Tool[EditInput]):
         "You must Read the file first in this session."
     )
     Input = EditInput
+
+    def risk(self, args: dict[str, Any], path: Path | None) -> str | None:
+        removed = len(str(args.get("old_string", "")).splitlines()) - len(
+            str(args.get("new_string", "")).splitlines()
+        )
+        return f"deletes {removed} lines" if removed >= LARGE_CHANGE else None
 
     def describe(self, args: EditInput) -> str:
         removed, added = len(args.old_string.splitlines()), len(args.new_string.splitlines())

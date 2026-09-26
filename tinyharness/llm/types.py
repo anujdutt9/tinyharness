@@ -64,6 +64,7 @@ class Request:
     effort: Effort | None = None  # None: the model's default
     info: ModelInfo | None = None  # what the provider told us about the model, if anything
     owner: str = ""  # "provider:model"; saved reasoning is only sent back to its owner
+    web_search: bool = False  # let the model search the web with the provider's own search tool
 
     def echo(self, message: Message) -> Any:
         """The saved provider data for `message`, if it came from this same model."""

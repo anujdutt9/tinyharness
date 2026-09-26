@@ -63,7 +63,12 @@ class GeminiAdapter(Adapter):
             ]
         if request.effort:
             payload["generation_config"] = {"thinking_level": THINKING_LEVELS[request.effort]}
+        if request.web_search:
+            self.add_web_search(payload)
         return payload
+
+    def add_web_search(self, payload: dict[str, Any]) -> None:
+        payload.setdefault("tools", []).append({"type": "google_search"})
 
     def parser(self) -> StreamParser:
         return _GeminiParser()

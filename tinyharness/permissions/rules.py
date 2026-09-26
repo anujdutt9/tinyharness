@@ -4,6 +4,8 @@
     Edit(src/*)           Edit on any path under <working-dir>/src (`*` also matches `/`)
     Read(~/notes/*)       Read under ~/notes
     *(/etc/*)             any tool touching /etc
+    WebFetch(domain:docs.python.org)    WebFetch on one site
+    WebFetch(domain:*.github.com)       ...or on its subdomains
 
 Rules come from the config file (`[permissions] allow/deny`) and from
 "don't ask again" answers during a session. Deny always beats allow.
@@ -16,6 +18,8 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Literal
+
+DOMAIN = "domain:"  # prefix of a site pattern, as opposed to a path
 
 _RULE = re.compile(r"^\s*([\w*-]+)\s*(?:\((.*)\))?\s*$")
 
@@ -33,6 +37,8 @@ class Rule:
         tool, pattern = match.groups()
         if not pattern:
             return cls(tool)
+        if pattern.startswith(DOMAIN):
+            return cls(tool, DOMAIN + pattern.removeprefix(DOMAIN).strip().lower())
         path = Path(pattern).expanduser()
         return cls(tool, str(path if path.is_absolute() else root / path))
 

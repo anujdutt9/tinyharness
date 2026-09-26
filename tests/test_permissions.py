@@ -85,8 +85,13 @@ async def test_plan_blocks_writes(tmp_path):
 
 def test_shift_tab_cycle():
     mode = PermissionMode.DEFAULT
-    seen = [mode := mode.next() for _ in range(3)]
-    assert seen == [PermissionMode.ACCEPT_EDITS, PermissionMode.PLAN, PermissionMode.DEFAULT]
+    seen = [mode := mode.next() for _ in range(4)]
+    assert seen == [
+        PermissionMode.ACCEPT_EDITS,
+        PermissionMode.AUTO,
+        PermissionMode.PLAN,
+        PermissionMode.DEFAULT,
+    ]
 
 
 # ---- "don't ask again" ----
@@ -187,3 +192,122 @@ async def test_hook_deny_beats_bypass(tmp_path):
     hooks = HookRunner([Hook(event="PreToolUse", type="python", callable=lambda e, p: {"decision": "deny"})])
     d = await gate(tmp_path, PermissionMode.BYPASS, hooks=hooks).check(WRITE, {}, "x.txt")
     assert not d.allow and d.source == "hook"
+
+
+# ---- a plain "yes" to a read covers the same read later ----
+
+
+async def test_yes_to_a_read_is_remembered_for_that_file_only(tmp_path):
+    user = User(YES, YES)
+    g = gate(tmp_path, callback=user)
+    assert (await g.check(READ, {}, "/etc/hosts")).allow
+    assert (await g.check(READ, {}, "/etc/hosts")).allow
+    assert len(user.requests) == 1  # not asked twice for the same file
+    await g.check(READ, {}, "/etc/resolv.conf")
+    assert len(user.requests) == 2  # another file still asks
+
+
+async def test_yes_to_an_edit_is_not_remembered(tmp_path):
+    user = User(YES, YES)
+    g = gate(tmp_path, callback=user)
+    await g.check(WRITE, {}, "a.py")
+    await g.check(WRITE, {}, "a.py")
+    assert len(user.requests) == 2  # each change is shown for review
+
+
+# ---- auto mode ----
+
+
+class Classifier:
+    """Records what reaches the classifier; answers with a fixed verdict."""
+
+    def __init__(self, verdict="allow"):
+        from tinyharness.permissions.classifier import AutoModeClassifier
+
+        self.verdict = verdict
+        self.seen = []
+        self.fast_filter = AutoModeClassifier.fast_filter.__get__(self)
+
+    async def classify(self, tool, args, history_tail=""):
+        from tinyharness.permissions.classifier import ClassifierDecision
+
+        self.seen.append(tool)
+        return ClassifierDecision(self.verdict, "judged")
+
+
+def auto(tmp_path, user=None, verdict="allow"):
+    classifier = Classifier(verdict)
+    scratch = Scratch(tmp_path, "s")
+    g = gate(tmp_path, PermissionMode.AUTO, callback=user or User(), classifier=classifier, scratch=scratch)
+    return g, classifier
+
+
+async def test_auto_mode_does_routine_project_work_without_asking_anyone(tmp_path):
+    from tinyharness.tools.edit import EditTool
+
+    user = User()
+    g, classifier = auto(tmp_path, user)
+    (tmp_path / "small.py").write_text("x = 1\n")
+    assert (await g.check(WRITE, {"path": "new.py", "content": "print(1)"}, "new.py")).allow
+    assert (await g.check(WRITE, {"path": "small.py", "content": ""}, "small.py")).allow
+    edit = {"path": "a.py", "old_string": "a\nb", "new_string": "c"}
+    assert (await g.check(EditTool(), edit, "a.py")).allow
+    assert user.requests == [] and classifier.seen == []  # no prompt, no classifier call
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "target", "reason"),
+    [
+        ("write", {"content": "x"}, "/tmp/elsewhere/out.txt", "it changes a file outside the project"),
+        ("write", {"content": "x"}, ".git/config", "it changes version-control internals (.git)"),
+        ("write", {"content": "short"}, "big.py", "it replaces a 30-line file with 1 lines"),
+        ("edit", {"old_string": "\n".join("x" * 25), "new_string": ""}, "big.py", "it deletes 25 lines"),
+    ],
+)
+async def test_auto_mode_always_asks_before_risky_changes(tmp_path, tool, args, target, reason):
+    from tinyharness.tools.edit import EditTool
+
+    (tmp_path / "big.py").write_text("line\n" * 30)
+    user = User(YES)
+    g, classifier = auto(tmp_path, user)
+    t = WRITE if tool == "write" else EditTool()
+    assert (await g.check(t, {"path": target, **args}, target)).allow
+    [request] = user.requests
+    assert request.reason == reason
+    assert classifier.seen == []  # risky means ask the user, not the classifier
+
+
+async def test_auto_mode_blocks_secret_paths_outright(tmp_path):
+    user = User()
+    g, _ = auto(tmp_path, user)
+    d = await g.check(WRITE, {"path": "/home/me/.ssh/authorized_keys"}, "/home/me/.ssh/authorized_keys")
+    assert not d.allow and user.requests == []
+
+
+async def test_auto_mode_reads_the_web_but_checks_urls_that_carry_data(tmp_path):
+    from tinyharness.tools.web import WebFetchTool
+
+    g, classifier = auto(tmp_path)
+    fetch = WebFetchTool()
+    assert (
+        await g.check(fetch, {"url": "https://docs.python.org/3/"}, None, target_host="docs.python.org")
+    ).allow
+    assert classifier.seen == []
+    await g.check(fetch, {"url": "https://x.example/?q=secret"}, None, target_host="x.example")
+    assert classifier.seen == ["WebFetch"]
+
+
+async def test_auto_mode_asks_the_classifier_about_reads_elsewhere(tmp_path):
+    user = User(YES)
+    g, classifier = auto(tmp_path, user, verdict="ask")
+    assert (await g.check(READ, {"path": "/opt/notes.txt"}, "/opt/notes.txt")).allow
+    assert classifier.seen == ["Read"] and len(user.requests) == 1  # unsure, so the user decided
+    assert user.requests[0].reason == ""
+
+
+async def test_auto_mode_uses_the_scratch_directory_freely(tmp_path):
+    user = User()
+    g, classifier = auto(tmp_path, user)
+    target = str(g.scratch.dir / "notes.md")
+    assert (await g.check(WRITE, {"path": target, "content": "x"}, target)).allow
+    assert user.requests == [] and classifier.seen == []

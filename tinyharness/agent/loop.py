@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -66,6 +66,7 @@ class LoopDeps:
     allowed_tools: set[str] | None = None
     model: str | None = None  # override the client's default model (subagents)
     max_steps: int = 50
+    inbox: Callable[[], list[str]] | None = None  # messages that arrive mid-run (teammates)
 
 
 @dataclass
@@ -97,6 +98,11 @@ async def run_agent_loop(prompt: str, history: History, deps: LoopDeps) -> Async
     history.append(Message(role="user", content=prompt))
 
     for _ in range(deps.max_steps):
+        # Messages from teammates arrive between steps, as a user message.
+        for note in deps.inbox() if deps.inbox is not None else []:
+            deps.transcript.write("user", text=note)
+            history.append(Message(role="user", content=note))
+
         async for event in _compact(history, deps):
             yield event
 
@@ -152,7 +158,7 @@ async def run_agent_loop(prompt: str, history: History, deps: LoopDeps) -> Async
             continue
 
         # 4. Run the approved calls. Read-only batches run concurrently.
-        parallel = len(approved) > 1 and all(a.tool.read_only for a in approved)
+        parallel = len(approved) > 1 and all(a.tool.is_read_only(a.args) for a in approved)
         yield ToolsDispatched([a.tool.name for a in approved], parallel)
         if parallel:
             results = await asyncio.gather(*(_execute(a, deps) for a in approved))
@@ -243,7 +249,12 @@ async def _prepare_call(
     deps.transcript.write("tool_use", tool=tool.name, args=raw)
 
     decision = await deps.gate.check(
-        tool, raw, tool.target_path(args), summary=summary, history_tail=_tail(history)
+        tool,
+        raw,
+        tool.target_path(args),
+        target_host=tool.target_host(args),
+        summary=summary,
+        history_tail=_tail(history),
     )
     deps.transcript.write(
         "permission", tool=tool.name, allow=decision.allow, source=decision.source, reason=decision.reason

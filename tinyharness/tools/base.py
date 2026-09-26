@@ -6,9 +6,10 @@ A tool is a class with:
                              and incoming arguments are validated against it
   * `run(args, ctx)`       — does the work and returns text for the model
 
-Two flags tell the harness how to treat it:
+Flags tell the harness how to treat it:
   * `read_only`        — no side effects: allowed in plan mode, safe to run in parallel
   * `needs_permission` — False for bookkeeping tools (e.g. TodoWrite) that skip the gate
+  * `network`          — reaches other machines (WebFetch): asks per site, never free
 """
 
 from __future__ import annotations
@@ -22,8 +23,15 @@ from pydantic import BaseModel, ConfigDict
 from tinyharness.llm.types import ToolSpec
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
     from tinyharness.config import Config
+    from tinyharness.events import Event
     from tinyharness.workspace import Scratch, Workspace
+
+
+LARGE_CHANGE = 20  # lines; removing more than this counts as destructive (auto mode asks)
 
 
 class ToolError(Exception):
@@ -46,6 +54,7 @@ class ToolContext:
     scratch: Scratch | None = None
     read_paths: set[str] = field(default_factory=set)  # enforces read-before-write
     todos: list[dict[str, str]] = field(default_factory=list)
+    notify: Callable[[Event], None] | None = None  # side-channel events, e.g. subagent progress
 
 
 class Tool(ABC, Generic[InputT]):
@@ -54,6 +63,7 @@ class Tool(ABC, Generic[InputT]):
     Input: type[InputT]
     read_only: ClassVar[bool] = False
     needs_permission: ClassVar[bool] = True
+    network: ClassVar[bool] = False
 
     @abstractmethod
     async def run(self, args: InputT, ctx: ToolContext) -> str: ...
@@ -67,6 +77,19 @@ class Tool(ABC, Generic[InputT]):
         """The filesystem path this call touches, used for permission decisions."""
         path = getattr(args, "path", None)
         return str(path) if path else None
+
+    def target_host(self, args: InputT) -> str | None:
+        """The site a network tool contacts, used for permission decisions."""
+        return None
+
+    def risk(self, args: dict[str, Any], path: Path | None) -> str | None:
+        """Why this call is destructive enough to always ask in auto mode, or None.
+        Gets the raw arguments, since it runs before they're validated."""
+        return None
+
+    def is_read_only(self, args: InputT) -> bool:
+        """Whether this call has no side effects (safe to run alongside others)."""
+        return self.read_only
 
     def parse(self, raw: dict[str, Any]) -> InputT:
         return self.Input.model_validate(raw)

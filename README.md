@@ -48,7 +48,7 @@ Added `--verbose` (alias `-v`).
 | | |
 |---|---|
 | **Agent loop** | Streaming, parallel dispatch of read-only tools, argument validation, step limit, Ctrl-C to interrupt a turn |
-| **Tools** | `Read` `Write` `Edit` `Glob` `Grep` `Pdf` `TodoWrite` `Agent`; each one is a class plus a pydantic input model |
+| **Tools** | `Read` `Write` `Edit` `Glob` `Grep` `Pdf` `TodoWrite` `WebSearch` `WebFetch` `Agent` `Team`; each one is a class plus a pydantic input model |
 | **Permissions** | Reads inside the project never ask; edits ask with a diff preview. Answers are Yes / Yes, don't ask again / No + feedback. Shift+Tab cycles modes (`default` → `acceptEdits` → `plan`); plus `auto` (LLM classifier) and `bypassPermissions`. Persistent `allow`/`deny` rules in config |
 | **Security** | API keys never reach the model: tools refuse to read secret-shaped files (`.env`, SSH keys, …), configured key values are masked in every tool result, and a key pasted into the chat is caught before sending. Hook processes never see keys; symlinks are resolved before permission checks |
 | **Context management** | Three tiers: cap oversized messages → stub old tool output → summarize history. Each message changes at most once, so provider prompt caches stay valid |

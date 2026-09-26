@@ -51,8 +51,9 @@ def test_system_prompt_includes_agent_md(tmp_path):
 
 def test_builtin_agents_load_from_markdown():
     agents = builtin_agents()
-    assert set(agents) == {"explore", "plan", "general-purpose"}
+    assert set(agents) == {"explore", "plan", "general-purpose", "researcher"}
     assert "Write" not in agents["explore"].tools
+    assert "Write" not in agents["researcher"].tools and "WebSearch" in agents["researcher"].tools
     assert agents["general-purpose"].permission_mode == "default"
     assert all(a.description and a.system_prompt for a in agents.values())
 

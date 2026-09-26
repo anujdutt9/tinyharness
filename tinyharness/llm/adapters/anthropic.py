@@ -20,6 +20,7 @@ from tinyharness.llm.types import LLMError, ModelInfo, Request, StreamChunk
 
 API_VERSION = "2023-06-01"
 BETAS = "thinking-binding-controls-2026-08-01"
+WEB_SEARCH_TOOL = "web_search_20250305"  # runs on Anthropic's side; results come back as blocks
 DEFAULT_MAX_TOKENS = 16_000  # used only when the model list hasn't told us the model's limit
 
 
@@ -53,7 +54,12 @@ class AnthropicAdapter(Adapter):
             }
         if request.effort and (info.efforts is None or request.effort in info.efforts):
             payload["output_config"] = {"effort": request.effort}
+        if request.web_search:
+            self.add_web_search(payload)
         return payload
+
+    def add_web_search(self, payload: dict[str, Any]) -> None:
+        payload.setdefault("tools", []).append({"type": WEB_SEARCH_TOOL, "name": "web_search", "max_uses": 5})
 
     def parser(self) -> StreamParser:
         return _AnthropicParser()
@@ -155,7 +161,7 @@ class _AnthropicParser(StreamParser):
             case "text_delta":
                 block["text"] = block.get("text", "") + delta["text"]
                 return [StreamChunk(text=delta["text"])]
-            case "input_json_delta":
+            case "input_json_delta" if block.get("type") == "tool_use":  # not server-side tools
                 self.json.setdefault(index, []).append(delta["partial_json"])
                 return [
                     StreamChunk(

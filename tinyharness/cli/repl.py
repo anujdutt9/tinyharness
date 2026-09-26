@@ -52,6 +52,7 @@ from tinyharness.session import MissingAPIKeyError, Session
 log = logging.getLogger(__name__)
 
 EXIT_CONFIRM_SECONDS = 2.0
+_CONFIRM_AUTO = "\x00confirm-auto-mode"  # returned by the prompt when Shift+Tab reaches auto mode
 
 _MODE_ICON = {
     PermissionMode.DEFAULT: "○",
@@ -110,6 +111,8 @@ class Repl:
         self.context_used = 0.0  # fraction of the context window, refreshed after each turn
         self._exit_armed_until = 0.0  # a second Ctrl-C before this time exits
         self._draft = ""  # pre-filled into the next prompt (a message that wasn't sent)
+        # Started with --mode auto counts as agreeing to it; otherwise it's asked once.
+        self.auto_confirmed = session.mode == PermissionMode.AUTO
 
     # -- input ----------------------------------------------------------------
 
@@ -174,7 +177,13 @@ class Repl:
 
         @keys.add("s-tab")
         def _cycle_mode(event: KeyPressEvent) -> None:
-            self.session.set_mode(self.session.mode.next())
+            mode = self.session.mode.next()
+            if mode == PermissionMode.AUTO and not self.auto_confirmed:
+                # Leave the prompt to ask; what was typed comes back afterwards.
+                self._draft = event.current_buffer.text
+                event.app.exit(result=_CONFIRM_AUTO)
+                return
+            self.session.set_mode(mode)
 
         history_file = home_dir() / "repl_history"
         history_file.parent.mkdir(parents=True, exist_ok=True)
@@ -214,6 +223,9 @@ class Repl:
                 line = (await prompt.prompt_async(show_frame=True, default=draft)).strip()
             except (EOFError, KeyboardInterrupt):
                 break  # Ctrl-D, or Ctrl-C twice
+            if line == _CONFIRM_AUTO:
+                await self.enter_auto_mode()  # a "no" leaves the mode as it was
+                continue
             if line:
                 self._echo(line)
                 await self.handle(line)
@@ -240,6 +252,28 @@ class Repl:
             self.console.print(
                 f"\n  Unknown command [bold]{name}[/]. Type [key]/[/] to see what's available."
             )
+
+    async def enter_auto_mode(self) -> bool:
+        """Switch to auto mode, asking once per session first. False if the user said no."""
+        if not self.auto_confirmed:
+            self.console.print(
+                "\n  [bold]Auto mode[/] works without asking: reading, searching and editing files in "
+                "this project, and reading public web pages.\n"
+                "  It still asks before anything risky: changing files outside the project or in "
+                ".git, replacing most of a file, deleting a large block. Unclear cases go to a "
+                "quick safety check.\n"
+            )
+            choice = await pick(
+                "Turn on auto mode for this session?",
+                [("yes", "Yes, work on its own"), ("no", "No, keep asking")],
+                "yes",
+                mark_current=False,
+            )
+            if choice != "yes":
+                return False
+            self.auto_confirmed = True
+        self.session.set_mode(PermissionMode.AUTO)
+        return True
 
     async def _safe_to_send(self, line: str) -> bool:
         """Catch an API key pasted into the chat before it reaches the model."""

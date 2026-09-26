@@ -43,6 +43,9 @@ class Provider(BaseModel):
     extra_headers: dict[str, str] = Field(default_factory=dict)
     extra_body: dict[str, Any] = Field(default_factory=dict)  # merged into every request
     effort_param: str = "reasoning_effort"  # chat API only: where the reasoning effort goes
+    # The provider's own web search: true for APIs with a built-in search tool, a table
+    # merged into the request for chat providers that switch it on another way, false: none.
+    web_search: bool | dict[str, Any] = False
     models: list[ModelInfo] = Field(default_factory=list)  # for endpoints without a model list
 
     @field_validator("models", mode="before")

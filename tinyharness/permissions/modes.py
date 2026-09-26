@@ -9,7 +9,7 @@ class PermissionMode(StrEnum):
     PLAN            read-only tools only; mutating tools are hidden and blocked
     DEFAULT         reads run freely; edits and outside paths ask
     ACCEPT_EDITS    auto-allow file tools inside the working directory
-    AUTO            ask an LLM classifier; fall back to a prompt when unsure
+    AUTO            routine work runs; risky actions ask; unclear ones go to an LLM classifier
     BYPASS          never prompt (secret-path denylist still applies)
     """
 
@@ -20,8 +20,13 @@ class PermissionMode(StrEnum):
     BYPASS = "bypassPermissions"
 
     def next(self) -> PermissionMode:
-        """The mode Shift+Tab switches to: default → acceptEdits → plan → default."""
-        cycle = [PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS, PermissionMode.PLAN]
+        """The mode Shift+Tab switches to: default → acceptEdits → auto → plan → default."""
+        cycle = [
+            PermissionMode.DEFAULT,
+            PermissionMode.ACCEPT_EDITS,
+            PermissionMode.AUTO,
+            PermissionMode.PLAN,
+        ]
         return cycle[(cycle.index(self) + 1) % len(cycle)] if self in cycle else PermissionMode.DEFAULT
 
     @classmethod

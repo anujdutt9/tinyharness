@@ -161,6 +161,7 @@ class LLMClient:
         tools: list[ToolSpec] | None = None,
         *,
         model: str | None = None,
+        web_search: bool = False,
     ) -> AsyncIterator[StreamChunk]:
         """Stream one reply. The last chunk carries `state` when the provider needs data back next turn."""
         await self._ensure_model_list()
@@ -173,6 +174,7 @@ class LLMClient:
             effort=self.effort,
             info=self.model_info(model),
             owner=f"{self.provider.name}:{model}",
+            web_search=web_search,
         )
         payload = _merge(self.adapter.payload(request), self.provider.extra_body)
         parser = self.adapter.parser()
@@ -208,23 +210,35 @@ class LLMClient:
             yield StreamChunk(state=ReasoningState(request.owner, state))
 
     async def collect(
-        self, messages: list[Message], tools: list[ToolSpec] | None = None, *, model: str | None = None
+        self,
+        messages: list[Message],
+        tools: list[ToolSpec] | None = None,
+        *,
+        model: str | None = None,
+        web_search: bool = False,
     ) -> CompletedTurn:
         """Non-streaming convenience: run `stream` to completion."""
         text: list[str] = []
         calls = ToolCallAccumulator()
         finish: str | None = None
-        async for chunk in self.stream(messages, tools, model=model):
+        async for chunk in self.stream(messages, tools, model=model, web_search=web_search):
             text.append(chunk.text)
             if chunk.tool_call_delta:
                 calls.add(chunk.tool_call_delta)
             finish = chunk.finish_reason or finish
         return CompletedTurn(text="".join(text), tool_calls=calls.calls(), finish_reason=finish)
 
-    async def one_shot(self, prompt: str, *, system: str | None = None, model: str | None = None) -> str:
+    async def one_shot(
+        self, prompt: str, *, system: str | None = None, model: str | None = None, web_search: bool = False
+    ) -> str:
         messages = [Message(role="system", content=system)] if system else []
         messages.append(Message(role="user", content=prompt))
-        return (await self.collect(messages, model=model)).text
+        return (await self.collect(messages, model=model, web_search=web_search)).text
+
+    @property
+    def supports_web_search(self) -> bool:
+        """Whether this provider has its own web search tool the model can use."""
+        return bool(self.provider.web_search)
 
     async def ping(self, model: str | None = None) -> Ping:
         """The cheapest possible request, to check the key and that the model can be used."""

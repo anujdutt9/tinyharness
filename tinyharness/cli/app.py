@@ -98,6 +98,7 @@ async def run(args: argparse.Namespace, console: Console) -> None:
         model=args.model,
         permission_mode=args.mode,
         permission_callback=renderer.ask_permission,
+        on_event=renderer.handle,
         expose_skill_tool=args.expose_skills,
         use_last_model=True,
     )

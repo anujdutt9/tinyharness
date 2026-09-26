@@ -20,6 +20,9 @@
 #   extra_headers  sent with every request
 #   extra_body     merged into every request body
 #   effort_param   chat API only: where the reasoning effort goes in the request
+#   web_search     the provider's own web search (used by the WebSearch tool): true for
+#                  APIs with a built-in search tool, or for chat providers the table
+#                  that switches it on; leave out when the provider has none
 
 [anthropic]
 label = "Anthropic"
@@ -29,6 +32,7 @@ api_key_env = "ANTHROPIC_API_KEY"
 key_url = "https://console.anthropic.com/settings/keys"
 default_model = "claude-sonnet-5"
 small_model = "claude-haiku-4-5"
+web_search = true
 
 [openai]
 label = "OpenAI"
@@ -38,6 +42,7 @@ api_key_env = "OPENAI_API_KEY"
 key_url = "https://platform.openai.com/api-keys"
 default_model = "gpt-6-sol"
 small_model = "gpt-6-luna"
+web_search = true
 
 [openrouter]
 label = "OpenRouter"
@@ -49,6 +54,7 @@ default_model = "anthropic/claude-sonnet-5"
 small_model = "anthropic/claude-haiku-4.5"
 effort_param = "reasoning.effort"
 extra_body = { cache_control = { type = "ephemeral" } }  # caching for models that need it asked for
+web_search = { plugins = [{ id = "web" }] }
 
 [gemini]
 label = "Google Gemini"
@@ -58,6 +64,7 @@ api_key_env = "GEMINI_API_KEY"
 key_url = "https://aistudio.google.com/apikey"
 default_model = "gemini-3.8-flash"
 small_model = "gemini-3.5-flash-lite"
+web_search = true
 
 [xai]
 label = "xAI"
@@ -67,6 +74,7 @@ api_key_env = "XAI_API_KEY"
 key_url = "https://console.x.ai"
 default_model = "grok-4.7"
 small_model = "grok-4.7"
+web_search = true
 
 [deepseek]
 label = "DeepSeek"

@@ -48,7 +48,14 @@ class ChatAdapter(Adapter):
             ]
         if request.effort:
             _set_path(payload, self.provider.effort_param, request.effort)
+        if request.web_search:
+            self.add_web_search(payload)
         return payload
+
+    def add_web_search(self, payload: dict[str, Any]) -> None:
+        if not isinstance(self.provider.web_search, dict):
+            raise NotImplementedError
+        payload.update(self.provider.web_search)
 
     def parser(self) -> StreamParser:
         return _ChatParser()

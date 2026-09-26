@@ -73,6 +73,24 @@ class Compacted:
     count: int = 0
 
 
+SubagentStatus = Literal["started", "working", "done", "failed"]
+
+
+@dataclass(frozen=True)
+class SubagentUpdate:
+    """Progress of a subagent or teammate while its Agent/Team call runs. These don't come
+    through `session.run()` (the parent is waiting on the tool); they go to
+    `SessionOptions.on_event` as they happen."""
+
+    id: str  # unique per run
+    agent: str  # the agent type, e.g. "explore"
+    label: str  # what it was asked to do, shortened
+    status: SubagentStatus
+    detail: str = ""  # the tool it's running, or how it ended
+    tools_used: int = 0
+    elapsed: float = 0.0
+
+
 @dataclass(frozen=True)
 class Done:
     reason: Literal["stop", "max_steps", "interrupted"] = "stop"
@@ -87,5 +105,6 @@ Event = (
     | ToolResult
     | TodosUpdated
     | Compacted
+    | SubagentUpdate
     | Done
 )

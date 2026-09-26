@@ -89,6 +89,8 @@ def _choice_keys() -> KeyBindings:
 
 async def ask(console: Console, request: PermissionRequest, summary: str) -> Decision:
     console.print(card(request, summary))
+    if request.reason:
+        console.print(Text(f"  Auto mode is asking because {request.reason}.", style="warn"))
     question = _QUESTIONS.get(request.tool, f"Allow {request.tool}?")
 
     options: list[tuple[Choice, Any]] = [

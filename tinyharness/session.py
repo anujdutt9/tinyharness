@@ -12,11 +12,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 from tinyharness.agent.compaction import Compactor
 from tinyharness.agent.history import History, Message
@@ -32,17 +34,39 @@ from tinyharness.llm.providers import DEFAULT_CONTEXT, Provider
 from tinyharness.llm.tokens import count_message_tokens
 from tinyharness.llm.types import Effort
 from tinyharness.paths import home_dir
-from tinyharness.permissions import PermissionCallback, PermissionGate, PermissionMode, PermissionRules
+from tinyharness.permissions import (
+    Decision,
+    PermissionCallback,
+    PermissionGate,
+    PermissionMode,
+    PermissionRequest,
+    PermissionRules,
+)
 from tinyharness.permissions.classifier import AutoModeClassifier
 from tinyharness.plugins import load_plugins
 from tinyharness.skills import SkillRegistry, build_skill_prompt, load_skills
 from tinyharness.subagents import AgentSpec, load_agents
 from tinyharness.subagents.runner import run_subagent
 from tinyharness.tools.agent import AgentTool
-from tinyharness.tools.base import ToolContext
+from tinyharness.tools.base import Tool, ToolContext
 from tinyharness.tools.registry import default_registry
 from tinyharness.tools.skill import SkillTool
+from tinyharness.tools.team import TeamTool
+from tinyharness.tools.web import WebSearchTool
 from tinyharness.workspace import Scratch, Workspace
+
+
+def _one_at_a_time(callback: PermissionCallback | None) -> PermissionCallback | None:
+    """Parallel subagents may all need permission at once: ask one question at a time."""
+    if callback is None:
+        return None
+    lock = asyncio.Lock()
+
+    async def ask(request: PermissionRequest) -> Decision:
+        async with lock:
+            return await callback(request)
+
+    return ask
 
 
 class MissingAPIKeyError(RuntimeError):
@@ -68,6 +92,7 @@ class SessionOptions:
     use_last_model: bool = False  # start with the model last picked in the CLI (`/model`)
 
     permission_callback: PermissionCallback | None = None
+    on_event: Callable[[Event], None] | None = None  # progress of subagents/teammates as it happens
     hooks: list[Hook] = field(default_factory=list)
     allowed_tools: list[str] | None = None
     extra_system: str = ""
@@ -107,7 +132,9 @@ class Session:
         self.scratch = Scratch(root, self.id, max_age_hours=self.config.scratch_max_age_hours)
         self.transcript = Transcript(root, self.id)
         self.history = History()
-        self.ctx = ToolContext(workspace=self.workspace, config=self.config, scratch=self.scratch)
+        self.ctx = ToolContext(
+            workspace=self.workspace, config=self.config, scratch=self.scratch, notify=self.options.on_event
+        )
 
         # Extensions: skills, agents, hooks (plugins contribute to all three).
         self.skills = SkillRegistry(load_skills(root) if self.options.enable_skills else [])
@@ -127,10 +154,12 @@ class Session:
                 self.workspace.add_read_root(skill.directory)
 
         self.tools = default_registry()
+        self.tools.register(WebSearchTool(lambda: self.llm))
         if self.options.expose_skill_tool and len(self.skills):
             self.tools.register(SkillTool(self.skills))
         if self.agents:
-            self.tools.register(AgentTool(self.agents, self._spawn_subagent))
+            self.tools.register(AgentTool(self.agents, self._spawn_subagent, self._agent_is_read_only))
+            self.tools.register(TeamTool(self.agents, self._spawn_subagent, self._agent_is_read_only))
 
         # One gate for the whole session, so "don't ask again" answers and mode
         # changes (e.g. Shift+Tab in the CLI) carry over from prompt to prompt.
@@ -140,7 +169,7 @@ class Session:
             mode=cfg.permission_mode,
             rules=PermissionRules.parse(cfg.permissions.allow, cfg.permissions.deny, root),
             hooks=self.hooks,
-            callback=self.options.permission_callback,
+            callback=_one_at_a_time(self.options.permission_callback),
             scratch=self.scratch,
         )
 
@@ -170,10 +199,36 @@ class Session:
             self.llm, context_window=lambda: self.context_window, threshold=cfg.auto_compact_threshold
         )
 
-    async def _spawn_subagent(self, spec: AgentSpec, task: str, ctx: ToolContext) -> str:
-        # Same rules as the parent, but the subagent's own permission mode.
-        gate = replace(self.gate, mode=spec.permission_mode)
-        return await run_subagent(spec, task, ctx=ctx, llm=self.llm, tools=self.tools, gate=gate)
+    async def _spawn_subagent(
+        self,
+        spec: AgentSpec,
+        task: str,
+        ctx: ToolContext,
+        *,
+        label: str = "",
+        extra_tools: Iterable[Tool[Any]] = (),
+        inbox: Callable[[], list[str]] | None = None,
+    ) -> str:
+        # Same rules as the parent, but the subagent's own permission mode, except that
+        # plan mode and bypass carry over: the user chose them for everything.
+        inherited = self.gate.mode in (PermissionMode.PLAN, PermissionMode.BYPASS)
+        gate = replace(self.gate, mode=self.gate.mode if inherited else spec.permission_mode)
+        return await run_subagent(
+            spec,
+            task,
+            ctx=ctx,
+            llm=self.llm,
+            tools=self.tools,
+            gate=gate,
+            label=label,
+            extra_tools=extra_tools,
+            inbox=inbox,
+        )
+
+    def _agent_is_read_only(self, spec: AgentSpec) -> bool:
+        """An agent that can't change anything, so several can safely run at once."""
+        names = spec.tools or self.tools.names()
+        return all(tool.read_only for name in names if (tool := self.tools.get(name)) is not None)
 
     # ------------------------------------------------------------------ settings
 

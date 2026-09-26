@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 from pydantic import Field
 
-from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
+from tinyharness.tools.base import LARGE_CHANGE, Tool, ToolContext, ToolError, ToolInput
 
 
 class WriteInput(ToolInput):
@@ -17,6 +20,19 @@ class WriteTool(Tool[WriteInput]):
         "To overwrite an existing file you must Read it first in this session."
     )
     Input = WriteInput
+
+    def risk(self, args: dict[str, Any], path: Path | None) -> str | None:
+        """Replacing most of an existing file is as good as deleting it."""
+        if path is None or not path.is_file():
+            return None
+        try:
+            before = len(path.read_text(encoding="utf-8", errors="replace").splitlines())
+        except OSError:
+            return None
+        after = len(str(args.get("content", "")).splitlines())
+        if before >= LARGE_CHANGE and after < before / 2:
+            return f"replaces a {before}-line file with {after} lines"
+        return None
 
     def describe(self, args: WriteInput) -> str:
         return f"Write({args.path}, {len(args.content.splitlines())} lines)"

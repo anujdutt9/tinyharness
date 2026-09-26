@@ -46,6 +46,10 @@ class Adapter(ABC):
     @abstractmethod
     def parser(self) -> StreamParser: ...
 
+    def add_web_search(self, payload: dict[str, Any]) -> None:
+        """Switch on the provider's own web search tool in a request body."""
+        raise NotImplementedError
+
     @abstractmethod
     def ping_payload(self, model: str) -> dict[str, Any]:
         """The smallest valid non-streaming request, to check the key works."""

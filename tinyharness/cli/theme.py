@@ -77,7 +77,7 @@ MODE_HINT = {
     PermissionMode.DEFAULT: "asks before edits",
     PermissionMode.ACCEPT_EDITS: "edits in this project run without asking",
     PermissionMode.PLAN: "read-only: looks, doesn't touch",
-    PermissionMode.AUTO: "a classifier approves safe actions",
+    PermissionMode.AUTO: "works on its own; asks before risky actions",
     PermissionMode.BYPASS: "never asks",
 }
 

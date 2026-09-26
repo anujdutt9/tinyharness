@@ -65,7 +65,12 @@ class ResponsesAdapter(Adapter):
             ]
         if request.effort:
             payload["reasoning"] = {"effort": request.effort}
+        if request.web_search:
+            self.add_web_search(payload)
         return payload
+
+    def add_web_search(self, payload: dict[str, Any]) -> None:
+        payload.setdefault("tools", []).append({"type": "web_search"})
 
     def parser(self) -> StreamParser:
         return _ResponsesParser()

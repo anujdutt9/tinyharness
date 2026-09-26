@@ -7,7 +7,7 @@ from pydantic import Field
 from tinyharness.subagents import AgentSpec
 from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
 
-Spawner = Callable[[AgentSpec, str, ToolContext], Awaitable[str]]
+Spawner = Callable[..., Awaitable[str]]  # (spec, prompt, ctx, *, label=...) -> final answer
 
 
 class AgentInput(ToolInput):
@@ -27,15 +27,26 @@ class AgentTool(Tool[AgentInput]):
     Input = AgentInput
     read_only = True  # the subagent's own tool calls go through its own permission gate
 
-    def __init__(self, agents: dict[str, AgentSpec], spawner: Spawner) -> None:
+    def __init__(
+        self,
+        agents: dict[str, AgentSpec],
+        spawner: Spawner,
+        agent_is_read_only: Callable[[AgentSpec], bool] = lambda spec: False,
+    ) -> None:
         self.agents = agents
         self.spawner = spawner
+        self.agent_is_read_only = agent_is_read_only
         listing = "\n".join(f"- {name}: {spec.description}" for name, spec in agents.items())
         self.description = (
             "Run a subagent in an isolated context window; only its final summary is returned. "
             "Use it for substantial, self-contained work (broad research, independent stages), "
             f"not for single file operations.\n\nAvailable agents:\n{listing or '(none)'}"
         )
+
+    def is_read_only(self, args: AgentInput) -> bool:
+        """Only agents that can't write run side by side; writers take turns."""
+        spec = self.agents.get(args.subagent_type)
+        return spec is not None and self.agent_is_read_only(spec)
 
     def describe(self, args: AgentInput) -> str:
         return f"Agent({args.subagent_type}: {args.description or args.prompt[:60]})"
@@ -46,4 +57,4 @@ class AgentTool(Tool[AgentInput]):
             raise ToolError(
                 f"unknown subagent_type {args.subagent_type!r}; available: {', '.join(self.agents)}"
             )
-        return await self.spawner(spec, args.prompt, ctx)
+        return await self.spawner(spec, args.prompt, ctx, label=args.description)

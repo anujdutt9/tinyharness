@@ -13,6 +13,14 @@ Output is split in two:
       ⎿ edited src/app.py (1 replacement)
     ⠼ Working… 4s · ctrl+c to interrupt
 
+Subagents and teammates get a live line each while they work, and a permanent
+line when they finish:
+
+    ● Team  compare three laptops · 4 tasks
+      ⎿ research-a: Laptop A · WebSearch(laptop a review) · 3 tools · 12s
+      ⎿ research-b: Laptop B · WebFetch(https://…) · 2 tools · 9s
+    ✔ research-c: Laptop C · 4 tool calls · 21s
+
 The spinner says "Working" while waiting on the model, and "Thinking" only once the
 model reports that it is actually reasoning (many replies involve none).
 """
@@ -38,6 +46,7 @@ from tinyharness.events import (
     Event,
     PermissionDecision,
     Reasoning,
+    SubagentUpdate,
     TodosUpdated,
     ToolResult,
     ToolsDispatched,
@@ -113,6 +122,7 @@ class Renderer:
         self._running: list[_RunningTool] = []
         self._tools_used = 0
         self._turn_started = 0.0
+        self._agents: dict[str, SubagentUpdate] = {}  # running subagents, by run id
 
     # -- the live region ------------------------------------------------------
 
@@ -121,6 +131,7 @@ class Renderer:
         if self._streaming.strip():
             parts.append(markdown.render(self._streaming))
         parts.extend(tool_line(self._relative(t.summary), "subtle") for t in self._running)
+        parts.extend(self._agent_line(a) for a in list(self._agents.values()))
         if self._activity:
             elapsed = int(time.monotonic() - self._activity_since)
             self._spinner.update(
@@ -169,6 +180,14 @@ class Renderer:
             return text
         return text.replace(self.root, "").replace(self.root.rstrip("/"), ".")
 
+    def _agent_line(self, update: SubagentUpdate) -> Text:
+        line = Text("  ").append(f"{ELBOW} ", style="subtle").append(update.label, style="muted")
+        doing = self._relative(update.detail) if update.status == "working" else "starting"
+        line.append(f" · {doing}", style="subtle")
+        if update.tools_used:
+            line.append(f" · {update.tools_used} tool{'s' if update.tools_used != 1 else ''}", style="subtle")
+        return line.append(f" · {_duration(update.elapsed)}", style="subtle")
+
     def _finish_tool(self, name: str, result: Text) -> None:
         tool = next((t for t in self._running if t.name == name), None)
         if tool is None:  # rejected before it was announced (unknown tool, bad arguments)
@@ -194,6 +213,7 @@ class Renderer:
         finally:
             self._flush_text(everything=True)
             self._running.clear()
+            self._agents.clear()
             self.stop_waiting()
             self._stop_live()
 
@@ -239,6 +259,13 @@ class Renderer:
                     )
                 )
                 self.wait(WAITING)
+            case SubagentUpdate(id=run_id, status="started" | "working"):
+                self._agents[run_id] = event
+            case SubagentUpdate(id=run_id, label=label, status=status, detail=detail, elapsed=elapsed):
+                self._agents.pop(run_id, None)
+                ok = status == "done"
+                line = Text("✔ " if ok else "✗ ", style="ok" if ok else "err").append(label, style="muted")
+                self._print(line.append(f" · {detail} · {_duration(elapsed)}", style="subtle"))
             case Compacted(kind=kind, count=n):
                 self._block(Text(f"↻ {_COMPACTION_MESSAGES[kind].format(n=n)}", style="subtle"))
             case Done(reason=reason):
