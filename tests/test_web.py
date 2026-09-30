@@ -213,7 +213,7 @@ class FakeLLM:
     def supports_web_search(self):
         return bool(self.provider.web_search)
 
-    async def one_shot(self, prompt, **kwargs):
+    async def one_shot_small(self, prompt, **kwargs):
         self.calls.append((prompt, kwargs))
         return "Aero 14 is best [review](https://example.com/aero)"
 

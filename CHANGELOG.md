@@ -25,6 +25,10 @@ First release.
   `auth.json` is secret-shaped: tools can't read it and the sandbox blocks it.
 - Tool calls as one aligned row each, colored by kind, with the result on the right
   (`+14 −3`, `212 passed`, `exit 1` plus the error line); subagents nested under their call.
+- The input box sits at the bottom of the terminal from the first line on (and after
+  `/clear` or a resize); output grows upward above it. Pickers, questions and permission
+  prompts open there too, in the box's place. Not full-screen: scrollback,
+  selection and copy work as usual.
 - The input box stays up while the agent works: its progress is drawn above it, and a
   message typed meanwhile reaches the agent before its next step (or starts the next turn,
   if it finished first). Ctrl+C in the box stops the turn. Permission prompts take the
@@ -80,6 +84,16 @@ First release.
   includes providers that stream it only as `reasoning` (Groq, vLLM, Ollama).
 - Models, context windows and capabilities come from each provider's model list.
 - Models are checked before switching; context overflows are compacted and retried.
+- Old tool output (results over 6k tokens) is cleared in batches, not one result per
+  turn, so the prompt cache survives. While the cache is warm, output is only cleared
+  once the history passes 60% of the context window, and at least 20k tokens at a
+  time. After 5 idle minutes, when the cache has expired anyway, it's cleared freely.
+  The last 40k tokens of tool output are kept, and so are `Skill`, `Agent` and `Team`
+  results.
+- WebSearch runs on the provider's `small_model`, as the auto-mode classifier already
+  did. If the small model can't take a request (no search tool, rate limited), the main
+  model answers instead. Compaction summaries stay on the main model: a weak summary
+  loses state for the rest of the session.
 - A reply whose stream ends without the provider's finish event (a dropped connection)
   is an error, not a finished answer, and isn't added to the conversation.
 - Network failures say what happened, to which host, with a code: `can't connect to

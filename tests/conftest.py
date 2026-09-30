@@ -13,6 +13,29 @@ from tinyharness.llm.providers import load_catalog
 from tinyharness.tools.base import Tool, ToolContext
 from tinyharness.workspace import Workspace
 
+# ---- opt-in tests ----
+# `terminal` tests drive the real CLI in an emulated terminal (pyte). They're slower and
+# only matter when changing the screen layout, so they run only with `--terminal`.
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption("--terminal", action="store_true", help="also run the emulated-terminal tests")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers", "terminal: drives the CLI in an emulated terminal (run with --terminal)"
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if config.getoption("--terminal"):
+        return
+    skip = pytest.mark.skip(reason="emulated-terminal test: run with --terminal")
+    for item in items:
+        if "terminal" in item.keywords:
+            item.add_marker(skip)
+
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

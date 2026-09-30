@@ -45,7 +45,7 @@ from rich.text import Text
 from tinyharness.cli.commands import COMMANDS
 from tinyharness.cli.render import Renderer, dollars, tokens
 from tinyharness.cli.theme import MODE_LABEL, MODE_STYLE, PROMPT, PT_STYLE, SUBTLE, percent
-from tinyharness.cli.widgets import pick
+from tinyharness.cli.widgets import bottom_spacer, pick
 from tinyharness.events import Event
 from tinyharness.llm.client import LLMError, ProviderConnectionError
 from tinyharness.llm.tokens import count_message_tokens
@@ -128,12 +128,16 @@ def _short(text: str, limit: int) -> str:
 
 
 class _CompactPrompt(PromptSession[str]):
-    """The input box, which stays up while the agent works.
+    """The input box, which stays up while the agent works, on the bottom rows of the
+    terminal from the first line on.
 
     Above it, `live` (the running tools, agents and spinner) is redrawn in place;
-    finished output scrolls above everything (via patch_stdout). prompt_toolkit also
-    stretches the input to the bottom of the terminal when there is a bottom toolbar:
-    its height is capped at the text it holds so the frame hugs the input."""
+    finished output scrolls above everything (via patch_stdout). prompt_toolkit gives
+    the prompt every row below the cursor (it asks the terminal where that is, again
+    after a clear or a resize). A spacer at the top takes the rows nothing else needs,
+    so the box sits at the bottom; the input's height is capped at the text it holds so
+    the frame hugs it. A terminal that can't report the cursor gets the box right under
+    the output instead. Nothing is full-screen: scrollback, selection and copy work."""
 
     live: Callable[[], str] | None = None
 
@@ -144,7 +148,9 @@ class _CompactPrompt(PromptSession[str]):
             Window(FormattedTextControl(lambda: ANSI(text())), dont_extend_height=True, wrap_lines=False),
             filter=Condition(lambda: bool(text())),
         )
-        return Layout(HSplit([above, layout.container]), focused_element=layout.current_window)
+        return Layout(
+            HSplit([bottom_spacer(), above, layout.container]), focused_element=layout.current_window
+        )
 
     def _get_default_buffer_control_height(self) -> Dimension:
         width = max(get_app().output.get_size().columns - 6, 10)  # frame + prompt

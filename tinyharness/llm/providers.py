@@ -39,7 +39,7 @@ class Provider(BaseModel):
     api_key_env: str
     key_url: str = ""
     default_model: str = ""
-    small_model: str = ""  # cheap model for background work (the auto-mode classifier)
+    small_model: str = ""  # cheap model for background work (classifier, WebSearch digests)
     extra_headers: dict[str, str] = Field(default_factory=dict)
     extra_body: dict[str, Any] = Field(default_factory=dict)  # merged into every request
     effort_param: str = "reasoning_effort"  # chat API only: where the reasoning effort goes

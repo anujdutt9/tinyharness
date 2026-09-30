@@ -205,6 +205,22 @@ async def test_context_overflow_summarizes_and_retries(tmp_path):
     assert len(llm.requests[1]) < len(llm.requests[0])  # the retry sent the shorter history
 
 
+async def test_each_model_call_refreshes_the_cache_clock(tmp_path):
+    llm = ScriptedLLM(["done"])
+    with Transcript(tmp_path, "test") as transcript:
+        deps = LoopDeps(
+            llm=llm,
+            tools=ToolRegistry([]),
+            gate=PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS),
+            compactor=Compactor(llm),
+            transcript=transcript,
+            ctx=make_ctx(tmp_path),
+        )
+        assert deps.compactor.cache_cold
+        [e async for e in run_agent_loop("go", History([]), deps)]
+    assert not deps.compactor.cache_cold
+
+
 async def test_reasoning_state_is_kept_on_the_reply(tmp_path):
     from tinyharness.agent.history import ReasoningState
     from tinyharness.llm.types import StreamChunk

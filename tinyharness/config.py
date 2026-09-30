@@ -137,7 +137,7 @@ class Config(BaseModel):
 
     @property
     def small_model(self) -> str:
-        """Cheap model for background work, such as the auto-mode classifier."""
+        """Cheap model for background work: the auto-mode classifier and WebSearch digests."""
         return self.provider_info.small_model or self.model
 
     def price(self, provider: str, model: str) -> Price | None:

@@ -17,7 +17,6 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import ANSI, FormattedText, merge_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
@@ -28,6 +27,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from tinyharness.cli.theme import BRAND, PROMPT, PT_STYLE, SUBTLE, split_summary
+from tinyharness.cli.widgets import at_bottom, prompt_at_bottom
 from tinyharness.permissions import Decision, PermissionRequest
 
 Choice = Literal["yes", "remember", "no"]
@@ -114,8 +114,8 @@ async def ask(console: Console, request: PermissionRequest, summary: str) -> Dec
         symbol=PROMPT,
         key_bindings=_choice_keys([choice for choice, _ in options]),
     )
-    app = prompt._create_application()  # ChoiceInput has no option to erase itself; its app does
-    app.erase_when_done = True
+    app = at_bottom(prompt._create_application())  # where the input box is
+    app.erase_when_done = True  # ChoiceInput has no option to erase itself; its app does
     try:
         choice: Choice = await app.run_async()
     except (KeyboardInterrupt, EOFError):
@@ -140,7 +140,7 @@ def _ansi(console: Console, renderable: RenderableType) -> str:
 
 async def _ask_feedback() -> str:
     try:
-        text: Any = await PromptSession[str]().prompt_async(
+        text: Any = await prompt_at_bottom().prompt_async(
             FormattedText([(f"{BRAND} bold", f" {PROMPT} "), ("", "What should it do instead? ")]),
             placeholder=FormattedText([(SUBTLE, "enter to just stop")]),
             style=PT_STYLE,

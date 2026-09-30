@@ -261,6 +261,26 @@ class LLMClient:
         return (await self.collect(messages, model=model, web_search=web_search)).text
 
     @property
+    def small_model(self) -> str:
+        """This provider's cheap model, for background work (e.g. WebSearch digests)."""
+        return self.provider.small_model or self.model
+
+    async def one_shot_small(
+        self, prompt: str, *, system: str | None = None, web_search: bool = False
+    ) -> str:
+        """`one_shot` on the small model. If the small model refuses the request (too long for
+        its window, a tool it lacks, rate limited), the main model answers instead."""
+        small = self.small_model
+        if small != self.model:
+            try:
+                return await self.one_shot(prompt, system=system, model=small, web_search=web_search)
+            except ProviderConnectionError:
+                raise  # the network is down for both
+            except LLMError:
+                pass
+        return await self.one_shot(prompt, system=system, web_search=web_search)
+
+    @property
     def supports_web_search(self) -> bool:
         """Whether this provider has its own web search tool the model can use."""
         return bool(self.provider.web_search)

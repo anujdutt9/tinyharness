@@ -213,6 +213,7 @@ async def _ask_model(
             turn.state = chunk.state
         if chunk.usage is not None:
             turn.usage = chunk.usage
+    deps.compactor.mark_call()
 
 
 async def _compact(history: History, deps: LoopDeps) -> AsyncGenerator[Event, None]:

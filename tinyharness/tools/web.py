@@ -352,7 +352,7 @@ class WebSearchTool(Tool[WebSearchInput]):
         llm = self.llm()
         if not llm.supports_web_search:
             raise ToolError(self.unsupported.format(provider=llm.provider.label))
-        answer = await llm.one_shot(SEARCH_PROMPT.format(query=args.query), web_search=True)
+        answer = await llm.one_shot_small(SEARCH_PROMPT.format(query=args.query), web_search=True)
         if not answer.strip():
             raise ToolError("the search returned nothing")
         return f"Search results for {args.query!r}\n{UNTRUSTED}\n\n{answer.strip()}"

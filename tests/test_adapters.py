@@ -680,3 +680,48 @@ async def test_gemini_thought_summaries():
         named=True,
     )
     assert (await reasoning_text("gemini", stream))[0] == "Look at a.py"
+
+
+# ---- background work on the small model ----
+
+
+def recording(llm: LLMClient, fail_on: str | None = None, error: Exception | None = None) -> list:
+    """Replace llm.one_shot with a fake that records the model each call used."""
+    used = []
+
+    async def one_shot(prompt, *, system=None, model=None, web_search=False):
+        used.append(model or llm.model)
+        if model == fail_on:
+            raise error
+        return "ok"
+
+    llm.one_shot = one_shot
+    return used
+
+
+async def test_background_work_uses_the_small_model():
+    llm = client("anthropic", Server(), model="claude-sonnet-5")
+    used = recording(llm)
+    assert await llm.one_shot_small("summarize") == "ok"
+    assert used == ["claude-haiku-4-5"]
+
+
+async def test_background_work_falls_back_to_the_main_model():
+    llm = client("anthropic", Server(), model="claude-sonnet-5")
+    used = recording(llm, fail_on="claude-haiku-4-5", error=ContextOverflowError("too long"))
+    assert await llm.one_shot_small("summarize") == "ok"
+    assert used == ["claude-haiku-4-5", "claude-sonnet-5"]
+
+
+async def test_background_work_does_not_retry_a_network_failure():
+    from tinyharness.llm.types import ProviderConnectionError
+
+    llm = client("anthropic", Server(), model="claude-sonnet-5")
+    used = recording(
+        llm,
+        fail_on="claude-haiku-4-5",
+        error=ProviderConnectionError("offline", host="api.anthropic.com", code="ECONNRESET"),
+    )
+    with pytest.raises(ProviderConnectionError):
+        await llm.one_shot_small("summarize")
+    assert used == ["claude-haiku-4-5"]

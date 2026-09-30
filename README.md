@@ -52,7 +52,7 @@ Added `--verbose` (alias `-v`), with a test.
 | **Permissions** | Reads inside the project never ask; edits ask with a diff preview. Answers are Yes / Yes, don't ask again / No + feedback. Shift+Tab cycles modes (`default` → `acceptEdits` → `plan`); plus `auto` (LLM classifier) and `bypassPermissions`. Persistent `allow`/`deny` rules in config |
 | **Sandbox** | `Bash` runs in an OS sandbox (Seatbelt on macOS): writes only inside the project, no reading credential files, no network, and no handing work to other apps (`open`, AppleScript). Git hooks and `.tinyharness/` stay read-only, so nothing can plant code that runs later outside it (Write and Edit ask every time for those). A cloned repo's own hooks and plugins load only after you trust the folder, which is asked once, and only if it has any. Sandboxed commands run without asking in `acceptEdits`/`auto`. A command that needs the network (installing a package) can ask to run outside the sandbox, and that asks every time. `Open` shows you a document or page, and always asks |
 | **Security** | API keys never reach the model: tools refuse to read secret-shaped files (`.env`, SSH keys, …), configured key values are masked in every tool result, and a key pasted into the chat is caught before sending. Hooks get no keys in their environment, and keys are masked out of the input they're sent; session logs are private to you and masked the same way; symlinks are resolved before permission checks |
-| **Context management** | Three tiers: cap oversized messages → stub old tool output → summarize history. Each message changes at most once, so provider prompt caches stay valid |
+| **Context management** | Three tiers: cap oversized messages → stub old tool output → summarize history. Old tool output is cleared only when it pays: once the cache has expired anyway, or near the window in batches of at least 20k tokens. The prompt cache isn't rebuilt every turn |
 | **Skills** | `SKILL.md` directories, loaded progressively; compatible with Claude Code skills |
 | **Subagents** | Isolated context windows; built-in `explore` / `plan` / `general-purpose`, plus your own in Markdown |
 | **Hooks and plugins** | Shell or Python hooks on 5 lifecycle events; plugins bundle skills, agents and hooks |
@@ -255,6 +255,7 @@ api = "chat"   # or "responses", "anthropic", "gemini"
 ```bash
 uv sync                   # installs dev tools too
 uv run pytest             # tests use a scripted fake LLM; no API key needed
+uv run pytest --terminal  # also the screen-layout tests, in an emulated terminal (slower)
 uv run ruff check . && uv run ruff format --check . && uv run mypy
 uv build && uv run python scripts/check_dist.py   # build and smoke-test the package
 ```
