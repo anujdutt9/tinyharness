@@ -1,7 +1,7 @@
 import pytest
 
 from conftest import call, make_ctx
-from tinyharness.security import redact, sanitized_env
+from tinyharness.security import is_secret_path, redact, sanitized_env
 from tinyharness.tools.base import ToolError
 from tinyharness.tools.read import ReadTool
 from tinyharness.workspace import Workspace
@@ -103,3 +103,57 @@ def test_find_api_key_ignores_ordinary_text(text):
 def test_find_api_key_catches_a_configured_key_without_a_prefix(monkeypatch):
     monkeypatch.setenv("MISTRAL_API_KEY", "Zm9vYmFyYmF6cXV4MTIzNDU2")
     assert find_api_key("here: Zm9vYmFyYmF6cXV4MTIzNDU2") is not None
+
+
+@pytest.mark.parametrize("name", [".env.example", ".env.sample", "app/.env.template", ".env.dist"])
+def test_env_templates_are_not_secrets(name):
+    assert not is_secret_path(name)
+
+
+@pytest.mark.parametrize("name", [".env", ".env.local", "app/.env.production", ".env.example.bak"])
+def test_real_env_files_are_secrets(name):
+    assert is_secret_path(name)
+
+
+# ---- session logs ----
+
+
+def test_session_logs_mask_credentials_but_keep_reasoning_intact(tmp_path, monkeypatch):
+    import json
+    import stat
+
+    from tinyharness.agent.transcript import Transcript
+    from tinyharness.paths import state_dir
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-configured0123456789abcdef")
+    pasted = "sk-or-v1-" + "a1b2c3d4" * 4
+    blob = "gAAA_sk-" + "x" * 30  # a signed reasoning blob that happens to look key-shaped
+    with Transcript(tmp_path, "s1") as log:
+        log.write("user", text=f"use {pasted} please")
+        log.write("tool_use", tool="Bash", args={"command": "echo sk-configured0123456789abcdef"})
+        log.write("msg", message={"content": "hi", "state": {"owner": "o", "data": {"sig": blob}}})
+    text = log.path.read_text()
+    assert pasted not in text and "sk-configured0123456789abcdef" not in text
+    assert "[REDACTED API KEY]" in text and "[REDACTED OPENAI_API_KEY]" in text
+    last = json.loads(text.splitlines()[-1])
+    assert last["message"]["state"]["data"]["sig"] == blob  # resuming must send it back unchanged
+    assert stat.S_IMODE(log.path.stat().st_mode) == 0o600
+    assert stat.S_IMODE((state_dir(tmp_path) / "sessions").stat().st_mode) == 0o700
+
+
+def test_existing_log_directories_are_made_private(tmp_path):
+    import stat
+
+    from tinyharness.agent.transcript import Transcript
+    from tinyharness.paths import state_dir
+
+    old = state_dir(tmp_path) / "sessions"
+    old.mkdir(parents=True)
+    old.chmod(0o755)  # as earlier versions left it
+    Transcript(tmp_path, "s2").close()
+    assert stat.S_IMODE(old.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("path", ["/home/me/.tinyharness/auth.json", "project/auth.json"])
+def test_key_files_named_auth_json_are_secret(path):
+    assert is_secret_path(path)

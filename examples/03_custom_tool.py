@@ -46,8 +46,9 @@ class ClockTool(Tool[ClockInput]):
 
 
 async def main() -> None:
-    session = Session(SessionOptions(working_dir=tempfile.mkdtemp(prefix="tinyharness-")))
-    session.tools.register(ClockTool())
+    session = Session(
+        SessionOptions(working_dir=tempfile.mkdtemp(prefix="tinyharness-"), tools=[ClockTool()])
+    )
     try:
         async for event in session.run("What time is it in Tokyo and in New York right now?"):
             match event:

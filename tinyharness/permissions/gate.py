@@ -6,7 +6,12 @@ Layers are checked in order and the first one with an opinion wins:
     2. path     the target path must resolve
     3. hooks    PreToolUse hooks can allow or deny
     4. rules    config rules and "don't ask again" answers (deny beats allow)
-    5. mode     plan / bypass / reads-are-free / acceptEdits / auto (see `_auto`)
+       escape   a call that leaves its sandbox (Bash with sandbox=false), or that
+                changes a file that runs code outside it (hooks, plugins, git hooks,
+                settings), skips allow rules and steps 5-6: it always asks, and can't
+                be remembered
+    5. mode     plan / bypass / reads-are-free / acceptEdits / sandboxed commands /
+                auto (see `_auto`)
     6. scratch  the agent's own scratch directory
     7. ask      the permission callback (interactive prompt or SDK policy)
 
@@ -41,8 +46,9 @@ class PermissionRequest:
     args: dict[str, Any]
     summary: str  # e.g. "Edit(src/app.py, -1/+4 lines)"
     path: str | None  # resolved target path, if the tool touches one
-    remember_label: str  # what "don't ask again" would cover, in plain words
+    remember_label: str  # what "don't ask again" would cover, in plain words; "" = not offered
     reason: str = ""  # why auto mode is asking, when it is
+    warning: str = ""  # something the user must know before answering (e.g. no sandbox)
 
 
 @dataclass
@@ -53,6 +59,9 @@ class Decision:
     remember: bool = False  # allow: apply the request's "don't ask again" scope
     interrupt: bool = False  # deny: skip the rest of this turn's tool calls
     feedback: str = ""  # with interrupt: what to do instead, sent as the user's next message
+    # allow: the resolved path this was judged on. The tool must act on exactly this path,
+    # not resolve it again: a symlink swapped in between would point it somewhere else.
+    path: Path | None = None
 
 
 PermissionCallback = Callable[[PermissionRequest], Awaitable[Decision]]
@@ -67,6 +76,7 @@ class PermissionGate:
     classifier: AutoModeClassifier | None = None
     callback: PermissionCallback | None = None
     scratch: Scratch | None = None
+    protected: tuple[Path, ...] = ()  # changing anything under these always asks (see `_protected`)
 
     async def check(
         self,
@@ -80,12 +90,25 @@ class PermissionGate:
     ) -> Decision:
         if not tool.needs_permission:
             return Decision(True, "no permission needed", "tool")
-
         path: Path | None = None
         if target_path is not None:
-            path = self.workspace.resolve(target_path)
+            path = self.workspace.resolve(target_path)  # the one resolution: see Decision.path
             if path is None:
                 return Decision(False, f"invalid path: {target_path}", "path")
+        decision = await self._decide(tool, args, path, target_host, summary, history_tail)
+        if decision.allow and path is not None:
+            decision.path = path
+        return decision
+
+    async def _decide(
+        self,
+        tool: Tool[Any],
+        args: dict[str, Any],
+        path: Path | None,
+        target_host: str | None,
+        summary: str,
+        history_tail: str,
+    ) -> Decision:
         trusted = path is not None and self.workspace.is_trusted(path)
 
         if self.hooks is not None:
@@ -95,11 +118,27 @@ class PermissionGate:
                 return Decision(allow, verdict.get("reason", f"hook {verdict['decision']}"), "hook")
 
         site = f"{DOMAIN}{target_host.lower()}" if target_host else None
+        escape = tool.escapes(args) or self._protected(tool, path)
         match self.rules.check(tool.name, str(path) if path else site):
             case "deny":
                 return Decision(False, "blocked by a deny rule", "rule")
-            case "allow":
+            case "allow" if escape is None:  # rules were written with the sandbox in place
                 return Decision(True, "matches an allow rule", "rule")
+
+        if escape is not None:
+            if self.mode == PermissionMode.BYPASS:
+                return Decision(True, "bypassPermissions mode", "mode")
+            if self.mode == PermissionMode.PLAN:
+                return Decision(False, "plan mode blocks mutating tools", "mode")
+            request = PermissionRequest(
+                tool=tool.name,
+                args=args,
+                summary=summary or tool.name,
+                path=str(path) if path else None,
+                remember_label="",
+                warning=escape,
+            )
+            return await self._ask(request)
 
         risk = self._auto_risk(tool, args, path, trusted) if self.mode == PermissionMode.AUTO else None
         if risk is None and (decision := await self._check_mode(tool, args, path, trusted, history_tail)):
@@ -110,23 +149,40 @@ class PermissionGate:
         if self._in_scratch(path):
             return Decision(True, "agent scratch directory", "mode")
 
-        if self.callback is None:
-            return Decision(False, "no permission handler available", "prompt")
+        # Auto mode asks about a risky change to a file case by case: a "don't ask again"
+        # there would stop it judging the next one (and used to switch to acceptEdits).
+        case_by_case = risk is not None and path is not None
         request = PermissionRequest(
             tool=tool.name,
             args=args,
             summary=summary or tool.name,
             path=str(path) if path else None,
-            remember_label=self._remember_label(tool, path, trusted, target_host),
+            remember_label="" if case_by_case else self._remember_label(tool, path, trusted, target_host),
             reason=risk or "",
         )
-        decision = await self.callback(request)
-        if decision.allow and decision.remember:
+        decision = await self._ask(request)
+        if decision.allow and decision.remember and request.remember_label:
             self._remember(tool, path, trusted, site)
         elif decision.allow and tool.read_only and (site or path is not None):
             # A plain "yes" to reading something covers reading it again this session.
             self.rules.add_allow(Rule(tool.name, site or glob.escape(str(path))))
         return decision
+
+    def _protected(self, tool: Tool[Any], path: Path | None) -> str | None:
+        """Why changing `path` needs the user every time: it's read as code or settings
+        later, outside the sandbox (.tinyharness/, .git/hooks, .git/config, ~/.tinyharness)."""
+        if path is None or tool.read_only or self._in_scratch(path):
+            return None
+        for root in self.protected:
+            if path == root or path.is_relative_to(root):
+                shown = self.workspace.relative(root)
+                return f"this changes {shown}, which can run code outside the sandbox (hooks, plugins or settings)"
+        return None
+
+    async def _ask(self, request: PermissionRequest) -> Decision:
+        if self.callback is None:
+            return Decision(False, "no permission handler available", "prompt")
+        return await self.callback(request)
 
     async def _check_mode(
         self, tool: Tool[Any], args: dict[str, Any], path: Path | None, trusted: bool, history_tail: str
@@ -139,6 +195,8 @@ class PermissionGate:
             return Decision(True, "read-only, inside the working directory", "mode")
         if self.mode == PermissionMode.ACCEPT_EDITS and trusted:
             return Decision(True, "acceptEdits (inside the working directory)", "mode")
+        if self.mode in (PermissionMode.ACCEPT_EDITS, PermissionMode.AUTO) and tool.contained(args):
+            return Decision(True, f"{self.mode.value}: runs in the sandbox", "mode")
         if self.mode == PermissionMode.AUTO:
             return await self._auto(tool, args, path, trusted, history_tail)
         return None

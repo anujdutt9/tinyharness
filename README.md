@@ -18,8 +18,8 @@ $ tinyharness
 
 ❯ add a --verbose flag to cli.py
 
-● Read  cli.py
-  ⎿ Read 112 lines
+✓ Read    cli.py                                           112 lines
+✓ Bash    uv run pytest -q                     48 passed in 1.2s · 1.4s
 
 ╭─ Edit  cli.py, -1/+3 lines ──────────────────────╮
 │ - parser.add_argument("--debug")                 │
@@ -31,16 +31,16 @@ $ tinyharness
    2. Yes, allow all edits in this project for this session
    3. No, and tell it what to do instead  esc
 
-● Edit  cli.py, -1/+3 lines
-  ⎿ edited cli.py (1 replacement)
+✓ Edit    cli.py                                               +3 −1
+✓ Bash    uv run pytest -q                     49 passed in 1.2s · 1.3s
 
-Added `--verbose` (alias `-v`).
+Added `--verbose` (alias `-v`), with a test.
 
-✻ Worked for 9s · 2 tool calls
-┌──────────────────────────────────────────────────┐
-│❯ Ask anything, or type / for commands            │
-└──────────────────────────────────────────────────┘
-  ⏵⏵ accept edits · shift+tab to switch     12% context
+✻ 9s · 4 tools · 1 file +3 −1 · tests ✓ · 14.2k tokens · $0.03
+┌──────────────────────────────────────────────────────────────────┐
+│❯ Ask anything, or type / for commands                            │
+└──────────────────────────────────────────────────────────────────┘
+  ⏵⏵ accept edits · shift+tab    Sonnet 5 · sandbox · ⎇ main ✱ · 12% context · $0.03
 ```
 
 ## Features
@@ -48,16 +48,18 @@ Added `--verbose` (alias `-v`).
 | | |
 |---|---|
 | **Agent loop** | Streaming, parallel dispatch of read-only tools, argument validation, step limit, Ctrl-C to interrupt a turn |
-| **Tools** | `Read` `Write` `Edit` `Glob` `Grep` `Pdf` `TodoWrite` `WebSearch` `WebFetch` `Agent` `Team`; each one is a class plus a pydantic input model |
+| **Tools** | `Read` `Write` `Edit` `Glob` `Grep` `Bash` `Pdf` `TodoWrite` `WebSearch` `WebFetch` `Open` `Agent` `Team`; each one is a class plus a pydantic input model |
 | **Permissions** | Reads inside the project never ask; edits ask with a diff preview. Answers are Yes / Yes, don't ask again / No + feedback. Shift+Tab cycles modes (`default` → `acceptEdits` → `plan`); plus `auto` (LLM classifier) and `bypassPermissions`. Persistent `allow`/`deny` rules in config |
-| **Security** | API keys never reach the model: tools refuse to read secret-shaped files (`.env`, SSH keys, …), configured key values are masked in every tool result, and a key pasted into the chat is caught before sending. Hook processes never see keys; symlinks are resolved before permission checks |
+| **Sandbox** | `Bash` runs in an OS sandbox (Seatbelt on macOS): writes only inside the project, no reading credential files, no network, and no handing work to other apps (`open`, AppleScript). Git hooks and `.tinyharness/` stay read-only, so nothing can plant code that runs later outside it (Write and Edit ask every time for those). A cloned repo's own hooks and plugins load only after you trust the folder, which is asked once, and only if it has any. Sandboxed commands run without asking in `acceptEdits`/`auto`. A command that needs the network (installing a package) can ask to run outside the sandbox, and that asks every time. `Open` shows you a document or page, and always asks |
+| **Security** | API keys never reach the model: tools refuse to read secret-shaped files (`.env`, SSH keys, …), configured key values are masked in every tool result, and a key pasted into the chat is caught before sending. Hooks get no keys in their environment, and keys are masked out of the input they're sent; session logs are private to you and masked the same way; symlinks are resolved before permission checks |
 | **Context management** | Three tiers: cap oversized messages → stub old tool output → summarize history. Each message changes at most once, so provider prompt caches stay valid |
 | **Skills** | `SKILL.md` directories, loaded progressively; compatible with Claude Code skills |
 | **Subagents** | Isolated context windows; built-in `explore` / `plan` / `general-purpose`, plus your own in Markdown |
 | **Hooks and plugins** | Shell or Python hooks on 5 lifecycle events; plugins bundle skills, agents and hooks |
 | **Providers** | Each provider through its own current API: Anthropic Messages, OpenAI Responses, Gemini Interactions, and Chat Completions for the rest, plus any gateway. Reasoning carries across tool calls (signed/encrypted state is sent back unchanged). No per-model special cases: models, context windows and capabilities come from each provider's own model list |
+| **Terminal UI** | The input box stays up while the agent works: type to steer it (your message arrives before its next step), Ctrl+C to stop it. The model's reasoning is one line (`∴ Thought for 8s`) until `ctrl+t` or `/thinking` shows it in full. One row per tool call, colored by what it does (looking, changing, running, the web, agents), with its result on the right: `+14 −3`, `212 passed`, `exit 1` and the error under it. Subagents hang under their call. Each turn ends with a summary (time, files changed, whether the tests passed, tokens, cost), and a status bar shows the model, sandbox, git branch, context and cost. `ctrl+o` shows the last tool's full output; file paths are clickable; themes: `system` (the default: asks your terminal whether its background is light or dark), `light` or `dark`, set with `/theme` or `theme =` in the config; `NO_COLOR` is honored |
 | **Two interfaces** | Interactive CLI (streamed Markdown, live tool status, `/` autocomplete, pickers, mode-colored input box) and an async Python SDK, both consuming the same typed event stream |
-| **Transcripts** | Every session is logged as append-only JSONL in `.tinyharness/sessions/` |
+| **Resume** | Every conversation is saved losslessly as append-only JSONL in `~/.tinyharness/projects/<project>/`, never inside your repo (so it can't be committed) and where sandboxed commands can't write. `-c` continues the latest, `-r` picks one. On resume the harness checks what changed while you were away (files the agent read, git HEAD or branch, AGENT.md): stale file contents in the history are replaced by a stub, and the model is told what changed before your next message |
 
 ## Install
 
@@ -69,8 +71,8 @@ uv tool install tinyharness        # or: pipx install tinyharness
 ```
 
 Then run `tinyharness` from inside the project you want to work on. The first run
-without an API key shows where to get one and creates `~/.config/tinyharness/.env`
-for it; one key for any supported provider is enough. `uv tool upgrade tinyharness`
+asks which provider to use and for its API key (paste it when asked); one key for
+any supported provider is enough. `uv tool upgrade tinyharness`
 updates it.
 
 To use the SDK in your own code, add it as a dependency:
@@ -87,7 +89,7 @@ uv sync
 uv run tinyharness
 ```
 
-Useful flags: `-p "prompt"` (run one prompt and exit), `--mode acceptEdits`,
+Useful flags: `-c` (continue the latest conversation), `-r` (pick one to resume), `-p "prompt"` (run one prompt and exit), `--mode acceptEdits`,
 `--model <name>` (or `provider:model`), `--provider openai`, `--cwd <dir>`, `--debug`.
 
 In the REPL, type `/` to autocomplete commands, or `/help` to list them all. The
@@ -102,6 +104,7 @@ main ones:
 | `/skills`, `/<skill> [args]` | list or run skills |
 | `/context`, `/clear` | show context usage, or start a fresh conversation |
 | `/whoami`, `/ping` | check the provider and API key |
+| `/key [provider]` | add or replace a provider's API key (also offered by `/provider` and `/model` when one is missing) |
 
 ## SDK
 
@@ -125,9 +128,45 @@ asyncio.run(main())
 ```
 
 For headless runs, pass `permission_callback=` (an async function taking a `PermissionRequest`
-and returning a `Decision`) to decide what would otherwise prompt.
-See [`examples/`](https://github.com/anujdutt9/tinyharness/tree/main/examples) for a one-shot query, a multi-turn session, a custom tool,
-a permission policy with hooks, and skills.
+and returning a `Decision`) to decide what would otherwise prompt. A request with a `warning`
+(such as a command that asks to run outside the sandbox) comes to the callback every time.
+
+Subagents can be defined in code as well as in Markdown files; a name that's already
+taken replaces that agent. Their progress arrives as `SubagentUpdate` events on `on_event=`:
+
+```python
+from tinyharness import AgentSpec, SessionOptions
+
+reviewer = AgentSpec(
+    name="reviewer",
+    description="Reviews a diff for bugs. Read-only.",  # the model reads this to decide when to use it
+    system_prompt="You are a meticulous code reviewer...",
+    tools=["Read", "Grep", "Glob", "Bash"],  # leave out for every tool the session has
+    permission_mode="acceptEdits",
+    model="anthropic:claude-haiku-4-5",  # or "small", "inherit" (the default), or a model id
+)
+options = SessionOptions(agents=[reviewer], tools=[MyTool()], on_event=print)
+```
+
+Conversations are saved as they go and can be resumed from code too:
+
+```python
+from tinyharness import Session, SessionOptions, list_sessions
+
+for info in list_sessions():  # newest first: id, title, updated, messages
+    print(info.id, info.title)
+session = Session(SessionOptions(resume="latest"))  # or resume=info.id
+print(session.resume_report.summary())  # e.g. "12 messages · 1 file changed since"
+```
+
+`SessionOptions(store=...)` takes any `SessionStore` (three methods: `writer`, `load`,
+`sessions`) to keep conversations somewhere other than files in the project.
+
+A subagent's `model` is fixed by whoever defines the agent, and can come from any
+provider you have a key for: a GPT session can hand review to a Claude agent.
+Tools passed in `tools=` are available to subagents too.
+See [`examples/`](https://github.com/anujdutt9/tinyharness/tree/main/examples) for a one-shot query, a multi-turn session, resuming a conversation, a custom tool,
+a permission policy with hooks, skills, and subagents on different models.
 
 ## How it works
 
@@ -158,12 +197,19 @@ All prompts sent to the model (the system prompt, the compaction summary, the sa
 
 ## Configuration
 
-tinyharness needs an API key for at least one provider. Run it once with no key and it
-shows where to get one and creates `~/.config/tinyharness/.env` with a commented-out
-line per provider: uncomment one and add your key (or `export` it in your shell).
-Keys added while it's running are picked up by `/provider` and `/model`. After that,
-everything is optional: `/model` switches models (and remembers your choice), and
-one file, `~/.config/tinyharness/config.toml`, holds any defaults you want. See
+tinyharness needs an API key for at least one provider. The first run asks for one
+(with a link to where to get it), checks it with the provider and keeps it in
+`~/.tinyharness/auth.json`, one entry per provider, readable only by you and never by
+the agent's tools. Switching to a provider with no key (`/provider`, `/model`) asks
+for its key the same way, and `/key` adds or replaces one any time. A key set in your
+shell (`export ANTHROPIC_API_KEY=...`) takes priority. After that, everything is
+optional: `/model` switches models (and remembers your choice), and one file,
+`~/.tinyharness/config.toml`, holds any defaults you want.
+
+Everything tinyharness keeps for you is in one folder, `~/.tinyharness/`:
+`config.toml`, `auth.json`, your `skills/`, `agents/`, `plugins/` and `hooks.toml`, and
+its own state and session logs. (Earlier versions used `~/.config/tinyharness/`; its
+files are moved on the first run.) See
 [`examples/config.toml`](https://github.com/anujdutt9/tinyharness/blob/main/examples/config.toml). API keys never go in the config file.
 
 **Providers.** Each one is used through its own current API:
@@ -195,8 +241,8 @@ api = "chat"   # or "responses", "anthropic", "gemini"
 
 | Location | Contents |
 |---|---|
-| `~/.tinyharness/` | your skills, agents, plugins, `hooks.toml`, `AGENT.md` |
-| `<project>/.tinyharness/` | project skills, agents, plugins and hooks, plus session transcripts and scratch files |
+| `~/.tinyharness/` | your skills, agents, plugins, `hooks.toml`, `AGENT.md`; `projects/<project>/` holds each project's conversation logs and scratch files |
+| `<project>/.tinyharness/` | project skills, agents, plugins and hooks: only what you put there, to commit and share. tinyharness never writes into your project |
 | `<project>/AGENT.md` (or `CLAUDE.md`) | project instructions added to the system prompt |
 
 ## Extending

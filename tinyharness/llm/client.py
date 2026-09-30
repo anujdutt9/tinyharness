@@ -24,10 +24,13 @@ from tinyharness.llm.types import (
     Effort,
     LLMError,
     ModelInfo,
+    ProviderConnectionError,
     Request,
     StreamChunk,
     ToolSpec,
 )
+from tinyharness.llm.usage import Usage, read_usage
+from tinyharness.net import describe as describe_network_error
 
 if TYPE_CHECKING:
     from tinyharness.llm.providers import Provider
@@ -37,6 +40,7 @@ __all__ = [
     "ContextOverflowError",
     "LLMClient",
     "LLMError",
+    "ProviderConnectionError",
     "StreamChunk",
     "ToolCallAccumulator",
 ]
@@ -95,6 +99,7 @@ class LLMClient:
         self.api_key = api_key
         self.model = model
         self.effort = effort
+        self.show_reasoning = False  # request readable reasoning where a provider makes it opt-in
         self.timeout = timeout
         self.directory = models
         self.transport = transport
@@ -175,6 +180,7 @@ class LLMClient:
             info=self.model_info(model),
             owner=f"{self.provider.name}:{model}",
             web_search=web_search,
+            show_reasoning=self.show_reasoning,
         )
         payload = _merge(self.adapter.payload(request), self.provider.extra_body)
         parser = self.adapter.parser()
@@ -182,32 +188,51 @@ class LLMClient:
             "POST %s model=%s messages=%d tools=%d", self.endpoint, model, len(messages), len(request.tools)
         )
 
-        async with (
-            httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client,
-            client.stream("POST", self.endpoint, json=payload, headers=self._headers()) as resp,
-        ):
-            if resp.status_code >= 400:
-                body = (await resp.aread()).decode(errors="replace")
-                raise _http_error(resp.status_code, body, self.endpoint)
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
-                    continue  # blank lines, `event:` names, `:` keep-alive comments
-                data = line.removeprefix("data:").strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    event = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                try:
-                    chunks = parser.feed(event)
-                except LLMError as e:
-                    raise (ContextOverflowError(str(e)) if _OVERFLOW.search(str(e)) else e) from None
-                for chunk in chunks:
-                    yield chunk
+        usage: Usage | None = None
+        finished = False  # a stream that just stops (a proxy dropping it) isn't a reply
+        try:
+            async with (
+                httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client,
+                client.stream("POST", self.endpoint, json=payload, headers=self._headers()) as resp,
+            ):
+                if resp.status_code >= 400:
+                    body = (await resp.aread()).decode(errors="replace")
+                    raise _http_error(resp.status_code, body, self.endpoint)
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue  # blank lines, `event:` names, `:` keep-alive comments
+                    data = line.removeprefix("data:").strip()
+                    if data == "[DONE]":
+                        finished = True
+                        break
+                    try:
+                        event = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    usage = read_usage(event, usage)
+                    try:
+                        chunks = parser.feed(event)
+                    except LLMError as e:
+                        raise (ContextOverflowError(str(e)) if _OVERFLOW.search(str(e)) else e) from None
+                    for chunk in chunks:
+                        finished = finished or chunk.finish_reason is not None
+                        yield chunk
+        except httpx.TransportError as e:  # refused, reset, DNS, TLS, timeouts, dropped mid-reply
+            failure = describe_network_error(e)
+            raise ProviderConnectionError(
+                failure.message, host=failure.host, code=failure.code, slow_reply=failure.slow_reply
+            ) from e
 
+        if not finished:
+            raise LLMError(
+                f"incomplete response from {self.endpoint}: the stream ended without a finish event, "
+                "so the reply was not added to the conversation. Try again; if it keeps happening, "
+                "a proxy or network timeout may be cutting the connection."
+            )
         if (state := parser.state()) is not None:
             yield StreamChunk(state=ReasoningState(request.owner, state))
+        if usage is not None:
+            yield StreamChunk(usage=usage)
 
     async def collect(
         self,
@@ -246,8 +271,8 @@ class LLMClient:
         try:
             async with httpx.AsyncClient(timeout=30.0, transport=self.transport) as client:
                 resp = await client.post(self.endpoint, json=payload, headers=self._headers())
-        except httpx.HTTPError as e:
-            return Ping(ok=False, status=None, message=f"{type(e).__name__}: {e}")
+        except httpx.TransportError as e:
+            return Ping(ok=False, status=None, message=describe_network_error(e).message)
         if resp.status_code == 200:
             return Ping(ok=True, status=200, message="auth ok")
         return Ping(ok=False, status=resp.status_code, message=_error_message(resp.text))

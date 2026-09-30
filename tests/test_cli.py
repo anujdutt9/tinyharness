@@ -92,3 +92,29 @@ def test_context_percent_never_looks_stuck_at_zero(fraction, shown):
     from tinyharness.cli.theme import percent
 
     assert percent(fraction) == shown
+
+
+# ---- the input box and the / menu ----
+
+
+@pytest.mark.parametrize(("matches", "rows"), [(0, 1), (2, 3), (6, 7), (20, 7)])
+async def test_the_input_box_grows_only_by_the_menu_it_shows(matches, rows):
+    """One row for the input, plus one per entry showing, up to the menu's cap. prompt_toolkit
+    alone reserves the full cap whenever a menu might show, leaving blank rows in the box."""
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.buffer import CompletionState
+    from prompt_toolkit.completion import Completion, WordCompleter
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from tinyharness.cli.repl import _CompactPrompt
+
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        prompt = _CompactPrompt(completer=WordCompleter([]), reserve_space_for_menu=6, multiline=True)
+        prompt.default_buffer.text = "/mode"
+        if matches:
+            prompt.default_buffer.complete_state = CompletionState(
+                prompt.default_buffer.document, [Completion(f"/c{i}") for i in range(matches)]
+            )
+        height = prompt._get_default_buffer_control_height()
+    assert (height.min, height.max) == (rows, rows)

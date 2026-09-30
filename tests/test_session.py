@@ -66,12 +66,16 @@ def test_missing_key_at_startup_names_the_variable(tmp_path):
 
 
 def test_a_key_added_while_running_is_picked_up(session, tmp_path, monkeypatch):
-    user_env = tmp_path / "_user" / ".config" / "tinyharness" / ".env"
-    user_env.parent.mkdir(parents=True, exist_ok=True)
-    user_env.write_text("XAI_API_KEY=xk-added-later\n")
+    """Added to auth.json by hand, or by `tinyharness --setup` in another terminal."""
+    import json
+
+    from tinyharness.paths import auth_path
+
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    auth_path().parent.mkdir(parents=True, exist_ok=True)
+    auth_path().write_text(json.dumps({"xai": {"api_key": "xk-added-later"}}))
     session.set_provider("xai")
     assert session.config.provider == "xai"
-    monkeypatch.delenv("XAI_API_KEY")
 
 
 async def test_checking_a_model_changes_nothing(session, monkeypatch):

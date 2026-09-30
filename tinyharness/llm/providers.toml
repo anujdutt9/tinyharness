@@ -53,7 +53,8 @@ key_url = "https://openrouter.ai/settings/keys"
 default_model = "anthropic/claude-sonnet-5"
 small_model = "anthropic/claude-haiku-4.5"
 effort_param = "reasoning.effort"
-extra_body = { cache_control = { type = "ephemeral" } }  # caching for models that need it asked for
+# caching for models that need it asked for; `usage` makes it report what each call cost
+extra_body = { cache_control = { type = "ephemeral" }, usage = { include = true } }
 web_search = { plugins = [{ id = "web" }] }
 
 [gemini]

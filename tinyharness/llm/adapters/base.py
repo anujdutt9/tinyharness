@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from tinyharness.llm.types import ModelInfo, Request, StreamChunk
+from tinyharness.llm.usage import price_from_listing
 
 if TYPE_CHECKING:
     from tinyharness.llm.providers import Provider
@@ -71,6 +72,9 @@ class Adapter(ABC):
                         item, top, keys=("context_length", "context_window", "max_context_length")
                     ),
                     max_output=_first_int(item, top, keys=("max_output_tokens", "max_completion_tokens")),
+                    price=price_from_listing(item["pricing"])
+                    if isinstance(item.get("pricing"), dict)
+                    else None,
                 )
             )
         return models, None

@@ -8,6 +8,7 @@ from tinyharness.tools.base import Tool
 from tinyharness.tools.edit import EditTool
 from tinyharness.tools.glob import GlobTool
 from tinyharness.tools.grep import GrepTool
+from tinyharness.tools.open import OpenTool
 from tinyharness.tools.pdf import PdfTool
 from tinyharness.tools.read import ReadTool
 from tinyharness.tools.todo import TodoWriteTool
@@ -57,6 +58,7 @@ def default_tools() -> list[AnyTool]:
         GrepTool(),
         TodoWriteTool(),
         WebFetchTool(),
+        OpenTool(),
     ]
 
 

@@ -140,7 +140,10 @@ class _GeminiParser(StreamParser):
             case "thought_signature":
                 step["signature"] = delta["signature"]
             case "thought_summary":
-                step.setdefault("summary", []).append(delta.get("content") or {})
+                content = delta.get("content") or {}
+                step.setdefault("summary", []).append(content)
+                if isinstance(content, dict) and content.get("text"):
+                    return [StreamChunk(reasoning_text=str(content["text"]))]
         return []
 
     def _stop(self, index: int) -> list[StreamChunk]:

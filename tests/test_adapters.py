@@ -323,6 +323,7 @@ async def test_gemini_accepts_arguments_that_arrive_whole():
             "step": {"type": "function_call", "id": "c1", "name": "Read", "arguments": {"path": "z.py"}},
         },
         {"event_type": "step.stop", "index": 0},
+        {"event_type": "interaction.completed", "interaction": {"status": "requires_action"}},
         named=True,
     )
     _, [call], state = await run(client("gemini", Server(stream)), CONVERSATION)
@@ -391,10 +392,72 @@ async def test_chat_keeps_deepseek_reasoning_content():
     assert state.data == {"reasoning_content": "hmm"}
 
 
+async def test_chat_keeps_plain_reasoning_and_sends_it_back():
+    """Groq (gpt-oss, Qwen), vLLM and Ollama stream reasoning only as `reasoning`."""
+    stream = sse(
+        chat_chunk({"reasoning": "The user wants "}),
+        chat_chunk({"reasoning": "a.py read."}),
+        chat_chunk(
+            {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "Read", "arguments": "{}"}}]}
+        ),
+        chat_chunk(finish="tool_calls"),
+    )
+    server = Server(stream, sse(chat_chunk(finish="stop")))
+    llm = client("groq", server, "openai/gpt-oss-120b")
+    _, _, state = await run(llm, CONVERSATION)
+    assert state.data == {"reasoning": "The user wants a.py read."}
+
+    await run(llm, after_tool_call(state))
+    assert server.requests[1]["messages"][2]["reasoning"] == "The user wants a.py read."
+
+
+async def test_openrouter_reasoning_is_sent_back_once():
+    """OpenRouter streams `reasoning` as a readable copy of `reasoning_details`."""
+    stream = sse(
+        chat_chunk(
+            {"reasoning": "hmm", "reasoning_details": [{"type": "reasoning.text", "text": "hmm", "index": 0}]}
+        ),
+        chat_chunk({"content": "hi"}),
+        chat_chunk(finish="stop"),
+    )
+    _, _, state = await run(client("openrouter", Server(stream)), CONVERSATION)
+    assert "reasoning" not in state.data and state.data["reasoning_details"][0]["text"] == "hmm"
+
+
 async def test_chat_mid_stream_error_is_raised():
     stream = sse({"error": {"message": "upstream overloaded"}, "choices": []})
     with pytest.raises(LLMError, match="overloaded"):
         await run(client("openrouter", Server(stream)), CONVERSATION)
+
+
+@pytest.mark.parametrize(
+    ("provider", "stream"),
+    [
+        ("openrouter", sse(chat_chunk({"content": "The answer is"}))),  # no finish_reason, no [DONE]
+        ("openai", sse({"type": "response.output_text.delta", "output_index": 0, "delta": "The answer is"})),
+        ("anthropic", "\n".join(ANTHROPIC_STREAM.split("\n")[:6]) + "\n\n"),
+        ("gemini", "\n".join(GEMINI_STREAM.split("\n")[:4]) + "\n\n"),
+        ("openrouter", "data: {not json\n\n"),  # malformed data is skipped; that alone isn't a reply
+    ],
+)
+async def test_a_stream_that_is_cut_off_is_an_error(provider, stream):
+    """A proxy closing the connection mid-reply must not look like a finished answer."""
+    with pytest.raises(LLMError, match=r"incomplete response from .*: the stream ended without a finish"):
+        await run(client(provider, Server(stream)), CONVERSATION)
+
+
+@pytest.mark.parametrize(
+    ("provider", "stream"),
+    [
+        (
+            "openrouter",
+            sse(chat_chunk({"content": "hi"})) + "data: [DONE]\n\n",
+        ),  # servers without finish_reason
+        ("anthropic", sse({"type": "message_stop"}, named=True)),
+    ],
+)
+async def test_a_stream_that_says_it_is_done_is_complete(provider, stream):
+    await run(client(provider, Server(stream)), CONVERSATION)
 
 
 # ---- errors and model lists ----
@@ -534,6 +597,7 @@ async def test_each_api_signals_when_the_model_reasons():
         chat_chunk({"reasoning": "hmm", "reasoning_details": [{"type": "reasoning.text", "text": "hmm"}]}),
         chat_chunk({"reasoning": " more"}),
         chat_chunk({"content": "hi"}),
+        chat_chunk(finish="stop"),
     )
     assert await reasoning_flags("openrouter", chat) == 1  # once, not per delta
 
@@ -543,3 +607,76 @@ async def test_no_reasoning_signal_for_a_plain_reply():
         await reasoning_flags("openrouter", sse(chat_chunk({"content": "hello"}), chat_chunk(finish="stop")))
         == 0
     )
+
+
+# ---- readable reasoning, where providers share it ----
+
+
+async def reasoning_text(provider: str, stream: str, **kwargs) -> tuple[str, list[dict]]:
+    server = Server(stream)
+    llm = client(provider, server, **kwargs)
+    text = "".join([chunk.reasoning_text async for chunk in llm.stream(CONVERSATION, [READ])])
+    return text, server.requests
+
+
+async def test_anthropic_thinking_text():
+    stream = sse(
+        {"type": "message_start", "message": {"usage": {"input_tokens": 5, "output_tokens": 1}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Check "},
+        },
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "a.py."}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+        named=True,
+    )
+    assert (await reasoning_text("anthropic", stream))[0] == "Check a.py."
+
+
+async def test_openai_summaries_only_when_asked_for():
+    stream = sse(
+        {"type": "response.output_item.added", "output_index": 0, "item": {"type": "reasoning"}},
+        {"type": "response.reasoning_summary_text.delta", "delta": "Look at a.py"},
+        {"type": "response.completed", "response": {"output": []}},
+    )
+    text, [request] = await reasoning_text("openai", stream)
+    assert "summary" not in request.get("reasoning", {})  # not asked for by default
+    llm_server = Server(stream)
+    llm = client("openai", llm_server)
+    llm.show_reasoning = True
+    text = "".join([chunk.reasoning_text async for chunk in llm.stream(CONVERSATION, [READ])])
+    assert text == "Look at a.py" and llm_server.requests[0]["reasoning"]["summary"] == "auto"
+
+
+@pytest.mark.parametrize(
+    ("provider", "delta"),
+    [
+        ("openrouter", {"reasoning": "Look at a.py"}),
+        ("deepseek", {"reasoning_content": "Look at a.py"}),
+        (
+            "mistral",
+            {"content": [{"type": "thinking", "thinking": [{"type": "text", "text": "Look at a.py"}]}]},
+        ),
+    ],
+)
+async def test_chat_reasoning_text(provider, delta):
+    stream = sse(chat_chunk(delta), chat_chunk({"content": "hi"}), chat_chunk(finish="stop"))
+    assert (await reasoning_text(provider, stream))[0] == "Look at a.py"
+
+
+async def test_gemini_thought_summaries():
+    stream = sse(
+        {"event_type": "step.start", "index": 0, "step": {"type": "thought"}},
+        {
+            "event_type": "step.delta",
+            "index": 0,
+            "delta": {"type": "thought_summary", "content": {"type": "text", "text": "Look at a.py"}},
+        },
+        {"event_type": "step.stop", "index": 0},
+        {"event_type": "interaction.completed", "interaction": {"status": "completed"}},
+        named=True,
+    )
+    assert (await reasoning_text("gemini", stream))[0] == "Look at a.py"

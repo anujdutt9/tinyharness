@@ -5,7 +5,8 @@ from typing import Any
 
 from pydantic import Field
 
-from tinyharness.tools.base import LARGE_CHANGE, Tool, ToolContext, ToolError, ToolInput
+from tinyharness.tools.base import LARGE_CHANGE, Tool, ToolContext, ToolError, ToolInput, approved_path
+from tinyharness.workspace.files import write_text
 
 
 class WriteInput(ToolInput):
@@ -38,15 +39,14 @@ class WriteTool(Tool[WriteInput]):
         return f"Write({args.path}, {len(args.content.splitlines())} lines)"
 
     async def run(self, args: WriteInput, ctx: ToolContext) -> str:
-        path = ctx.workspace.resolve(args.path)
+        path = approved_path(args, args.path, ctx)
         if path is None:
             raise ToolError(f"invalid path: {args.path}")
         if path.exists() and str(path) not in ctx.read_paths:
             raise ToolError(f"refusing to overwrite {path}: Read it first in this session before Write")
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(args.content, encoding="utf-8")
+            write_text(path, args.content, make_parents=True)  # all or nothing; see workspace/files.py
         except OSError as e:
-            raise ToolError(f"write failed: {e}") from e
+            raise ToolError(f"write failed: {e.strerror or e}") from e
         ctx.read_paths.add(str(path))
         return f"wrote {path} ({len(args.content):,} bytes)"

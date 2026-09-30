@@ -3,6 +3,10 @@
 The callback is asked whenever the gate would normally prompt a human.
 The hook runs before *every* tool call and can veto it, even in bypass mode.
 
+A request with a `warning` is one the harness wants a person to see every time: a
+command asking to run outside the sandbox, or a change to files that run code later
+(.git/hooks, .tinyharness/). A policy with no person behind it should say no to those.
+
     uv run python examples/04_permissions_and_hooks.py
 """
 
@@ -26,7 +30,9 @@ SENSITIVE = re.compile(r"(secret|credential|token|password)", re.IGNORECASE)
 
 
 async def policy(request: PermissionRequest) -> Decision:
-    """Allow everything except writes to sensitive-looking paths."""
+    """Allow what's asked, except what needs a person, and writes to sensitive-looking paths."""
+    if request.warning:
+        return Decision(allow=False, reason=f"needs a person: {request.warning}", source="policy")
     if request.tool in {"Write", "Edit"} and SENSITIVE.search(request.path or ""):
         return Decision(allow=False, reason="path looks sensitive", source="policy")
     return Decision(allow=True, reason="policy", source="policy")
@@ -45,7 +51,10 @@ async def main() -> None:
         permission_callback=policy,
         hooks=[Hook(event="PreToolUse", type="python", callable=no_python_writes)],
     )
-    prompt = "Create notes.md with three tips about Python, then create secrets.txt and tips.py."
+    prompt = (
+        "Create notes.md with three tips about Python, then create secrets.txt and tips.py, "
+        "then install the requests package with pip."
+    )
     async for event in query(prompt, options):
         match event:
             case AssistantText(text=text):

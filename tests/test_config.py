@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -8,11 +9,13 @@ from tinyharness.config import (
     load_config,
     load_dotenv_files,
     parse_dotenv,
+    read_auth,
     recent_models,
     remember_model,
-    write_env_template,
+    save_key,
 )
 from tinyharness.llm.providers import load_catalog
+from tinyharness.paths import auth_path, default_config_path, legacy_config_dir
 from tinyharness.permissions import PermissionMode
 
 
@@ -202,28 +205,89 @@ def test_every_builtin_provider_uses_a_known_api():
 # ---- key file ----
 
 
-def test_env_template_lists_every_provider_and_is_private(tmp_path):
-    path = write_env_template(load_catalog(), tmp_path / "keys.env")
-    text = path.read_text()
-    assert "# ANTHROPIC_API_KEY=" in text and "# OPENROUTER_API_KEY=" in text
-    assert parse_dotenv(path) == {}  # everything commented out
+@pytest.fixture
+def no_keys(monkeypatch):
+    """No provider key set, and whatever a test sets undone afterwards."""
+    for p in load_catalog().values():
+        monkeypatch.delenv(p.api_key_env, raising=False)
+
+
+def write_auth(data):
+    auth_path().parent.mkdir(parents=True, exist_ok=True)
+    auth_path().write_text(json.dumps(data))
+
+
+def test_saved_keys_go_to_auth_json_by_provider(no_keys):
+    providers = load_catalog()
+    save_key("groq", "gk-1", providers)
+    path = save_key("anthropic", "sk-ant-1", providers)
+    save_key("anthropic", "sk-ant-2", providers)  # replaces; the other key stays
+    assert path == auth_path()
+    assert json.loads(path.read_text()) == {"anthropic": {"api_key": "sk-ant-2"}, "groq": {"api_key": "gk-1"}}
     assert path.stat().st_mode & 0o777 == 0o600
+    assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-2"  # usable right away
+    assert [p.name for p in path.parent.glob(".auth.json.*")] == []  # no temporary file left
 
 
-def test_env_template_never_overwrites(tmp_path):
-    path = tmp_path / "keys.env"
-    path.write_text("OPENAI_API_KEY=mine\n")
-    write_env_template(load_catalog(), path)
-    assert path.read_text() == "OPENAI_API_KEY=mine\n"
-
-
-def test_keys_in_the_user_key_file_are_found(tmp_path, monkeypatch):
-    user_env = tmp_path / "_user" / ".config" / "tinyharness" / ".env"
-    user_env.parent.mkdir(parents=True)
-    user_env.write_text("GROQ_API_KEY=gk\n")
+def test_keys_in_auth_json_are_found(no_keys, tmp_path):
+    write_auth({"groq": {"api_key": "gk"}})
     cfg = load_config(write_config(tmp_path))
-    assert cfg.provider == "groq"
-    monkeypatch.delenv("GROQ_API_KEY")
+    assert cfg.provider == "groq" and cfg.resolve_api_key() == "gk"
+
+
+def test_a_key_in_your_shell_beats_auth_json(no_keys, tmp_path, monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "from-shell")
+    write_auth({"groq": {"api_key": "from-file"}})
+    assert load_config(write_config(tmp_path)).resolve_api_key() == "from-shell"
+
+
+def test_a_broken_auth_json_is_ignored_not_fatal(no_keys, tmp_path, caplog):
+    write_auth({})
+    auth_path().write_text("{not json")
+    load_config(write_config(tmp_path))
+    assert "ignoring" in caplog.text and "auth.json" in caplog.text
+
+
+# ---- moving an earlier version's files in ----
+
+
+def old_folder(config: str = "", env: str = ""):
+    old = legacy_config_dir()
+    old.mkdir(parents=True)
+    if config:
+        (old / "config.toml").write_text(config)
+    if env:
+        (old / ".env").write_text(env)
+    return old
+
+
+def test_the_old_config_folder_is_moved_into_one_place(no_keys):
+    old = old_folder('theme = "light"\n', "# a comment\nGROQ_API_KEY=gk\nOPENAI_API_KEY=\n")
+    cfg = load_config()
+    assert default_config_path().read_text() == 'theme = "light"\n'
+    assert read_auth() == {"groq": "gk"}
+    assert not old.exists()  # nothing left behind
+    assert cfg.theme == "light" and cfg.resolve_api_key() == "gk"
+
+
+def test_what_cant_move_stays_where_it_was(no_keys, caplog):
+    default_config_path().parent.mkdir(parents=True, exist_ok=True)
+    default_config_path().write_text('theme = "dark"\n')
+    old = old_folder('theme = "light"\n', "GROQ_API_KEY=gk\nSOME_TOOL_TOKEN=abc\n")
+    load_config()
+    assert default_config_path().read_text() == 'theme = "dark"\n'  # the new one isn't replaced
+    assert (old / "config.toml").exists()
+    assert read_auth() == {"groq": "gk"}
+    assert parse_dotenv(old / ".env") == {"SOME_TOOL_TOKEN": "abc"}  # not a provider key: kept
+    assert "SOME_TOOL_TOKEN" in caplog.text
+
+
+def test_a_different_key_for_a_provider_already_in_auth_json_is_kept(no_keys):
+    write_auth({"groq": {"api_key": "newer"}})
+    old = old_folder(env="GROQ_API_KEY=older\n")
+    load_config()
+    assert read_auth() == {"groq": "newer"}  # auth.json wins...
+    assert parse_dotenv(old / ".env") == {"GROQ_API_KEY": "older"}  # ...but the other isn't lost
 
 
 def test_permission_rules_in_config(tmp_path):

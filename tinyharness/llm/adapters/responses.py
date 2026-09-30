@@ -65,6 +65,8 @@ class ResponsesAdapter(Adapter):
             ]
         if request.effort:
             payload["reasoning"] = {"effort": request.effort}
+        if request.show_reasoning:  # opt-in: some organizations must be verified to get these
+            payload.setdefault("reasoning", {})["summary"] = "auto"
         if request.web_search:
             self.add_web_search(payload)
         return payload
@@ -88,6 +90,10 @@ class _ResponsesParser(StreamParser):
         match event.get("type"):
             case "response.output_text.delta":
                 return [StreamChunk(text=event.get("delta", ""))]
+            case "response.reasoning_summary_text.delta":
+                return [StreamChunk(reasoning_text=event.get("delta", ""))]
+            case "response.reasoning_summary_part.done":
+                return [StreamChunk(reasoning_text="\n\n")]  # between summary paragraphs
             case "response.output_item.added" if event["item"].get("type") == "reasoning":
                 return [StreamChunk(reasoning=True)]
             case "response.output_item.added" if event["item"].get("type") == "function_call":

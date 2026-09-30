@@ -5,7 +5,8 @@ from pathlib import Path
 from pydantic import Field
 
 from tinyharness.security import is_secret_path
-from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
+from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput, approved_path
+from tinyharness.workspace.files import read_text
 
 
 class ReadInput(ToolInput):
@@ -14,9 +15,10 @@ class ReadInput(ToolInput):
     limit: int = Field(default=2000, gt=0, description="Maximum number of lines to return")
 
 
-def resolve_readable(path_arg: str, ctx: ToolContext) -> Path:
-    """Resolve a path for reading and refuse credential-shaped files."""
-    path = ctx.workspace.resolve(path_arg)
+def resolve_readable(args: ToolInput, path_arg: str, ctx: ToolContext) -> Path:
+    """The path to read (the one the permission gate approved, see `approved_path`),
+    refusing credential-shaped files."""
+    path = approved_path(args, path_arg, ctx)
     if path is None:
         raise ToolError(f"invalid path: {path_arg}")
     if is_secret_path(path):
@@ -41,11 +43,12 @@ class ReadTool(Tool[ReadInput]):
     read_only = True
 
     async def run(self, args: ReadInput, ctx: ToolContext) -> str:
-        path = resolve_readable(args.path, ctx)
+        path = resolve_readable(args, args.path, ctx)
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            # Not path.read_text(): that would follow a symlink swapped in since the check.
+            lines = read_text(path, errors="replace").splitlines()
         except OSError as e:
-            raise ToolError(f"read failed: {e}") from e
+            raise ToolError(f"read failed: {e.strerror or e}") from e
 
         ctx.read_paths.add(str(path))
         window = lines[args.offset : args.offset + args.limit]

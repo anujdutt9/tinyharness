@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from tinyharness.agent.history import History, Message, ReasoningState, ToolCall
+from tinyharness.agent.world import file_meta
 from tinyharness.events import (
     AssistantText,
     Compacted,
@@ -33,17 +34,19 @@ from tinyharness.events import (
     PermissionDecision,
     Reasoning,
     TodosUpdated,
+    TokenUsage,
     ToolResult,
     ToolsDispatched,
     ToolUse,
 )
 from tinyharness.llm.client import ContextOverflowError, ToolCallAccumulator
+from tinyharness.llm.usage import Usage
 from tinyharness.security import mask_secrets
 from tinyharness.tools.base import Tool, ToolContext, ToolError
 
 if TYPE_CHECKING:
     from tinyharness.agent.compaction import Compactor
-    from tinyharness.agent.transcript import Transcript
+    from tinyharness.agent.sessionlog import LogWriter
     from tinyharness.hooks import HookRunner
     from tinyharness.llm.client import LLMClient
     from tinyharness.permissions import PermissionGate
@@ -60,7 +63,7 @@ class LoopDeps:
     tools: ToolRegistry
     gate: PermissionGate
     compactor: Compactor
-    transcript: Transcript
+    transcript: LogWriter
     ctx: ToolContext
     hooks: HookRunner | None = None
     allowed_tools: set[str] | None = None
@@ -90,6 +93,7 @@ class _Turn:
     text: list[str] = field(default_factory=list)
     calls: ToolCallAccumulator = field(default_factory=ToolCallAccumulator)
     state: ReasoningState | None = None
+    usage: Usage | None = None
 
 
 async def run_agent_loop(prompt: str, history: History, deps: LoopDeps) -> AsyncGenerator[Event, None]:
@@ -125,6 +129,8 @@ async def run_agent_loop(prompt: str, history: History, deps: LoopDeps) -> Async
         text, calls = "".join(turn.text), turn.calls.calls()
         deps.transcript.write("assistant", text=text, tool_calls=[c.to_dict() for c in calls])
         history.append(Message(role="assistant", content=text or None, tool_calls=calls, state=turn.state))
+        if turn.usage is not None:
+            yield _account(turn.usage, deps)
 
         # 2. No tool calls means the model is finished.
         if not calls:
@@ -179,7 +185,9 @@ async def run_agent_loop(prompt: str, history: History, deps: LoopDeps) -> Async
                 },
             )
             deps.transcript.write("tool_result", tool=item.tool.name, result=output[:TRANSCRIPT_RESULT_CHARS])
-            history.add_tool_result(item.call.id, output)
+            # Which file (and which version of it) this result came from, for resuming later.
+            meta = {} if is_error else file_meta(item.tool, item.args, deps.ctx)
+            history.add_tool_result(item.call.id, output, meta)
             yield ToolResult(item.tool.name, output, is_error)
             if item.tool.name == "TodoWrite" and not is_error:
                 yield TodosUpdated(list(deps.ctx.todos))
@@ -194,6 +202,8 @@ async def _ask_model(
     async for chunk in deps.llm.stream(history.messages, tools, model=deps.model):
         if chunk.reasoning:
             yield Reasoning()
+        if chunk.reasoning_text:
+            yield Reasoning(chunk.reasoning_text)
         if chunk.text:
             turn.text.append(chunk.text)
             yield AssistantText(chunk.text)
@@ -201,6 +211,8 @@ async def _ask_model(
             turn.calls.add(chunk.tool_call_delta)
         if chunk.state is not None:
             turn.state = chunk.state
+        if chunk.usage is not None:
+            turn.usage = chunk.usage
 
 
 async def _compact(history: History, deps: LoopDeps) -> AsyncGenerator[Event, None]:
@@ -262,7 +274,9 @@ async def _prepare_call(
     yield PermissionDecision(tool.name, decision.allow, decision.source, decision.reason)
 
     if decision.allow:
-        batch.approved.append(_ApprovedCall(call, tool, args))
+        # Act on the path that was checked, not a fresh resolution of it (see Decision.path).
+        pinned = tool.pin_path(args, decision.path) if decision.path is not None else args
+        batch.approved.append(_ApprovedCall(call, tool, pinned))
     elif decision.interrupt:
         batch.interrupted, batch.feedback = True, decision.feedback
         yield reject("The user rejected this tool call.")
@@ -278,6 +292,23 @@ async def _execute(item: _ApprovedCall, deps: LoopDeps) -> tuple[str, bool]:
         return f"error: {e}", True
     except Exception as e:
         return f"error: {type(e).__name__}: {e}", True
+
+
+def _account(usage: Usage, deps: LoopDeps) -> TokenUsage:
+    """Price one model call (unless the provider already did), add it to the session's
+    meter and report it."""
+    model = deps.model or deps.llm.model
+    provider = getattr(getattr(deps.llm, "provider", None), "name", "")
+    if usage.cost is None:
+        info = deps.llm.model_info(model) if hasattr(deps.llm, "model_info") else None
+        price = deps.ctx.config.price(provider, model) or (info.price if info else None)
+        if price is not None:
+            usage.cost = price.cost(usage)
+    deps.ctx.usage.add(usage)
+    deps.transcript.write(
+        "usage", model=model, input=usage.input, cached=usage.cached, output=usage.output, cost=usage.cost
+    )
+    return TokenUsage(model, usage.input, usage.cached, usage.output, usage.cost)
 
 
 async def _fire_hook(deps: LoopDeps, event: str, payload: dict[str, Any]) -> None:

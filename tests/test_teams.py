@@ -6,15 +6,15 @@ import pytest
 from rich.console import Console
 
 from conftest import ScriptedLLM, make_ctx
-from tinyharness import Session, SessionOptions
+from tinyharness import MissingAPIKeyError, Session, SessionOptions, Tool, ToolInput
 from tinyharness.agent.compaction import Compactor
 from tinyharness.agent.history import History, Message
 from tinyharness.agent.loop import LoopDeps, run_agent_loop
 from tinyharness.agent.transcript import Transcript
 from tinyharness.cli.render import Renderer
-from tinyharness.events import SubagentUpdate
+from tinyharness.events import SubagentUpdate, ToolResult
 from tinyharness.permissions import Decision, PermissionGate, PermissionMode, PermissionRequest
-from tinyharness.subagents import AgentSpec
+from tinyharness.subagents import AgentSpec, parse_agent_md
 from tinyharness.subagents.runner import run_subagent
 from tinyharness.tools.base import ToolError
 from tinyharness.tools.registry import ToolRegistry, default_registry
@@ -103,22 +103,46 @@ async def test_a_subagent_reports_its_progress(tmp_path):
     assert [u.status for u in updates] == ["started", "working", "done"]
     assert updates[1].detail.startswith("Read(") and updates[-1].detail == "1 tool call"
     assert {u.label for u in updates} == {"notes"}
+    assert {u.model for u in updates} == {"fake"}  # the client's model, since none was given
 
 
 def test_the_renderer_shows_running_subagents_then_a_line_when_done():
     console = Console(width=100, record=True)
     renderer = Renderer(console)
     renderer.handle(
-        SubagentUpdate("r1", "researcher", "research-a: Laptop A", "working", "WebSearch(aero)", 2, 5.0)
+        SubagentUpdate(
+            "r1",
+            "researcher",
+            "research-a: Laptop A",
+            "working",
+            "WebSearch(aero)",
+            2,
+            5.0,
+            model="anthropic/claude-haiku-4.5",
+        )
     )
     live = Console(width=100, record=True)
     live.print(renderer)
-    assert "research-a: Laptop A · WebSearch(aero) · 2 tools · 5s" in live.export_text()
+    running = live.export_text()
+    assert "researcher  research-a: Laptop A" in running
+    assert "claude-haiku-4.5 · WebSearch(aero) · 2 tools · 5s" in running
     renderer.handle(
-        SubagentUpdate("r1", "researcher", "research-a: Laptop A", "done", "4 tool calls", 4, 21.0)
+        SubagentUpdate(
+            "r1",
+            "researcher",
+            "research-a: Laptop A",
+            "done",
+            "4 tool calls",
+            4,
+            21.0,
+            model="claude-haiku-4-5",
+        )
     )
     assert not renderer._agents
-    assert "✔ research-a: Laptop A · 4 tool calls · 21s" in console.export_text()
+    renderer.handle(ToolResult("Team", "report"))  # finished teammates fold into their call's row
+    done = console.export_text()
+    assert "✓ Team" in done and "1 agent · 4 tools" in done
+    assert "research-a: Laptop A" not in done  # no line each once they're done
 
 
 # ---- teammates' messages reach a running agent ----
@@ -299,3 +323,181 @@ async def test_auto_mode_is_confirmed_once_per_session(session, monkeypatch):
     session.set_mode("default")
     assert await repl.enter_auto_mode()
     assert len(asked) == 2  # not asked again once agreed
+
+
+async def test_saying_no_to_auto_mode_does_not_trap_shift_tab(session, monkeypatch):
+    import io
+
+    from tinyharness.cli import repl as repl_module
+    from tinyharness.cli.repl import Repl
+
+    asked = []
+
+    async def pick(title, options, current=None, **kwargs):
+        asked.append(title)
+        return None  # Esc, same as "no"
+
+    monkeypatch.setattr(repl_module, "pick", pick)
+    console = Console(file=io.StringIO())
+    repl = Repl(session, console, Renderer(console))
+    session.set_mode("acceptEdits")
+    assert repl.next_mode() == PermissionMode.AUTO  # the next press would ask
+    await repl.shift_tab_to_auto()
+    assert session.mode == PermissionMode.ACCEPT_EDITS  # "no" keeps the mode
+    cycle = []
+    for _ in range(4):  # the presses after that go round without auto, and never ask again
+        session.set_mode(repl.next_mode())
+        cycle.append(session.mode)
+    assert cycle == [
+        PermissionMode.PLAN,
+        PermissionMode.DEFAULT,
+        PermissionMode.ACCEPT_EDITS,
+        PermissionMode.PLAN,
+    ]
+    assert len(asked) == 1
+
+
+# ---- agents defined in code (SDK) ----
+
+
+def test_agents_can_be_passed_in_code(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    reviewer = AgentSpec(
+        name="reviewer",
+        description="Reviews a diff for bugs.",
+        tools=["Read", "Grep"],
+        permission_mode="acceptEdits",
+    )
+    explore = AgentSpec(name="explore", description="My own explorer.", tools=["Read"])
+    options = SessionOptions(
+        config_path=tmp_path / "none.toml", working_dir=tmp_path / "work", agents=[reviewer, explore]
+    )
+    session = Session(options)
+    try:
+        assert session.agents["reviewer"] is reviewer
+        assert reviewer.permission_mode == PermissionMode.ACCEPT_EDITS
+        assert session.agents["explore"].description == "My own explorer."  # replaces the built-in
+        assert "reviewer" in session.tools.get("Agent").description
+    finally:
+        session.close()
+
+
+def test_code_agents_work_without_file_agents(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    only = AgentSpec(name="only", description="The only one.")
+    options = SessionOptions(
+        config_path=tmp_path / "none.toml",
+        working_dir=tmp_path / "work",
+        enable_subagents=False,
+        agents=[only],
+    )
+    session = Session(options)
+    try:
+        assert list(session.agents) == ["only"]
+    finally:
+        session.close()
+
+
+def test_sdk_exports():
+    import tinyharness
+
+    assert tinyharness.AgentSpec is AgentSpec
+    assert tinyharness.SubagentUpdate is SubagentUpdate
+
+
+# ---- which model a subagent runs on ----
+
+
+def test_subagent_model_settings(session, monkeypatch):
+    assert session.config.provider == "openai"
+    assert session.llm_for(None) == (session.llm, None)
+    assert session.llm_for("inherit") == (session.llm, None)
+    assert session.llm_for("small") == (session.llm, session.config.small_model)
+    assert session.llm_for("gpt-cheap") == (session.llm, "gpt-cheap")  # same provider
+    assert session.llm_for("openai:gpt-cheap") == (session.llm, "gpt-cheap")
+
+    with pytest.raises(MissingAPIKeyError):
+        session.llm_for("anthropic:claude-haiku-4-5")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    client, model = session.llm_for("anthropic:claude-haiku-4-5")
+    assert client.provider.name == "anthropic" and client.model == "claude-haiku-4-5" and model is None
+    client, _ = session.llm_for("anthropic:")
+    assert client.model == session.config.providers["anthropic"].default_model
+
+
+async def test_subagents_run_on_their_own_model(session, monkeypatch):
+    seen = []
+
+    async def fake_run(spec, task, *, llm, model, **kwargs):
+        seen.append((llm.provider.name, model))
+        return "ok"
+
+    monkeypatch.setattr("tinyharness.session.run_subagent", fake_run)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    for model in (None, "small", "anthropic:claude-haiku-4-5"):
+        await session._spawn_subagent(AgentSpec("a", "b", model=model), "x", session.ctx)
+    assert seen == [("openai", None), ("openai", session.config.small_model), ("anthropic", None)]
+
+
+async def test_a_subagent_without_a_key_for_its_model_fails_as_a_tool_error(session):
+    with pytest.raises(ToolError, match="can't start the a agent: No API key for Anthropic"):
+        await session._spawn_subagent(AgentSpec("a", "b", model="anthropic:claude-x"), "x", session.ctx)
+
+
+# ---- tools ----
+
+
+def test_agents_without_a_tool_list_get_every_tool(tmp_path, session):
+    (tmp_path / "helper.md").write_text("---\nname: helper\ndescription: Helps.\n---\nHelp.")
+    spec = parse_agent_md(tmp_path / "helper.md")
+    assert spec.tools is None and AgentSpec("x", "y").tools is None
+    assert not session._agent_is_read_only(spec)  # it can write, like the session
+    assert session._agent_is_read_only(AgentSpec("none", "no tools", tools=[]))
+
+
+async def test_agents_without_a_tool_list_get_every_tool_but_spawning(tmp_path):
+    offered = []
+
+    class Recorder(ScriptedLLM):
+        async def stream(self, messages, tools, **kwargs):
+            offered.append({t.name for t in tools})
+            async for chunk in super().stream(messages, tools, **kwargs):
+                yield chunk
+
+    registry = default_registry()
+    registry.register(TeamTool({}, None, lambda spec: False))
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
+    await run_subagent(
+        AgentSpec("all", "everything"),
+        "hi",
+        ctx=make_ctx(tmp_path),
+        llm=Recorder(["done"]),
+        tools=registry,
+        gate=gate,
+    )
+    assert offered[0] == set(registry.names()) - {"Team"}
+
+
+def test_custom_tools_can_be_passed_in_options(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    clock = ClockTool()
+    options = SessionOptions(config_path=tmp_path / "none.toml", working_dir=tmp_path / "work", tools=[clock])
+    session = Session(options)
+    try:
+        assert session.tools.get("Clock") is clock
+    finally:
+        session.close()
+
+
+class ClockInput(ToolInput):
+    pass
+
+
+class ClockTool(Tool[ClockInput]):
+    name = "Clock"
+    description = "The time."
+    Input = ClockInput
+    read_only = True
+
+    async def run(self, args, ctx):
+        return "noon"

@@ -1,11 +1,30 @@
 """The CLI's look: one palette, shared by rich (output) and prompt_toolkit (input).
 
-Change a color here and it changes everywhere.
+Change a color here and it changes everywhere. There's a dark palette and a light one,
+chosen by the theme setting: "system" (the default) asks the terminal what its
+background color is, "light" or "dark" pick one. First found wins:
+
+    TINYHARNESS_THEME=light      environment
+    theme = "light"              ~/.tinyharness/config.toml
+    /theme light                 remembered by the CLI
+
+NO_COLOR turns color off (rich and prompt_toolkit both honor it).
 """
 
 from __future__ import annotations
 
+import contextlib
+import os
+import re
+import select
+import sys
+import time
+import tomllib
+from pathlib import Path
+from urllib.parse import quote
+
 from prompt_toolkit.styles import Style
+from rich.style import Style as RichStyle
 from rich.text import Text
 from rich.theme import Theme
 
@@ -13,20 +32,120 @@ from tinyharness.permissions import PermissionMode
 
 # -- palette ------------------------------------------------------------------
 
-BRAND = "#a78bfa"  # violet: the wordmark, prompt, spinner
-BRAND_2 = "#5eead4"  # mint: the other end of the wordmark gradient
-MUTED = "#8b8fa3"
-SUBTLE = "#5c6070"
-SUCCESS = "#4ade80"
-WARNING = "#fbbf24"
-ERROR = "#f87171"
-ADDED = "#86efac"
-REMOVED = "#fca5a5"
+
+THEMES = ("system", "light", "dark")
+
+
+def theme_setting() -> tuple[str, str]:
+    """(the theme asked for, where that came from)."""
+    env = os.environ.get("TINYHARNESS_THEME", "").lower()
+    if env in THEMES:
+        return env, "TINYHARNESS_THEME"
+    from tinyharness.config import saved_theme
+    from tinyharness.paths import default_config_path
+
+    with contextlib.suppress(OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        configured = str(tomllib.loads(default_config_path().read_text()).get("theme", "")).lower()
+        if configured in THEMES:
+            return configured, "config"
+    saved = saved_theme()
+    return (saved, "/theme") if saved in THEMES else ("system", "default")
+
+
+def terminal_is_light() -> bool | None:
+    """Ask the terminal for its background color (OSC 11); None if it doesn't say.
+    Most terminals answer at once; if none does in 100ms, we don't wait longer."""
+    if os.name != "posix" or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    try:
+        saved = termios.tcgetattr(fd)
+    except termios.error:
+        return None
+    reply = b""
+    try:
+        tty.setcbreak(fd)
+        os.write(sys.stdout.fileno(), b"\033]11;?\033\\")
+        deadline = time.monotonic() + 0.1
+        while time.monotonic() < deadline and not reply.endswith((b"\007", b"\033\\")):
+            ready, _, _ = select.select([fd], [], [], max(deadline - time.monotonic(), 0))
+            if not ready:
+                break
+            reply += os.read(fd, 64)
+    except OSError:
+        return None
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+    m = re.search(rb"rgb:([0-9a-f]+)/([0-9a-f]+)/([0-9a-f]+)", reply, re.IGNORECASE)
+    if not m:
+        return None
+    r, g, b = (int(x, 16) / (16 ** len(x) - 1) for x in m.groups())
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b > 0.5
+
+
+def _is_light(choice: str) -> bool:
+    if choice != "system":
+        return choice == "light"
+    if (answer := terminal_is_light()) is not None:
+        return answer
+    background = os.environ.get("COLORFGBG", "").rpartition(";")[2]  # set by some terminals
+    return background in ("7", "15")
+
+
+THEME_SETTING, THEME_SOURCE = theme_setting()
+LIGHT = _is_light(THEME_SETTING)
+
+if LIGHT:
+    BRAND, BRAND_2 = "#7c3aed", "#0f766e"
+    MUTED, SUBTLE = "#52525b", "#a1a1aa"
+    SUCCESS, WARNING, ERROR = "#15803d", "#b45309", "#b91c1c"
+    ADDED, REMOVED = "#15803d", "#b91c1c"
+    TOOL_COLORS = {
+        "read": "#0f766e",
+        "edit": "#7c3aed",
+        "run": "#c2410c",
+        "web": "#1d4ed8",
+        "agent": "#be185d",
+    }
+    MENU_BG, MENU_FG = "#f4f4f5", "#27272a"
+else:
+    BRAND, BRAND_2 = "#a78bfa", "#5eead4"  # violet and mint: the wordmark's gradient
+    MUTED, SUBTLE = "#8b8fa3", "#5c6070"
+    SUCCESS, WARNING, ERROR = "#4ade80", "#fbbf24", "#f87171"
+    ADDED, REMOVED = "#86efac", "#fca5a5"
+    TOOL_COLORS = {
+        "read": "#5eead4",
+        "edit": "#c4b5fd",
+        "run": "#fdba74",
+        "web": "#7dd3fc",
+        "agent": "#f9a8d4",
+    }
+    MENU_BG, MENU_FG = "#1f2130", "#c9cbd6"
+
+# Each tool's family, which gives it its color: looking, changing, running, the web, agents.
+TOOL_KIND = {
+    "Read": "read",
+    "Glob": "read",
+    "Grep": "read",
+    "Pdf": "read",
+    "Edit": "edit",
+    "Write": "edit",
+    "Bash": "run",
+    "WebFetch": "web",
+    "WebSearch": "web",
+    "Agent": "agent",
+    "Team": "agent",
+}
 
 LOGO = "◆"
 BULLET = "●"
 ELBOW = "⎿"
 PROMPT = "❯"
+DONE, FAILED, DENIED = "✓", "✗", "⊘"
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 THEME = Theme(
     {
@@ -37,7 +156,9 @@ THEME = Theme(
         "warn": WARNING,
         "err": ERROR,
         "tool": "bold",
+        **{f"tool.{kind}": f"bold {color}" for kind, color in TOOL_COLORS.items()},
         "path": "underline",
+        "thinking": f"italic {MUTED}",
         "diff.add": ADDED,
         "diff.del": REMOVED,
         "key": f"bold {BRAND_2}",
@@ -93,13 +214,16 @@ PT_STYLE = Style.from_dict(
         "toolbar.dim": SUBTLE,
         "toolbar.key": f"{MUTED} bold",
         "toolbar.warn": f"{WARNING} bold",
-        "completion-menu": "bg:#1f2130 #c9cbd6",
+        "toolbar.ok": SUCCESS,
+        "toolbar.err": ERROR,
+        "toolbar.brand": BRAND_2,
+        "completion-menu": f"bg:{MENU_BG} {MENU_FG}",
         "completion-menu.completion.current": f"bg:{BRAND} #111111 bold",
-        "completion-menu.meta.completion": "bg:#1f2130 #8b8fa3",
+        "completion-menu.meta.completion": f"bg:{MENU_BG} {MUTED}",
         "completion-menu.meta.completion.current": f"bg:{BRAND} #111111",
         # While typing a search: the rest of each name stays readable (prompt_toolkit's
         # default is a near-invisible #444444) and the typed letters stand out.
-        "completion-menu.completion fuzzymatch.outside": "#c9cbd6",
+        "completion-menu.completion fuzzymatch.outside": MENU_FG,
         "completion-menu.completion fuzzymatch.inside": f"{BRAND_2} bold",
         "completion-menu.completion.current fuzzymatch.outside": "#111111",
         "completion-menu.completion.current fuzzymatch.inside": "#111111 bold",
@@ -150,12 +274,33 @@ def split_summary(summary: str) -> tuple[str, str]:
     return name, rest[:-1] if rest.endswith(")") else rest
 
 
+def tool_style(name: str) -> str:
+    kind = TOOL_KIND.get(name)
+    return f"tool.{kind}" if kind else "tool"
+
+
+def ellipsize(text: str, width: int) -> str:
+    """Shorten from the middle, so both ends of a path stay: src/…/handlers/auth.py."""
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return "…"[:width]
+    head = (width - 1) // 2
+    return f"{text[:head]}…{text[len(text) - (width - 1 - head) :]}"
+
+
+def file_link(path: str | Path) -> RichStyle:
+    """A clickable link to a file, for terminals that support them (others show plain text)."""
+    resolved = Path(path).expanduser().resolve()
+    return RichStyle(link=f"file://{quote(str(resolved))}")
+
+
 def tool_line(summary: str, bullet_style: str) -> Text:
     """A tool call as one line: `● Edit  src/app.py, -1/+4 lines`."""
     name, detail = split_summary(summary)
     line = Text()
     line.append(f"{BULLET} ", style=bullet_style)
-    line.append(name, style="tool")
+    line.append(name, style=tool_style(name))
     if detail:
         line.append(f"  {detail}", style="muted")
     return line

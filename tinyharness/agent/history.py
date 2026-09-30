@@ -8,10 +8,17 @@ only ever sent back to the exact provider and model that produced it.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 Role = Literal["system", "user", "assistant", "tool"]
+
+INTERRUPTED = "(interrupted by user)"
+
+
+def new_id() -> str:
+    return uuid.uuid4().hex[:12]
 
 
 @dataclass
@@ -41,6 +48,8 @@ class Message:
     tool_calls: list[ToolCall] = field(default_factory=list)
     tool_call_id: str | None = None  # set on role="tool" replies
     state: ReasoningState | None = None  # assistant only; see the module docstring
+    id: str = field(default_factory=new_id)  # stable identity in the session log
+    meta: dict[str, Any] = field(default_factory=dict)  # harness-only (e.g. the file a result came from)
 
     def to_dict(self) -> dict[str, Any]:
         """A plain dict (for token counting and transcripts); not any provider's format."""
@@ -53,6 +62,35 @@ class Message:
             d["tool_call_id"] = self.tool_call_id
         return d
 
+    def to_record(self) -> dict[str, Any]:
+        """Everything, losslessly, for the session log (see agent/sessionlog.py)."""
+        return {
+            "id": self.id,
+            "role": self.role,
+            "content": self.content,
+            "tool_calls": [
+                {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in self.tool_calls
+            ],
+            "tool_call_id": self.tool_call_id,
+            "state": {"owner": self.state.owner, "data": self.state.data} if self.state else None,
+            "meta": self.meta,
+        }
+
+    @classmethod
+    def from_record(cls, r: dict[str, Any]) -> Message:
+        state = r.get("state")
+        return cls(
+            role=r["role"],
+            content=r.get("content"),
+            tool_calls=[
+                ToolCall(tc["id"], tc["name"], tc.get("arguments", "")) for tc in r.get("tool_calls", [])
+            ],
+            tool_call_id=r.get("tool_call_id"),
+            state=ReasoningState(state["owner"], state["data"]) if state else None,
+            id=r["id"],
+            meta=r.get("meta") or {},
+        )
+
 
 @dataclass
 class History:
@@ -61,8 +99,8 @@ class History:
     def append(self, msg: Message) -> None:
         self.messages.append(msg)
 
-    def add_tool_result(self, call_id: str, content: str) -> None:
-        self.append(Message(role="tool", tool_call_id=call_id, content=content))
+    def add_tool_result(self, call_id: str, content: str, meta: dict[str, Any] | None = None) -> None:
+        self.append(Message(role="tool", tool_call_id=call_id, content=content, meta=meta or {}))
 
     def reset(self) -> None:
         self.messages.clear()
@@ -70,7 +108,7 @@ class History:
     def to_dicts(self) -> list[dict[str, Any]]:
         return [m.to_dict() for m in self.messages]
 
-    def repair(self) -> int:
+    def repair(self, placeholder: str = INTERRUPTED) -> int:
         """Answer any tool calls left without a result (e.g. the user hit Ctrl-C
         mid-turn). Providers reject a history with dangling tool calls.
         Returns the number of placeholder results added."""
@@ -81,7 +119,7 @@ class History:
             repaired.append(msg)
             for tc in msg.tool_calls:
                 if tc.id not in answered:
-                    repaired.append(Message(role="tool", tool_call_id=tc.id, content="(interrupted by user)"))
+                    repaired.append(Message(role="tool", tool_call_id=tc.id, content=placeholder))
                     added += 1
         self.messages = repaired
         return added

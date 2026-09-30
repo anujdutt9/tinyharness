@@ -5,7 +5,8 @@ from typing import Any
 
 from pydantic import Field
 
-from tinyharness.tools.base import LARGE_CHANGE, Tool, ToolContext, ToolError, ToolInput
+from tinyharness.tools.base import LARGE_CHANGE, Tool, ToolContext, ToolError, ToolInput, approved_path
+from tinyharness.workspace.files import read_text, write_text
 
 
 class EditInput(ToolInput):
@@ -36,7 +37,7 @@ class EditTool(Tool[EditInput]):
         return f"Edit({args.path}, -{removed}/+{added} lines{suffix})"
 
     async def run(self, args: EditInput, ctx: ToolContext) -> str:
-        path = ctx.workspace.resolve(args.path)
+        path = approved_path(args, args.path, ctx)
         if path is None or not path.is_file():
             raise ToolError(f"file not found: {path or args.path}")
         if str(path) not in ctx.read_paths:
@@ -45,9 +46,9 @@ class EditTool(Tool[EditInput]):
             raise ToolError("old_string and new_string are identical")
 
         try:
-            text = path.read_text(encoding="utf-8")
+            text = read_text(path)
         except OSError as e:
-            raise ToolError(f"read failed: {e}") from e
+            raise ToolError(f"read failed: {e.strerror or e}") from e
 
         count = text.count(args.old_string)
         if count == 0:
@@ -60,7 +61,7 @@ class EditTool(Tool[EditInput]):
 
         replaced = count if args.replace_all else 1
         try:
-            path.write_text(text.replace(args.old_string, args.new_string, replaced), encoding="utf-8")
+            write_text(path, text.replace(args.old_string, args.new_string, replaced))  # all or nothing
         except OSError as e:
-            raise ToolError(f"write failed: {e}") from e
+            raise ToolError(f"write failed: {e.strerror or e}") from e
         return f"edited {path} ({replaced} replacement{'s' if replaced != 1 else ''})"

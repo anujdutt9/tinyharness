@@ -30,12 +30,16 @@ async def run_subagent(
     llm: LLMClient,
     tools: ToolRegistry,
     gate: PermissionGate,
+    model: str | None = None,
     max_steps: int = 25,
     label: str = "",
     extra_tools: Iterable[Tool[Any]] = (),
     inbox: Callable[[], list[str]] | None = None,
 ) -> str:
     """Run the normal agent loop with a fresh history and return only the final answer.
+
+    `llm` and `model` are what the subagent runs on (Session.llm_for resolves the
+    spec's `model` setting, which may name another provider); None = the client's model.
 
     The subagent shares the parent's workspace but has its own permission gate
     (so its mode applies) and logs to a separate "sidechain" transcript. Progress
@@ -48,12 +52,13 @@ async def run_subagent(
     )
     extra = list(extra_tools)
     registry = tools.with_tools(extra) if extra else tools
-    wanted = set(spec.tools) | {t.name for t in extra} if spec.tools else set(registry.names())
+    wanted = set(registry.names()) if spec.tools is None else set(spec.tools) | {t.name for t in extra}
     allowed = wanted - SPAWNING_TOOLS
 
     run_id = uuid.uuid4().hex[:8]
     started = time.monotonic()
     short = " ".join((label or task).split())[:80]
+    model_id = model or llm.model
     used = 0
 
     def report(status: SubagentStatus, detail: str = "") -> None:
@@ -67,11 +72,12 @@ async def run_subagent(
                     detail,
                     used,
                     time.monotonic() - started,
+                    model_id,
                 )
             )
 
     with Transcript(ctx.workspace.root, f"{spec.name}-{run_id}", kind="sidechains") as transcript:
-        transcript.write("session_start", agent=spec.name, task=task)
+        transcript.write("session_start", agent=spec.name, model=model_id, task=task)
         deps = LoopDeps(
             llm=llm,
             tools=registry,
@@ -80,7 +86,7 @@ async def run_subagent(
             transcript=transcript,
             ctx=ctx,
             allowed_tools=allowed,
-            model=spec.model,
+            model=model,
             max_steps=max_steps,
             inbox=inbox,
         )

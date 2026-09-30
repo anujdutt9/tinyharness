@@ -311,3 +311,15 @@ async def test_auto_mode_uses_the_scratch_directory_freely(tmp_path):
     target = str(g.scratch.dir / "notes.md")
     assert (await g.check(WRITE, {"path": target, "content": "x"}, target)).allow
     assert user.requests == [] and classifier.seen == []
+
+
+async def test_risky_changes_in_auto_mode_are_judged_one_at_a_time(tmp_path):
+    big = tmp_path / "big.py"
+    big.write_text("x\n" * 100)
+    user = User(REMEMBER, REMEMBER)
+    g = gate(tmp_path, PermissionMode.AUTO, callback=user)
+    for _ in range(2):
+        assert (await g.check(WRITE, {"content": "y"}, "big.py")).allow
+    first, _ = user.requests  # asked both times
+    assert first.reason.startswith("it replaces a 100-line file") and first.remember_label == ""
+    assert g.mode == PermissionMode.AUTO  # still auto: the answer didn't switch to acceptEdits

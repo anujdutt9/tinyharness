@@ -18,12 +18,23 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rich.markup import escape
+from rich.padding import Padding
 from rich.table import Table
 from rich.text import Text
 
-from tinyharness.cli.theme import MODE_HINT, MODE_LABEL, MODE_STYLE, percent
+from tinyharness.cli.render import dollars, tokens
+from tinyharness.cli.setup import add_key
+from tinyharness.cli.theme import (
+    LIGHT,
+    MODE_HINT,
+    MODE_LABEL,
+    MODE_STYLE,
+    THEME_SETTING,
+    THEME_SOURCE,
+    percent,
+)
 from tinyharness.cli.widgets import ask, pick
-from tinyharness.config import RECENT_MODELS, forget_model, recent_models, remember_model
+from tinyharness.config import RECENT_MODELS, forget_model, recent_models, remember_model, save_theme
 from tinyharness.llm.tokens import count_message_tokens
 from tinyharness.permissions import PermissionMode
 from tinyharness.security import redact
@@ -31,6 +42,7 @@ from tinyharness.session import MissingAPIKeyError
 
 if TYPE_CHECKING:
     from tinyharness.cli.repl import Repl
+    from tinyharness.llm.providers import Provider
 
 Handler = Callable[["Repl", str], Awaitable[None] | None]
 
@@ -130,6 +142,12 @@ def clear(repl: Repl, arg: str) -> None:
     repl.context_used = 0.0
     repl.console.clear()
     _ok(repl, f"Cleared {n} message{'s' if n != 1 else ''}. Fresh start.")
+    meter = repl.session.ctx.usage
+    if meter.calls:  # the status bar's totals stay: they're the session's, not the conversation's
+        spent = f"{tokens(meter.total.output)} out" + (
+            f" · {dollars(meter.cost)}" if meter.cost is not None else ""
+        )
+        repl.console.print(f"  [muted]Session so far: {spent} (/cost for details)[/]")
 
 
 @command("/context", "show how much of the context window is used", group="Session")
@@ -145,6 +163,45 @@ def context(repl: Repl, arg: str) -> None:
     repl.console.print(bar)
     n = len(repl.session.history.messages)
     repl.console.print(f"  [muted]{used:,} of {window:,} tokens · {n} messages[/]")
+
+
+@command("/cost", "show tokens and cost for this session", group="Session")
+def cost(repl: Repl, arg: str) -> None:
+    meter = repl.session.ctx.usage
+    if not meter.calls:
+        repl.console.print("  [muted]No model calls yet.[/]")
+        return
+    total = meter.total
+    sent = total.input + total.cached
+    repl.console.print("  [bold]This session[/] [muted](since launch; /clear doesn't reset it)[/]")
+    rows = _grid(first_width=16)
+    rows.add_row("model calls", f"{meter.calls:,} [muted](subagents included)[/]")
+    rows.add_row(
+        "largest context", f"{meter.largest_context():,} tokens [muted](the most any one call sent)[/]"
+    )
+    rows.add_row("output", f"{total.output:,} tokens [muted](what the model wrote, reasoning included)[/]")
+    cached = f" [muted]· {total.cached / sent:.0%} of it cache reads, billed at a fraction[/]" if sent else ""
+    rows.add_row("input, all calls", f"{sent:,} tokens{cached}")
+    if meter.cost is not None:
+        note = (
+            f" [muted]· {meter.unpriced} call(s) had no price and aren't included[/]"
+            if meter.unpriced
+            else ""
+        )
+        rows.add_row("cost", f"{dollars(meter.cost)}{note}")
+    else:
+        rows.add_row("cost", "[muted]unknown: no price for this model (set one under \\[pricing])[/]")
+    if (since := meter.since_clear()) is not None:
+        spent, calls = since
+        line = f"{calls:,} call{'s' if calls != 1 else ''} · {tokens(spent.output)} out"
+        if spent.cost is not None:
+            line += f" · {dollars(spent.cost)}"
+        rows.add_row("since /clear", line)
+    repl.console.print(Padding(rows, (0, 0, 0, 2)))  # under the heading
+    repl.console.print(
+        "  [muted]Every call re-sends the whole conversation, so input adds up with each step; "
+        "most of it is cached.[/]"
+    )
 
 
 @command("/compact", "summarize the conversation so far to free up context", group="Session")
@@ -243,13 +300,14 @@ def _provider_options(repl: Repl) -> list[tuple[str, str]]:
     cfg = repl.session.config
     width = max(len(p.label) for p in cfg.providers.values())
     return [
-        (name, f"{p.label:<{width}}  " + ("✔ key set" if cfg.has_key(name) else f"needs {p.api_key_env}"))
+        (name, f"{p.label:<{width}}  " + ("✔ key set" if cfg.has_key(name) else "add a key"))
         for name, p in cfg.providers.items()
     ]
 
 
-async def _switch(repl: Repl, spec: str) -> None:
-    """Check the model answers, then switch to it. `spec` is "provider:model" ("provider:" = its default)."""
+async def _switch(repl: Repl, spec: str, *, asked_for_key: bool = False) -> None:
+    """Check the model answers, then switch to it. `spec` is "provider:model" ("provider:" = its default).
+    A provider without a key asks for one first, rather than sending you to a file."""
     session = repl.session
     try:
         with repl.console.status("[muted]Checking the model…[/]", spinner="dots"):
@@ -260,7 +318,13 @@ async def _switch(repl: Repl, spec: str) -> None:
             repl.console.print(f"  [muted]Still using {escape(session.model_label)}.[/]")
             return
         session.set_model(spec)
-    except (ValueError, MissingAPIKeyError) as e:
+    except MissingAPIKeyError as e:
+        if not asked_for_key and await _ask_for_key(repl, e.provider):
+            await _switch(repl, spec, asked_for_key=True)
+            return
+        _fail(repl, str(e))
+        return
+    except ValueError as e:
         _fail(repl, str(e))
         return
     remember_model(session.config.provider, session.config.model)
@@ -270,6 +334,45 @@ async def _switch(repl: Repl, spec: str) -> None:
     _ok(repl, f"Using [bold]{label}[/] [muted]via {session.config.provider_info.label} · {window}[/]")
     if not check.ok:  # inconclusive (timeout, server error, ...): switched, but say so
         repl.console.print(f"  [warn]Couldn't confirm it responds ({escape(check.message)}).[/]")
+
+
+async def _ask_for_key(repl: Repl, info: Provider) -> bool:
+    """Offer to add a provider's key here. True once a key is saved (or set in the shell)."""
+    repl.console.print(
+        f"\n  {info.label} needs an API key. [muted]Paste it below, or press Enter to skip.[/]"
+    )
+    check = await add_key(repl.console, info, repl.session.config.providers)
+    if check is None:
+        return False
+    repl.session.reload_keys()
+    return True
+
+
+@command("/key", "add or replace a provider's API key", group="Model", usage="[provider]")
+async def key(repl: Repl, arg: str) -> None:
+    session = repl.session
+    session.reload_keys()
+    cfg = session.config
+    name = arg or await pick("Which provider's key?", _provider_options(repl), cfg.provider)
+    if not name:
+        return
+    if name not in cfg.providers:
+        _fail(repl, f"Unknown provider {name!r}. Choose one of: {', '.join(cfg.providers)}")
+        return
+    info = cfg.providers[name]
+    if cfg.has_key(name):
+        repl.console.print(f"  [muted]{info.label} has a key; a new one replaces it.[/]")
+    check = await add_key(repl.console, info, cfg.providers)
+    if check is None:
+        repl.console.print("  [muted]No change.[/]")
+        return
+    session.reload_keys()
+    if name == cfg.provider:  # the running client has the old key: reconnect (conversation kept)
+        session.set_model(f"{cfg.provider}:{cfg.model}")
+    if check.ok:
+        _ok(repl, f"{info.label} is ready.")
+    else:
+        repl.console.print(f"  [warn]Saved, but couldn't confirm it works ({escape(check.message)}).[/]")
 
 
 @command("/whoami", "show provider, endpoint, model and API key source", group="Model")
@@ -327,6 +430,38 @@ async def effort(repl: Repl, arg: str) -> None:
         return
     repl.session.set_effort(None if choice == "default" else choice)  # type: ignore[arg-type]
     _ok(repl, f"Reasoning effort set to [bold]{choice}[/]")
+
+
+@command("/theme", "light, dark, or follow the terminal", group="Model", usage="[system|light|dark]")
+async def theme(repl: Repl, arg: str) -> None:
+    detected = "light" if LIGHT else "dark"
+    labels = {
+        "system": f"follow the terminal (now: {detected})",
+        "light": "light background",
+        "dark": "dark background",
+    }
+    choice = arg.lower() or await pick(
+        "Theme", [(k, f"{k:<7} {v}") for k, v in labels.items()], THEME_SETTING
+    )
+    if not choice:
+        return
+    if choice not in labels:
+        _fail(repl, "usage: /theme system|light|dark")
+        return
+    save_theme(choice)
+    _ok(repl, f"Theme set to [bold]{choice}[/] [muted]· takes effect the next time you start tinyharness[/]")
+    if THEME_SOURCE in ("TINYHARNESS_THEME", "config"):
+        where = "TINYHARNESS_THEME" if THEME_SOURCE == "TINYHARNESS_THEME" else "theme in your config file"
+        repl.console.print(f"  [warn]{where} is set to {THEME_SETTING}, which takes priority.[/]")
+
+
+@command("/thinking", "show or hide the model's reasoning (also ctrl+t)", group="Model", usage="[on|off]")
+def thinking(repl: Repl, arg: str) -> None:
+    choice = arg.lower()
+    if choice not in ("", "on", "off"):
+        _fail(repl, "usage: /thinking on|off")
+        return
+    repl.show_thinking(choice == "on" if choice else not repl.renderer.show_thinking)
 
 
 # --------------------------------------------------------------------- permissions, tools, skills

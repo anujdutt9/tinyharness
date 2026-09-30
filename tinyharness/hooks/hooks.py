@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from tinyharness.paths import search_dirs
-from tinyharness.security import sanitized_env
+from tinyharness.process import kill_group
+from tinyharness.security import redact_secrets, sanitized_env
 
 log = logging.getLogger(__name__)
 
@@ -102,18 +103,20 @@ class HookRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.cwd,
-                env=sanitized_env(),  # hook scripts never see API keys
+                env=sanitized_env(),  # no credentials in the hook's environment
+                start_new_session=True,  # its own process group, so a timeout stops all of it
             )
         except FileNotFoundError as e:
             return {"decision": "ask", "reason": f"hook command not found: {e}"}
         try:
             stdout, _ = await asyncio.wait_for(
-                proc.communicate(json.dumps({"event": event, **payload}).encode()),
+                # Hooks may forward their input (to an audit log, a chat): no credentials in it.
+                proc.communicate(redact_secrets(json.dumps({"event": event, **payload})).encode()),
                 timeout=self.timeout,
             )
         except TimeoutError:
-            proc.kill()
-            return {"decision": "ask", "reason": "hook timed out"}
+            await kill_group(proc)
+            return {"decision": "ask", "reason": f"hook timed out after {self.timeout:g}s"}
         if proc.returncode != 0:
             return {"decision": "deny", "reason": f"hook exited {proc.returncode}"}
         out = stdout.decode(errors="replace").strip()
@@ -129,10 +132,21 @@ class HookRunner:
 def load_hooks_file(path: Path) -> list[Hook]:
     if not path.exists():
         return []
-    with path.open("rb") as f:
-        data = tomllib.load(f)
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        log.warning("skipping hooks in %s: %s", path, e)
+        return []
+    entries = data.get("hook") or []
+    if not isinstance(entries, list):
+        log.warning("skipping hooks in %s: `hook` must be a list of [[hook]] tables", path)
+        return []
     hooks = []
-    for entry in data.get("hook") or []:
+    for entry in entries:
+        if not isinstance(entry, dict):
+            log.warning("skipping hook entry %r in %s: expected a [[hook]] table", entry, path)
+            continue
         if entry.get("event") not in EVENTS:
             log.warning("skipping hook with unknown event %r in %s", entry.get("event"), path)
             continue
@@ -148,6 +162,8 @@ def load_hooks_file(path: Path) -> list[Hook]:
     return hooks
 
 
-def load_hooks(working_dir: Path) -> list[Hook]:
-    """Hooks from ~/.tinyharness/hooks.toml and <working-dir>/.tinyharness/hooks.toml."""
-    return [h for d in search_dirs(working_dir, "hooks.toml") for h in load_hooks_file(d)]
+def load_hooks(working_dir: Path, *, project: bool = True) -> list[Hook]:
+    """Hooks from ~/.tinyharness/hooks.toml and, if `project` (a trusted folder; see
+    tinyharness/trust.py), <working-dir>/.tinyharness/hooks.toml."""
+    dirs = search_dirs(working_dir, "hooks.toml")
+    return [h for d in (dirs if project else dirs[:1]) for h in load_hooks_file(d)]

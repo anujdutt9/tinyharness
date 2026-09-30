@@ -16,6 +16,12 @@ SECRET_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(^|/)\.aws/credentials"),
     re.compile(r"(^|/)\.gnupg/"),
     re.compile(r"(^|/)\.netrc$"),
+    re.compile(r"(^|/)auth\.json$"),  # tinyharness's key file, and other tools' by that name
+)
+
+# Committed templates of the files above: they hold placeholders, not secrets.
+PUBLIC_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(^|/)\.env\.(example|sample|template|dist)$"),
 )
 
 # Environment variables that must never reach a subprocess we spawn (hooks).
@@ -40,7 +46,25 @@ def is_secret_path(path: str | Path) -> bool:
     if os.environ.get("TINYHARNESS_ALLOW_SECRET_READS"):
         return False
     s = str(path)
-    return any(p.search(s) for p in SECRET_PATH_PATTERNS)
+    return any(p.search(s) for p in SECRET_PATH_PATTERNS) and not any(
+        p.search(s) for p in PUBLIC_PATH_PATTERNS
+    )
+
+
+def secret_path_regexes() -> tuple[str, ...]:
+    """SECRET_PATH_PATTERNS for matching absolute paths (the OS sandbox's read denylist)."""
+    if os.environ.get("TINYHARNESS_ALLOW_SECRET_READS"):
+        return ()
+    return _absolute(SECRET_PATH_PATTERNS)
+
+
+def public_path_regexes() -> tuple[str, ...]:
+    """PUBLIC_PATH_PATTERNS for matching absolute paths (exceptions to the denylist)."""
+    return _absolute(PUBLIC_PATH_PATTERNS)
+
+
+def _absolute(patterns: tuple[re.Pattern[str], ...]) -> tuple[str, ...]:
+    return tuple(p.pattern.replace("(^|/)", "/") for p in patterns)
 
 
 def sanitized_env() -> dict[str, str]:
@@ -93,6 +117,13 @@ def mask_secrets(text: str, extra: dict[str, str] | None = None) -> str:
         if value in text:
             text = text.replace(value, f"[REDACTED {name}]")
     return text
+
+
+def redact_secrets(text: str, extra: dict[str, str] | None = None) -> str:
+    """`mask_secrets`, plus anything shaped like an API key even if it isn't configured
+    here (a key the user pasted, one inside a URL). For text that leaves the session:
+    hook payloads and session logs."""
+    return API_KEY_PATTERN.sub("[REDACTED API KEY]", mask_secrets(text, extra))
 
 
 def find_api_key(text: str) -> str | None:

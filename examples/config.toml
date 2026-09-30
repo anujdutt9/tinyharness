@@ -1,5 +1,8 @@
-# tinyharness config. Copy to ~/.config/tinyharness/config.toml.
+# tinyharness config. Copy to ~/.tinyharness/config.toml.
 # Every key is optional. API keys never go here; put them in your environment or a .env file.
+#
+# Plain keys come first and [tables] last: in TOML, every key after a [table] header
+# belongs to that table.
 
 # --- Model --------------------------------------------------------------------
 # Without these, tinyharness uses the last model you picked with /model, or else the
@@ -7,11 +10,24 @@
 # anthropic, openai, openrouter, gemini, xai, deepseek, mistral, groq).
 # provider = "anthropic"
 # model = "claude-sonnet-5"            # or "openai:gpt-6-sol" to name the provider too
-
 # effort = "high"                      # low | medium | high | max; default: the model's own
+# request_timeout = 1800               # seconds per model call
 
+# --- Workspace & permissions -------------------------------------------------
+# working_dir = "~/code/project"       # default: the directory you launch from
+# permission_mode = "default"          # plan | default | acceptEdits | auto | bypassPermissions
+
+# --- Terminal -----------------------------------------------------------------
+# theme = "system"                     # system (asks the terminal) | light | dark; also /theme
+# show_thinking = false                # show the model's reasoning; also ctrl+t or /thinking
+
+# --- Context management -------------------------------------------------------
+# context_window_tokens = 200000       # default: what the provider reports for the model
+# auto_compact_threshold = 0.90        # summarize older history above this fraction of the window
+
+# --- Providers ------------------------------------------------------------------
 # Models come live from each provider's model list (/model searches them). Adjust a
-# built-in provider, e.g. its small (background) model:
+# built-in provider, e.g. its small (background) model, which agents get with `model: small`:
 # [providers.openrouter]
 # small_model = "google/gemini-3.5-flash-lite"
 
@@ -25,18 +41,25 @@
 # models = ["claude-sonnet-5", { id = "gpt-6-sol", context = 1050000 }]  # if it has no model list
 # extra_headers = { "x-team" = "platform" }
 
-# request_timeout = 1800     # seconds per model call
-
-# --- Workspace & permissions -------------------------------------------------
-# working_dir = "~/code/project"   # default: the directory you launch from
-# permission_mode = "default"     # plan | default | acceptEdits | auto | bypassPermissions
-
+# --- Permission rules ---------------------------------------------------------
 # Rules are `Tool` or `Tool(glob)`; relative globs are inside working_dir and `*` also
 # matches `/`. Deny beats allow. Reads inside the project never ask anyway.
 # [permissions]
 # allow = ["Edit(src/*)", "Write(tests/*)", "Read(~/Downloads/*)"]
 # deny = ["Edit(*.lock)", "Read(*/secrets/*)"]
 
-# --- Context management ------------------------------------------------------
-# context_window_tokens = 200000  # default: what the provider reports for the model
-# auto_compact_threshold = 0.90   # summarize older history above this fraction of the window
+# --- Sandbox ------------------------------------------------------------------
+# Bash commands run in an OS sandbox (macOS: Seatbelt): they write only to the project,
+# scratch and temp dirs, can't read credential files, and have no network. Sandboxed
+# commands run without asking in acceptEdits and auto modes. Unsandboxed, every one asks.
+# [sandbox]
+# enabled = true
+# allow_write = ["~/code/other-repo"]  # more writable dirs (protected like the project)
+# allow_localhost = false              # true: tests may start and reach local servers
+
+# --- Cost ---------------------------------------------------------------------
+# Token counts are always shown. Dollars need a price: OpenRouter reports what each call
+# cost, and its model list has prices; for other providers, set them here (per million).
+# [pricing]
+# "anthropic:claude-sonnet-5" = { input = 3.0, output = 15.0, cached = 0.3 }
+# "openai:gpt-6-sol" = { input = 2.0, output = 8.0 }

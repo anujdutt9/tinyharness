@@ -5,18 +5,18 @@ import shutil
 import time
 from pathlib import Path
 
-from tinyharness.paths import project_dir
+from tinyharness.paths import state_dir
 
 
 class Scratch:
-    """Per-session throwaway directory at <working-dir>/.tinyharness/tmp/<session-id>/.
+    """Per-session throwaway directory at ~/.tinyharness/projects/<project>/tmp/<session-id>/.
 
     Removed when the session closes (or at interpreter exit). Directories left
     behind by crashed sessions are swept once they are older than `max_age_hours`.
     """
 
     def __init__(self, working_dir: Path, session_id: str, max_age_hours: int = 24) -> None:
-        self.base = project_dir(working_dir) / "tmp"
+        self.base = state_dir(working_dir) / "tmp"
         self.dir = self.base / session_id
         self.base.mkdir(parents=True, exist_ok=True)
         self._sweep_stale(max_age_hours)

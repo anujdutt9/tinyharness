@@ -23,7 +23,11 @@ class AssistantText:
 
 @dataclass(frozen=True)
 class Reasoning:
-    """The model started reasoning before answering (not every reply does)."""
+    """The model is reasoning before it answers (not every reply does). `text` is the next
+    piece of its reasoning when the provider shares it (as is, or as a summary); empty
+    when it only says that it's reasoning."""
+
+    text: str = ""
 
 
 @dataclass(frozen=True)
@@ -73,6 +77,18 @@ class Compacted:
     count: int = 0
 
 
+@dataclass(frozen=True)
+class TokenUsage:
+    """What one model call used, when the provider reports it. `cost` is in dollars,
+    when known (reported by the provider, or from a price in the config or model list)."""
+
+    model: str
+    input: int
+    cached: int
+    output: int
+    cost: float | None = None
+
+
 SubagentStatus = Literal["started", "working", "done", "failed"]
 
 
@@ -89,6 +105,7 @@ class SubagentUpdate:
     detail: str = ""  # the tool it's running, or how it ended
     tools_used: int = 0
     elapsed: float = 0.0
+    model: str = ""  # the model it runs on, e.g. "claude-haiku-4-5"
 
 
 @dataclass(frozen=True)
@@ -105,6 +122,7 @@ Event = (
     | ToolResult
     | TodosUpdated
     | Compacted
+    | TokenUsage
     | SubagentUpdate
     | Done
 )

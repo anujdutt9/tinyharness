@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from tinyharness.llm.types import ModelInfo
+from tinyharness.llm.usage import Price
 
 log = logging.getLogger(__name__)
 
@@ -68,5 +69,11 @@ def _to_json(m: ModelInfo) -> dict[str, Any]:
 
 
 def _from_json(d: dict[str, Any]) -> ModelInfo:
-    efforts = d.get("efforts")
-    return ModelInfo(**{**d, "efforts": frozenset(efforts) if efforts is not None else None})
+    efforts, price = d.get("efforts"), d.get("price")
+    return ModelInfo(
+        **{
+            **d,
+            "efforts": frozenset(efforts) if efforts is not None else None,
+            "price": Price(**price) if isinstance(price, dict) else None,
+        }
+    )

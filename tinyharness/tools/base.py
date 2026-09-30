@@ -16,15 +16,16 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from tinyharness.llm.types import ToolSpec
+from tinyharness.llm.usage import UsageMeter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from tinyharness.config import Config
     from tinyharness.events import Event
@@ -40,6 +41,8 @@ class ToolError(Exception):
 
 class ToolInput(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    # Set by `Tool.pin_path`: the resolved path the permission gate approved.
+    _approved_path: Path | None = PrivateAttr(default=None)
 
 
 InputT = TypeVar("InputT", bound=ToolInput)
@@ -55,6 +58,7 @@ class ToolContext:
     read_paths: set[str] = field(default_factory=set)  # enforces read-before-write
     todos: list[dict[str, str]] = field(default_factory=list)
     notify: Callable[[Event], None] | None = None  # side-channel events, e.g. subagent progress
+    usage: UsageMeter = field(default_factory=UsageMeter)  # tokens and cost, subagents included
 
 
 class Tool(ABC, Generic[InputT]):
@@ -78,6 +82,13 @@ class Tool(ABC, Generic[InputT]):
         path = getattr(args, "path", None)
         return str(path) if path else None
 
+    def pin_path(self, args: InputT, path: Path) -> InputT:
+        """`args` bound to the resolved `path` the permission gate approved (see
+        `approved_path`), so the tool acts on exactly that path."""
+        pinned = args.model_copy()
+        pinned._approved_path = path
+        return pinned
+
     def target_host(self, args: InputT) -> str | None:
         """The site a network tool contacts, used for permission decisions."""
         return None
@@ -85,6 +96,17 @@ class Tool(ABC, Generic[InputT]):
     def risk(self, args: dict[str, Any], path: Path | None) -> str | None:
         """Why this call is destructive enough to always ask in auto mode, or None.
         Gets the raw arguments, since it runs before they're validated."""
+        return None
+
+    def contained(self, args: dict[str, Any]) -> bool:
+        """Whether this call runs inside the OS sandbox (writes only to the project, no
+        network), so modes that allow project edits may allow it without asking."""
+        return False
+
+    def escapes(self, args: dict[str, Any]) -> str | None:
+        """Why this call runs outside the sandbox it would normally run in, or None.
+        Such calls always ask: no rule, mode or classifier approves them (only
+        bypassPermissions or a hook), and "don't ask again" isn't offered."""
         return None
 
     def is_read_only(self, args: InputT) -> bool:
@@ -132,3 +154,10 @@ def _strip_titles(schema: Any) -> Any:
         else:
             out[key] = _strip_titles(value)
     return out
+
+
+def approved_path(args: ToolInput, user_path: str, ctx: ToolContext) -> Path | None:
+    """Where a call should act: the path the permission gate approved, if it went through
+    one (resolving again could follow a symlink swapped in since), else `user_path`
+    resolved now (tools called directly, without a gate)."""
+    return args._approved_path or ctx.workspace.resolve(user_path)

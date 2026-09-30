@@ -14,10 +14,11 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.formatted_text import ANSI, FormattedText, merge_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 from prompt_toolkit.shortcuts.choice_input import ChoiceInput
@@ -32,7 +33,7 @@ from tinyharness.permissions import Decision, PermissionRequest
 Choice = Literal["yes", "remember", "no"]
 PREVIEW_LINES = 12
 
-_QUESTIONS = {"Edit": "Make this edit?", "Write": "Write this file?"}
+_QUESTIONS = {"Edit": "Make this edit?", "Write": "Write this file?", "Bash": "Run this command?"}
 
 
 def preview(request: PermissionRequest) -> Text | None:
@@ -43,6 +44,8 @@ def preview(request: PermissionRequest) -> Text | None:
         for sign, key, style in (("-", "old_string", "diff.del"), ("+", "new_string", "diff.add")):
             for line in str(args.get(key, "")).splitlines()[:PREVIEW_LINES]:
                 lines.append(f"{sign} {line}\n", style=style)
+    elif request.tool == "Bash":  # the whole command: the summary line is truncated
+        lines.append(str(args.get("command", "")), style="bold")
     elif request.tool == "Write":
         content = str(args.get("content", "")).splitlines()
         for line in content[:PREVIEW_LINES]:
@@ -72,7 +75,7 @@ def card(request: PermissionRequest, summary: str) -> RenderableType:
     )
 
 
-def _choice_keys() -> KeyBindings:
+def _choice_keys(choices: list[Choice]) -> KeyBindings:
     """Digits answer immediately; Esc means "no"."""
     keys = KeyBindings()
 
@@ -81,32 +84,40 @@ def _choice_keys() -> KeyBindings:
         def _(event: KeyPressEvent) -> None:
             event.app.exit(result=result)
 
-    shortcuts: list[tuple[str, Choice]] = [("1", "yes"), ("2", "remember"), ("3", "no"), ("escape", "no")]
-    for key, result in shortcuts:
-        answer(key, result)
+    for i, result in enumerate(choices, start=1):
+        answer(str(i), result)
+    answer("escape", "no")
     return keys
 
 
 async def ask(console: Console, request: PermissionRequest, summary: str) -> Decision:
-    console.print(card(request, summary))
+    """Ask about one call. The card, question and choices disappear once answered: the
+    call's own row in the transcript shows what happened to it."""
+    parts: list[RenderableType] = [card(request, summary)]
+    if request.warning:
+        parts.append(Text(f"  ⚠ {request.warning[0].upper()}{request.warning[1:]}.", style="warn"))
     if request.reason:
-        console.print(Text(f"  Auto mode is asking because {request.reason}.", style="warn"))
+        parts.append(Text(f"  Auto mode is asking because {request.reason}.", style="warn"))
     question = _QUESTIONS.get(request.tool, f"Allow {request.tool}?")
 
-    options: list[tuple[Choice, Any]] = [
-        ("yes", "Yes"),
-        ("remember", f"Yes, {request.remember_label}"),
-        ("no", FormattedText([("", "No, and tell it what to do instead  "), (SUBTLE, "esc")])),
-    ]
+    options: list[tuple[Choice, Any]] = [("yes", "Yes")]
+    if request.remember_label:  # not offered for calls that must ask every time
+        options.append(("remember", f"Yes, {request.remember_label}"))
+    options.append(("no", FormattedText([("", "No, and tell it what to do instead  "), (SUBTLE, "esc")])))
+    prompt = ChoiceInput[Choice](
+        message=merge_formatted_text(
+            [ANSI(_ansi(console, Group(*parts)) + "\n"), [("bold", f" {question}")]]
+        ),
+        options=options,
+        default="yes",
+        style=PT_STYLE,
+        symbol=PROMPT,
+        key_bindings=_choice_keys([choice for choice, _ in options]),
+    )
+    app = prompt._create_application()  # ChoiceInput has no option to erase itself; its app does
+    app.erase_when_done = True
     try:
-        choice: Choice = await ChoiceInput[Choice](
-            message=FormattedText([("bold", f" {question}")]),
-            options=options,
-            default="yes",
-            style=PT_STYLE,
-            symbol=PROMPT,
-            key_bindings=_choice_keys(),
-        ).prompt_async()
+        choice: Choice = await app.run_async()
     except (KeyboardInterrupt, EOFError):
         choice = "no"
 
@@ -115,6 +126,16 @@ async def ask(console: Console, request: PermissionRequest, summary: str) -> Dec
 
     feedback = await _ask_feedback()
     return Decision(False, "user rejected", "user", interrupt=True, feedback=feedback)
+
+
+_LINK = re.compile(r"\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def _ansi(console: Console, renderable: RenderableType) -> str:
+    """Render with rich, to show inside a prompt_toolkit prompt (so it's erased with it)."""
+    with console.capture() as captured:
+        console.print(renderable, width=console.width - 2)  # the prompt indents its message
+    return _LINK.sub("", captured.get().rstrip("\n"))  # prompt_toolkit can't show links
 
 
 async def _ask_feedback() -> str:

@@ -55,6 +55,8 @@ def test_builtin_agents_load_from_markdown():
     assert "Write" not in agents["explore"].tools
     assert "Write" not in agents["researcher"].tools and "WebSearch" in agents["researcher"].tools
     assert agents["general-purpose"].permission_mode == "default"
+    assert "Bash" in agents["general-purpose"].tools  # delegated coding work can run tests
+    assert "Bash" not in agents["explore"].tools and "Bash" not in agents["plan"].tools
     assert all(a.description and a.system_prompt for a in agents.values())
 
 

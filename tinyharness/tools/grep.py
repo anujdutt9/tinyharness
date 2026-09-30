@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -13,6 +14,7 @@ from pydantic import Field
 from tinyharness.security import is_secret_path
 from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
 from tinyharness.tools.glob import is_hidden, resolve_search_root
+from tinyharness.workspace.files import read_bytes
 
 MAX_FILE_BYTES = 2_000_000
 BINARY_PROBE_BYTES = 4096
@@ -49,13 +51,23 @@ class GrepTool(Tool[GrepInput]):
         return args.path or "."
 
     async def run(self, args: GrepInput, ctx: ToolContext) -> str:
-        root = resolve_search_root(args.path, ctx)
+        root = resolve_search_root(args.path, ctx, args)
         try:
             regex = re.compile(args.pattern, re.IGNORECASE if args.case_insensitive else 0)
         except re.error as e:
             raise ToolError(f"invalid regex: {e}") from e
 
-        files = [root] if root.is_file() else list(_iter_searchable(root, args.include))
+        if root.is_file():
+            # A file named directly gets the same checks a directory walk applies to each file.
+            if is_secret_path(root):
+                raise ToolError(
+                    f"refusing to search secret-shaped path: {root}. "
+                    "Set TINYHARNESS_ALLOW_SECRET_READS=1 if you really mean it."
+                )
+            _check_searchable(root)
+            files = [root]
+        else:
+            files = list(_iter_searchable(root, args.include))
         if args.output_mode == "files_with_matches":
             return _files_with_matches(files, regex, args.head_limit, root)
         if args.output_mode == "count":
@@ -64,40 +76,56 @@ class GrepTool(Tool[GrepInput]):
 
 
 def _iter_searchable(root: Path, include: str | None) -> Iterator[Path]:
-    for p in root.rglob("*"):
-        if not p.is_file():
-            continue
-        rel_dirs = p.relative_to(root).parent
-        if is_hidden(rel_dirs) or SKIP_DIRS.intersection(rel_dirs.parts):
-            continue
-        if include and not fnmatch.fnmatch(p.name, include):
-            continue
-        if is_secret_path(p) or _too_big_or_binary(p):
-            continue
-        yield p
+    """Files under `root` worth searching, in a stable order. Symlinks aren't followed,
+    to files or directories (as ripgrep does by default): the secret-path check sees a
+    link's own name, so `leak -> ~/.aws/credentials` would otherwise be read."""
+    for dirpath, dirnames, filenames in os.walk(root):  # doesn't descend into linked dirs
+        here = Path(dirpath)
+        rel = here.relative_to(root)
+        dirnames[:] = sorted(
+            d for d in dirnames if not (is_hidden(rel / d) or d in SKIP_DIRS or (here / d).is_symlink())
+        )
+        for name in sorted(filenames):
+            p = here / name
+            if include and not fnmatch.fnmatch(name, include):
+                continue
+            if p.is_symlink() or is_secret_path(p):
+                continue
+            yield p
 
 
-def _too_big_or_binary(path: Path) -> bool:
+def _load(path: Path) -> str | None:
+    """The file's text, or None to skip it: unreadable, now a symlink, too big or binary.
+    One read, without following symlinks, so the file checked is the file searched."""
     try:
-        if path.stat().st_size > MAX_FILE_BYTES:
-            return True
-        with path.open("rb") as f:
-            return b"\x00" in f.read(BINARY_PROBE_BYTES)
-    except OSError:
-        return True
-
-
-def _read(path: Path) -> str | None:
-    try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        data = read_bytes(path, limit=MAX_FILE_BYTES + 1)
     except OSError:
         return None
+    if len(data) > MAX_FILE_BYTES or b"\x00" in data[:BINARY_PROBE_BYTES]:
+        return None
+    return data.decode("utf-8", errors="replace")
+
+
+def _check_searchable(path: Path) -> None:
+    """The reason `_load` would skip this file, as an error."""
+    try:
+        data = read_bytes(path, limit=MAX_FILE_BYTES + 1)
+    except OSError as e:
+        raise ToolError(f"can't read {path}: {e.strerror or e}") from None
+    if len(data) > MAX_FILE_BYTES:
+        size = path.stat().st_size
+        raise ToolError(
+            f"file too large to search: {path} is {size / 1_000_000:.1f} MB; "
+            f"Grep searches files up to {MAX_FILE_BYTES // 1_000_000} MB. Use Read with offset/limit."
+        )
+    if b"\x00" in data[:BINARY_PROBE_BYTES]:
+        raise ToolError(f"not a text file: {path} looks binary; Grep only searches text")
 
 
 def _files_with_matches(files: list[Path], regex: re.Pattern[str], limit: int, root: Path) -> str:
     hits: list[str] = []
     for p in files:
-        text = _read(p)
+        text = _load(p)
         if text is not None and regex.search(text):
             hits.append(str(p))
             if len(hits) >= limit:
@@ -110,7 +138,7 @@ def _files_with_matches(files: list[Path], regex: re.Pattern[str], limit: int, r
 def _count(files: list[Path], regex: re.Pattern[str], limit: int, root: Path) -> str:
     per_file: list[tuple[str, int]] = []
     for p in files:
-        text = _read(p)
+        text = _load(p)
         if text is not None and (n := len(regex.findall(text))):
             per_file.append((str(p), n))
     if not per_file:
@@ -124,7 +152,7 @@ def _count(files: list[Path], regex: re.Pattern[str], limit: int, root: Path) ->
 def _content(files: list[Path], regex: re.Pattern[str], limit: int, root: Path) -> str:
     out: list[str] = []
     for p in files:
-        text = _read(p)
+        text = _load(p)
         if text is None:
             continue
         for lineno, line in enumerate(text.splitlines(), start=1):

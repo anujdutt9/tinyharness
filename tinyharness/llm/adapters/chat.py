@@ -6,7 +6,11 @@ sent back unchanged on the next request. All three variants are kept:
 
     reasoning_details   OpenRouter (list of typed items, some signed)
     reasoning_content   DeepSeek (text)
+    reasoning           Groq, vLLM, Ollama (text)
     content: [chunks]   Mistral ("thinking" and "text" chunks in one list)
+
+OpenRouter streams `reasoning` too, as a readable copy of `reasoning_details`; it's
+sent back only when a reply had nothing else, so the same reasoning never goes twice.
 """
 
 from __future__ import annotations
@@ -37,7 +41,12 @@ class ChatAdapter(Adapter):
             else:
                 messages.append({"role": "user", "content": m.content or ""})
 
-        payload: dict[str, Any] = {"model": request.model, "messages": messages, "stream": True}
+        payload: dict[str, Any] = {
+            "model": request.model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},  # token counts in the last chunk
+        }
         if request.tools:
             payload["tools"] = [
                 {
@@ -76,6 +85,7 @@ class _ChatParser(StreamParser):
     def __init__(self) -> None:
         self.text: list[str] = []
         self.reasoning_content: list[str] = []
+        self.reasoning: list[str] = []  # the plain `reasoning` field
         self.reasoning_details: dict[int, dict[str, Any]] = {}
         self.thinking_chunks: list[str] = []  # Mistral
         self.reasoning_seen = False
@@ -109,8 +119,12 @@ class _ChatParser(StreamParser):
         if reasoning and not self.reasoning_seen:
             self.reasoning_seen = True
             chunks.insert(0, StreamChunk(reasoning=True))
+        if readable := _readable_reasoning(delta, content):
+            chunks.insert(1 if reasoning else 0, StreamChunk(reasoning_text=readable))
         if delta.get("reasoning_content"):
             self.reasoning_content.append(delta["reasoning_content"])
+        if isinstance(delta.get("reasoning"), str):
+            self.reasoning.append(delta["reasoning"])
         for i, detail in enumerate(delta.get("reasoning_details") or []):
             self._merge_detail(detail.get("index", i), detail)
         chunks.extend(StreamChunk(tool_call_delta=tc) for tc in delta.get("tool_calls") or [])
@@ -142,4 +156,19 @@ class _ChatParser(StreamParser):
                 {"type": "thinking", "thinking": [{"type": "text", "text": "".join(self.thinking_chunks)}]},
                 {"type": "text", "text": "".join(self.text)},
             ]
+        if self.reasoning and not state:  # only form of it (Groq, vLLM, Ollama); see the docstring
+            state["reasoning"] = "".join(self.reasoning)
         return state or None
+
+
+def _readable_reasoning(delta: dict[str, Any], content: Any) -> str:
+    """The reasoning text in one chunk, from whichever field this provider uses."""
+    if isinstance(delta.get("reasoning"), str):  # OpenRouter
+        return str(delta["reasoning"])
+    if isinstance(delta.get("reasoning_content"), str):  # DeepSeek
+        return str(delta["reasoning_content"])
+    if isinstance(content, list):  # Mistral
+        return "".join(
+            t.get("text", "") for p in content if p.get("type") == "thinking" for t in p.get("thinking") or []
+        )
+    return ""

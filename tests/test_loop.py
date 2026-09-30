@@ -11,6 +11,7 @@ from tinyharness.agent.history import History, Message
 from tinyharness.agent.loop import LoopDeps, run_agent_loop
 from tinyharness.agent.transcript import Transcript
 from tinyharness.events import AssistantText, Done, PermissionDecision, ToolResult, ToolsDispatched
+from tinyharness.paths import state_dir
 from tinyharness.permissions import Decision, PermissionGate, PermissionMode
 from tinyharness.tools.base import Tool, ToolInput
 from tinyharness.tools.registry import ToolRegistry
@@ -169,7 +170,7 @@ async def test_keys_in_tool_output_never_reach_the_model(tmp_path, monkeypatch):
     [result] = [e for e in events if isinstance(e, ToolResult)]
     assert result.output == "API_KEY = '[REDACTED ANTHROPIC_API_KEY]'"
     assert key not in str(history.to_dicts())
-    assert key not in (tmp_path / ".tinyharness").joinpath("sessions", "test.jsonl").read_text()
+    assert key not in state_dir(tmp_path).joinpath("sessions", "test.jsonl").read_text()
 
 
 async def test_context_overflow_summarizes_and_retries(tmp_path):

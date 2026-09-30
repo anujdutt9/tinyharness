@@ -57,7 +57,8 @@ and it runs before the permission mode is applied.
 
 **Shell hooks** go in `hooks.toml`. The payload arrives as JSON on stdin. Print
 `{"decision": "deny", "reason": "..."}` to block the call. A non-zero exit code also
-blocks it. Hook processes never see environment variables that look like credentials.
+blocks it. Hook processes never see environment variables that look like credentials, and credentials
+are masked out of the JSON they receive.
 
 ```toml
 [[hook]]
@@ -98,7 +99,7 @@ You are a meticulous reviewer. Report concrete bugs with file:line references.
 
 Subagents have their own permission mode (plan mode and bypass carry over from the
 session) and can't start further subagents. Their transcripts go to
-`.tinyharness/sidechains/`, and their progress is shown live (SDK: `on_event`).
+`~/.tinyharness/projects/<project>/sidechains/`, and their progress is shown live (SDK: `on_event`).
 
 **Teams.** For a goal that splits into parts, the model can call `Team` with a list of
 tasks, each with an agent type and the tasks it depends on. A task starts when its

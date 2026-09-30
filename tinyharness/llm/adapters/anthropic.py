@@ -121,6 +121,7 @@ class _AnthropicParser(StreamParser):
     def __init__(self) -> None:
         self.blocks: dict[int, dict[str, Any]] = {}
         self.json: dict[int, list[str]] = {}
+        self.stop_reason: str | None = None
 
     def feed(self, event: dict[str, Any]) -> list[StreamChunk]:
         match event.get("type"):
@@ -149,7 +150,10 @@ class _AnthropicParser(StreamParser):
                     block["input"] = parse_arguments("".join(self.json.get(event["index"], [])))
             case "message_delta":
                 if reason := (event.get("delta") or {}).get("stop_reason"):
+                    self.stop_reason = reason
                     return [StreamChunk(finish_reason=reason)]
+            case "message_stop" if self.stop_reason is None:  # the end, even without a reason
+                return [StreamChunk(finish_reason="end_turn")]
             case "error":
                 error = event.get("error") or {}
                 raise LLMError(f"LLM error: {error.get('message', json.dumps(error))}")
@@ -170,6 +174,7 @@ class _AnthropicParser(StreamParser):
                 ]
             case "thinking_delta":
                 block["thinking"] = block.get("thinking", "") + delta["thinking"]
+                return [StreamChunk(reasoning_text=delta["thinking"])]
             case "signature_delta":
                 block["signature"] = delta["signature"]
         return []
