@@ -32,7 +32,7 @@ dependencies = [
     "PyYAML>=6.0",
     "pypdf>=4.0",
     "prompt_toolkit>=3.0.52",  # ChoiceInput and input frames
-    "rich>=13.7",
+    "rich>=13.8",  # 13.7 printed reasoning above its "∴ Thinking" header
     "pillow>=10.0",
 ]
 
