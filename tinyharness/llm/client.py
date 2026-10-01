@@ -21,6 +21,7 @@ import httpx
 
 from tinyharness.agent.history import Message, ReasoningState, ToolCall, well_formed
 from tinyharness.llm.adapters import ADAPTERS
+from tinyharness.llm.calibration import CalibrationStore, ToolFormat, as_text, probe, tools_section
 from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.types import (
     DEFAULT_OPT_IN_EFFORT,
@@ -214,6 +215,8 @@ class LLMClient:
         timeout: float = 1800.0,
         retries: int = MAX_RETRIES,
         transport: httpx.AsyncBaseTransport | None = None,  # tests replay recorded responses
+        tool_calls: str = "auto",  # "native", "text", or "auto": probe once per model (calibration.py)
+        calibration: CalibrationStore | None = None,  # where probed formats are kept; None: native
     ) -> None:
         self.provider = provider
         self.adapter = ADAPTERS[provider.api](provider)
@@ -225,6 +228,9 @@ class LLMClient:
         self.retries = retries
         self.directory = models
         self.transport = transport
+        self.tool_calls = tool_calls
+        self.calibration = calibration
+        self._formats: dict[str, ToolFormat] = {}  # probed this session, by model
         self._tried_listing = False
 
     def _timeouts(self) -> httpx.Timeout:
@@ -296,17 +302,25 @@ class LLMClient:
         *,
         model: str | None = None,
         web_search: bool = False,
+        probing: bool = False,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream one reply. The last chunk carries `state` when the provider needs data back next turn."""
         await self._ensure_model_list()
         model = model or self.model
         owner = f"{self.provider.name}:{model}"
         messages, _ = well_formed(messages, valid_id=re.compile(self.provider.tool_id_pattern), owner=owner)
+        system = "\n\n".join(m.content or "" for m in messages if m.role == "system")
+        conversation = [m for m in messages if m.role != "system"]
+        tools = list(tools or [])
+        if tools and not probing and await self.tool_format(model) == "text":
+            # This model calls tools better in text: describe them, and send the history as text.
+            system = "\n\n".join(filter(None, [system, tools_section(tools)]))
+            conversation, tools = as_text(conversation), []
         request = Request(
             model=model,
-            system="\n\n".join(m.content or "" for m in messages if m.role == "system"),
-            messages=[m for m in messages if m.role != "system"],
-            tools=list(tools or []),
+            system=system,
+            messages=conversation,
+            tools=tools,
             effort=self._effort(model, agent_turn=bool(tools)),
             info=self.model_info(model),
             owner=owner,
@@ -439,6 +453,31 @@ class LLMClient:
                 calls.add(chunk.tool_call_delta)
             finish = chunk.finish_reason or finish
         return CompletedTurn(text="".join(text), tool_calls=calls.calls(), finish_reason=finish)
+
+    async def tool_format(self, model: str | None = None) -> ToolFormat:
+        """How `model` calls tools: from the config, the cache, or one probe request."""
+        model = model or self.model
+        if self.tool_calls in ("native", "text"):
+            return self.tool_calls  # type: ignore[return-value]
+        if self.calibration is None:
+            return "native"
+        if model in self._formats:
+            return self._formats[model]
+        owner = f"{self.provider.name}:{model}"
+        fmt = self.calibration.get(owner)
+        if fmt is None:
+            try:
+                fmt = await probe(
+                    lambda messages, tools: self.stream(messages, tools, model=model, probing=True)
+                )
+            except Exception as e:  # can't tell: use the interface, and try again next session
+                log.info("tool-call probe for %s failed: %s", owner, e)
+                self._formats[model] = "native"
+                return "native"
+            self.calibration.put(owner, fmt)
+            log.info("%s calls tools %s", owner, "through the API" if fmt == "native" else "in text")
+        self._formats[model] = fmt
+        return fmt
 
     async def one_shot(
         self, prompt: str, *, system: str | None = None, model: str | None = None, web_search: bool = False

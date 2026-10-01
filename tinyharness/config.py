@@ -134,6 +134,12 @@ class Config(BaseModel):
     # so the model can load one with Read when a task matches. False: skills run only by /name.
     skill_tool: bool = True
 
+    # --- tool calls ---
+    # How models call tools: "native" (the API's tool-calling interface), "text" (written in
+    # the reply; some small and self-hosted models do much better), or "auto": the first time
+    # a model is used, one small request finds out, and the answer is cached per model.
+    tool_calls: Literal["auto", "native", "text"] = "auto"
+
     # --- context management ---
     context_window_tokens: int | None = None  # None = what the provider reports for the model
     auto_compact_threshold: float = Field(default=0.90, gt=0, le=1)

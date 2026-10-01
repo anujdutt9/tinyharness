@@ -58,8 +58,11 @@ extra_body = { temperature = 0.2 }      # merged into every request
 ```
 
 For tool use, start vLLM with `--enable-auto-tool-choice --tool-call-parser <parser>`
-(e.g. `hermes` for Qwen2.5/Qwen3 instruct models, `qwen3_coder` for Qwen3-Coder). An agent
-file can then pick a model with `model: local:worker`.
+(e.g. `hermes` for Qwen2.5/Qwen3 instruct models, `qwen3_coder` for Qwen3-Coder). A server
+without a tool-call parser works too: the first request to a model finds out how it calls
+tools, and a model that writes its calls as text gets the tools in its prompt instead
+(`tool_calls = "text"` forces it). An agent file can then pick a model with
+`model: local:worker`.
 
 | Location | Contents |
 |---|---|

@@ -9,6 +9,11 @@ ways no model can fix. tinyharness handles both in the harness, not with model-s
 special cases (see [AGENTS.md](../AGENTS.md#guarantees-dont-break-these) for the
 guarantees and why each exists):
 
+- How a model calls tools is measured, not guessed from its name: the first time a model
+  is used, one small request offers it a tool. Models that call it through the API keep
+  doing so; models that write the call in their reply get the tools in their prompt and
+  write `<call>{...}</call>` (a tag no server-side parser strips). Cached per model in
+  `~/.tinyharness/cache/tool-calls.json`; `tool_calls = "native" | "text"` overrides it.
 - Every reply has a clear outcome, normalized from each API's own stop reasons. A reply
   cut off at the output limit is continued; a tool call cut off mid-arguments isn't run,
   and the model is told to write in smaller pieces.

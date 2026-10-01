@@ -31,7 +31,12 @@ from typing import Any
 from tinyharness.agent.history import ToolCall
 
 # Each body stops at the next opening tag, so unclosed tags can't make a search quadratic.
-_TOOL_CALL = re.compile(r"<tool_call>((?:(?!</?tool_call>).)*)(?:</tool_call>|$)", re.DOTALL)
+# <call> is tinyharness's own text protocol (llm/calibration.py): a tag no server-side
+# tool-call parser strips out, as some do with <tool_call> even when no tools are sent.
+_TOOL_CALL = re.compile(
+    r"<(?:tool_call|call)>((?:(?!</?(?:tool_call|call)>).)*)(?:</(?:tool_call|call)>|$)", re.DOTALL
+)
+_CLOSE = re.compile(r"</(?:tool_call|call)>")
 _FUNCTION = re.compile(r"<function=([\w.-]+)>((?:(?!<function=|</function>).)*)(?:</function>)?", re.DOTALL)
 _PARAMETER = re.compile(
     r"<parameter=([\w.-]+)>\n?((?:(?!<parameter=|</parameter>).)*?)\n?</parameter>", re.DOTALL
@@ -39,7 +44,7 @@ _PARAMETER = re.compile(
 _GEMMA = re.compile(
     r"<\|tool_call>\s*call:([\w.-]+)\s*(\{(?:(?!<tool_call\|>).)*\})\s*<tool_call\|>", re.DOTALL
 )
-_START = re.compile(r"^[ \t]*(<tool_call>|<function=|<\|tool_call>)", re.MULTILINE)
+_START = re.compile(r"^[ \t]*(<tool_call>|<call>|<function=|<\|tool_call>)", re.MULTILINE)
 MAX_CHARS = 200_000  # a reply longer than this isn't scanned
 _FENCE = re.compile(r"^```[\w-]*\s*\n?(.*?)\n?```$", re.DOTALL)
 
@@ -54,11 +59,7 @@ def recover_calls(text: str, schema_of: Callable[[str], dict[str, Any] | None]) 
     if tail.startswith("<|tool_call>"):
         return _from_gemma(text, start, schema_of)
     # Nothing but calls from here on, and none of it code: otherwise it's prose about calls.
-    if (
-        "```" in tail
-        or "~~~" in tail
-        or _FUNCTION.sub("", _TOOL_CALL.sub("", tail)).replace("</tool_call>", "").strip()
-    ):
+    if "```" in tail or "~~~" in tail or _CLOSE.sub("", _FUNCTION.sub("", _TOOL_CALL.sub("", tail))).strip():
         return text, []
     calls: list[ToolCall] = []
     for body in _TOOL_CALL.findall(tail) or [tail]:
@@ -125,7 +126,7 @@ def looks_like_a_call(text: str) -> bool:
     prose that mentions the format."""
     start = _first_tag(text)
     return start >= 0 and not re.search(
-        r"\n\s*\n\s*[A-Za-z]", text[start:].split("<tool_call|>")[-1].split("</tool_call>")[-1]
+        r"\n\s*\n\s*[A-Za-z]", _CLOSE.split(text[start:].split("<tool_call|>")[-1])[-1]
     )
 
 

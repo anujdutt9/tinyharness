@@ -43,6 +43,7 @@ from tinyharness.events import Compacted, Done, Event, ToolResult, ToolUse
 from tinyharness.ext import Command as ExtCommand
 from tinyharness.ext import Extension, LoadError, NeedsConsent, RunResult, load_extensions
 from tinyharness.hooks import Hook, HookRunner, load_hooks
+from tinyharness.llm.calibration import CalibrationStore
 from tinyharness.llm.client import LLMClient, Ping
 from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.providers import DEFAULT_CONTEXT, Provider
@@ -262,6 +263,7 @@ class Session:
         self._apply_needs()
 
         self.models = ModelDirectory(home_dir() / "cache" / "models")
+        self._calibration = CalibrationStore(home_dir() / "cache" / "tool-calls.json")
         self._connect_llm()
         self._started = False
         self._steering: list[str] = []  # messages for the agent while a turn runs (see steer)
@@ -364,6 +366,8 @@ class Session:
             effort=cfg.effort,
             timeout=cfg.request_timeout,
             retries=cfg.request_retries,
+            tool_calls=cfg.tool_calls,
+            calibration=self._calibration,
         )
         self.llm.show_reasoning = cfg.show_thinking
         self.gate.classifier = AutoModeClassifier(self.llm, model=cfg.small_model)
@@ -430,6 +434,8 @@ class Session:
             timeout=self.config.request_timeout,
             retries=self.config.request_retries,
             transport=self.llm.transport,
+            tool_calls=self.config.tool_calls,
+            calibration=self._calibration,
         )
         return client, None
 

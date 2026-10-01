@@ -198,6 +198,14 @@ First release.
   built the way a user would, awkward cases included; no unasked-for dependencies or
   renames; and give each subagent one job with a clear done condition.
 
+### Tool-call format per model
+- How a model calls tools is measured once, not guessed: the first request to a new model
+  offers it one tool. Native callers keep the API's tool interface; a model that writes
+  calls in its reply gets the tools described in its prompt and writes
+  `<call>{"name": ..., "arguments": ...}</call>`, with earlier calls and results sent as
+  text. Cached per model; `tool_calls = "native" | "text"` overrides it. A server without
+  a tool-call parser (vLLM without `--enable-auto-tool-choice`) works this way.
+
 ### Outside content (Rule of Two)
 - Once content from another machine is in the conversation (a fetched page, search
   results, a command's download through the sandbox proxy), calls that could send data out

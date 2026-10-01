@@ -23,6 +23,10 @@
 # theme = "system"                     # system (asks the terminal) | light | dark; also /theme
 # show_thinking = false                # show the model's reasoning; also ctrl+t or /thinking
 
+# --- Tool calls ---------------------------------------------------------------
+# tool_calls = "auto"                  # auto: probe each model once | native | text
+#                                      # (text: tools in the prompt, calls written as <call>)
+
 # --- Context management -------------------------------------------------------
 # context_window_tokens = 200000       # default: what the provider reports for the model
 # auto_compact_threshold = 0.90        # summarize older history above this fraction of the window
