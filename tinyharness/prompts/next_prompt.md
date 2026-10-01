@@ -1,0 +1,1 @@
+Write the message the user is most likely to send next in this conversation: what they would type themselves, in their voice, at most 12 words. Prefer the natural next step of the work (run it, test it, commit it, fix what was found). If there's no clear next step, reply with nothing. Reply with only that message: no quotes, no explanation, and no tool calls.

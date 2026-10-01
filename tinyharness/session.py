@@ -28,7 +28,7 @@ from tinyharness import trust
 from tinyharness.agent import world
 from tinyharness.agent.compaction import SUMMARY_MARK, Compactor
 from tinyharness.agent.history import History, Image, Message
-from tinyharness.agent.loop import LoopDeps, run_agent_loop, summary_notes
+from tinyharness.agent.loop import LoopDeps, record_usage, run_agent_loop, summary_notes
 from tinyharness.agent.prompts import build_system_prompt, load_agent_md
 from tinyharness.agent.sessionlog import (
     FileSessionStore,
@@ -47,9 +47,10 @@ from tinyharness.llm.calibration import CalibrationStore
 from tinyharness.llm.client import LLMClient, Ping
 from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.providers import DEFAULT_CONTEXT, Provider
+from tinyharness.llm.textcalls import recover_calls
 from tinyharness.llm.tokens import count_tokens, estimate_tokens
 from tinyharness.llm.types import Effort
-from tinyharness.llm.usage import UsageMeter
+from tinyharness.llm.usage import Usage, UsageMeter
 from tinyharness.paths import default_config_path, home_dir, move_legacy_state, project_dir
 from tinyharness.permissions import (
     Decision,
@@ -62,6 +63,7 @@ from tinyharness.permissions import (
 from tinyharness.permissions.classifier import AutoModeClassifier
 from tinyharness.permissions.rules import DOMAIN, Rule
 from tinyharness.plugins import load_plugins
+from tinyharness.prompts import load_prompt
 from tinyharness.sandbox import Sandbox, SandboxPolicy, detect_sandbox
 from tinyharness.sandbox.proxy import AllowlistProxy
 from tinyharness.skills import SkillRegistry, build_skill_prompt, load_skills, skills_section
@@ -72,6 +74,8 @@ from tinyharness.tools.bash import BashInput, BashTool
 from tinyharness.tools.registry import default_registry
 from tinyharness.trust import TrustStore
 from tinyharness.workspace import Scratch, Workspace
+
+MAX_SUGGESTION = 120  # chars: a longer "next message" is the model explaining, not a suggestion
 
 
 def _one_at_a_time(callback: PermissionCallback | None) -> PermissionCallback | None:
@@ -761,6 +765,59 @@ class Session:
         """Messages from `steer` not delivered yet (and forget them)."""
         taken, self._steering = self._steering, []
         return taken
+
+    # ------------------------------------------------------------------ side calls
+
+    async def aside(self, question: str) -> str:
+        """Answer a side question about the conversation (the CLI's /btw) without adding it
+        to the conversation: one model call, no tools, fine while a turn is running."""
+        question = question.strip()
+        if not question:
+            raise ValueError("ask a question, e.g. /btw why this approach?")
+        answer, wanted_tool = await self._side_call(
+            f"{load_prompt('aside')}\n\nQuestion: {question}", "aside"
+        )
+        if not answer and wanted_tool:
+            return "That needs a tool (reading or running something): ask it in the conversation instead."
+        return answer or "(no answer)"
+
+    async def suggest_next(self) -> str:
+        """A guess at the user's next message, for the input box once a turn ends; "" when
+        there's no conversation yet or no clear next step."""
+        if not any(m.role == "assistant" for m in self.history.messages):
+            return ""
+        text, _ = await self._side_call(load_prompt("next_prompt"), "suggestion")
+        line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        line = line.strip("\"'` ")
+        return line if len(line) <= MAX_SUGGESTION else ""
+
+    async def _side_call(self, note: str, kind: str) -> tuple[str, bool]:
+        """One model call on a copy of the conversation plus `note`, kept out of the
+        conversation. It sends the agent's own system prompt and tool definitions, so the
+        provider's cached prefix covers nearly all of it; any tool call is dropped.
+        Returns the reply's text and whether the model tried to call a tool."""
+        messages = list(self.history.messages) or [Message(role="system", content=self._system_prompt())]
+        last = messages[-1]
+        if last.role == "user":  # a turn that just started: one user message, not two
+            note = "\n\n".join(filter(None, [last.content or "", note]))
+            messages[-1] = Message(role="user", content=note, images=list(last.images))
+        else:
+            messages.append(Message(role="user", content=note))
+        allowed = set(self.options.allowed_tools) if self.options.allowed_tools else None
+        available = {t.name: t.spec() for t in self.tools.available(self.mode, allowed)}
+        text: list[str] = []
+        called = False
+        usage: Usage | None = None
+        async for chunk in self.llm.stream(messages, list(available.values())):
+            text.append(chunk.text)
+            called = called or chunk.tool_call_delta is not None
+            usage = chunk.usage or usage
+        if usage is not None:
+            record_usage(usage, self.llm, self.ctx, self.transcript, kind=kind)
+        answer, calls = recover_calls(
+            "".join(text), lambda name: available[name].parameters if name in available else None
+        )
+        return answer.strip(), called or bool(calls)
 
     async def run_skill(self, name: str, args: str = "") -> AsyncGenerator[Event, None]:
         skill = self.skills.get(name)

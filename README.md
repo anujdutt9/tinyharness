@@ -63,6 +63,7 @@ In the session, type `/` to autocomplete commands. The ones you'll use most:
 | `/skills`, `/<skill>` | list or run skills |
 | `/extensions` | what's on and what it costs per request; `/extensions on web` |
 | `/sandbox` | what commands can write, read and reach |
+| `/btw <question>` | a quick side question, even while the agent works; not added to the conversation |
 | `/context`, `/clear` | context usage, or a fresh conversation |
 | `/key [provider]` | add or replace a provider's API key |
 

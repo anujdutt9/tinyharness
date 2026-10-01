@@ -49,6 +49,7 @@ from rich.text import Text
 
 from tinyharness.agent.history import Image
 from tinyharness.cli.commands import COMMANDS
+from tinyharness.cli.markdown import render as render_markdown
 from tinyharness.cli.render import Renderer, dollars, tokens, without_links
 from tinyharness.cli.theme import (
     MODE_LABEL,
@@ -77,7 +78,7 @@ _CONFIRM_AUTO = "\x00confirm-auto-mode"  # returned by the prompt when Shift+Tab
 _PAUSE = "\x00pause"  # returned by the prompt when a question (approval) needs the keyboard
 # Commands that don't touch the conversation, so they can run while the agent works.
 _SAFE_WHILE_RUNNING = {
-    "/help", "/mode", "/context", "/theme", "/thinking", "/cwd", "/tools", "/skills", "/output",
+    "/help", "/mode", "/context", "/theme", "/thinking", "/cwd", "/tools", "/skills", "/output", "/btw",
 }  # fmt: skip
 
 _MODE_ICON = {
@@ -215,6 +216,9 @@ class Repl:
         self._ui = asyncio.Lock()  # who has the keyboard: the input box, or a question (approval)
         self._questions = 0  # questions waiting for the keyboard, or holding it
         self._sending_now = False  # Esc stopped the turn to send the waiting messages
+        self.suggestion = ""  # the likely next message, shown in the empty input box (Tab takes it)
+        self._suggesting: asyncio.Task[None] | None = None
+        self._asides: set[asyncio.Task[None]] = set()  # /btw questions being answered
 
     # -- input ----------------------------------------------------------------
 
@@ -307,9 +311,12 @@ class Repl:
 
         @keys.add("tab")
         def _accept(event: KeyPressEvent) -> None:
-            """Tab takes the gray suggestion, or the highlighted (else first) menu entry."""
+            """Tab takes the gray suggestion (the likely next message in an empty box, else
+            the rest of an earlier message), or the highlighted (else first) menu entry."""
             buffer = event.current_buffer
-            if buffer.suggestion and buffer.suggestion.text:
+            if not buffer.text and self.suggestion and not self.turn_running:
+                buffer.insert_text(self.suggestion)
+            elif buffer.suggestion and buffer.suggestion.text:
                 buffer.insert_text(buffer.suggestion.text)
             elif buffer.complete_state:
                 completion = buffer.complete_state.current_completion or next(
@@ -355,7 +362,7 @@ class Repl:
             completer=SlashCompleter(self.session),
             complete_while_typing=typing_command,
             reserve_space_for_menu=6,
-            placeholder=lambda: FormattedText([(SUBTLE, self._placeholder())]),
+            placeholder=lambda: FormattedText(self._placeholder()),
             bottom_toolbar=self._toolbar,
             refresh_interval=0.1,  # the live region's spinner, and the "press again to exit" hint
             erase_when_done=True,
@@ -432,10 +439,62 @@ class Repl:
             self.console.print(text, width=width, highlight=False)
         return captured.get().rstrip("\n")
 
-    def _placeholder(self) -> str:
+    def _placeholder(self) -> StyleAndTextTuples:
         if self.turn_running:
-            return "Message the agent: it gets this before its next step"
-        return "Ask anything, or type / for commands"
+            return [(SUBTLE, "Message the agent: it gets this before its next step")]
+        if self.suggestion:
+            return [(SUBTLE, self.suggestion), ("class:toolbar.dim", "  · tab to use")]
+        return [(SUBTLE, "Ask anything, or type / for commands")]
+
+    # -- side calls -------------------------------------------------------------
+
+    def ask_aside(self, question: str) -> None:
+        """/btw: answered in the background, so the input box and a running turn carry on."""
+
+        async def answer() -> None:
+            try:
+                text = await self.session.aside(question)
+            except Exception as e:
+                report_error(self.console, e)
+                return
+            self.console.print(
+                Panel(
+                    render_markdown(text),
+                    title=Text(f"btw: {ellipsize(' '.join(question.split()), 60)}", style="bold"),
+                    title_align="left",
+                    subtitle=Text("not added to the conversation", style="subtle"),
+                    subtitle_align="right",
+                    border_style="subtle",
+                    padding=(0, 1),
+                )
+            )
+
+        self.console.print(Text("  ⎿ answering on the side…", style="subtle"))
+        task = asyncio.create_task(answer())
+        self._asides.add(task)
+        task.add_done_callback(self._asides.discard)
+
+    def _suggest(self) -> None:
+        """Once a turn ends: guess the next message, to show in the empty input box."""
+        if not self.session.config.prompt_suggestions or not self.running:
+            return
+
+        async def suggest() -> None:
+            try:
+                self.suggestion = await self.session.suggest_next()
+            except Exception as e:  # a missing suggestion isn't worth an error panel
+                log.debug("no prompt suggestion: %s", e)
+                return
+            if self._prompt is not None and self._prompt.app.is_running:
+                self._prompt.app.invalidate()
+
+        self._suggesting = asyncio.create_task(suggest())
+
+    def _forget_suggestion(self) -> None:
+        self.suggestion = ""
+        if self._suggesting is not None:
+            self._suggesting.cancel()
+            self._suggesting = None
 
     @property
     def turn_running(self) -> bool:
@@ -513,9 +572,14 @@ class Repl:
                 self._turn.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._turn
+            for side in [self._suggesting, *self._asides]:
+                if side is not None:
+                    side.cancel()
         self.console.print(Text("\n  bye 👋\n", style="muted"))
 
     async def handle(self, line: str) -> None:
+        if not line.startswith("/btw"):
+            self._forget_suggestion()
         if self.turn_running:
             await self._while_running(line)
             return
@@ -708,8 +772,10 @@ class Repl:
             self._turn = asyncio.create_task(self._turn_in_background(events))
 
     async def _turn_in_background(self, events: AsyncGenerator[Event, None]) -> None:
+        finished = False
         try:
             await self.renderer.render(events)
+            finished = True
         except asyncio.CancelledError:
             if self._sending_now:  # Esc: the waiting messages go to the agent right away
                 self.console.print("\n[warn]■ Stopped.[/] [muted]Sending your message now.[/]")
@@ -724,6 +790,8 @@ class Repl:
         # Messages that arrived after the agent's last step: they start the next turn.
         if (left := self.session.take_steering()) and self.running:
             self._turn = asyncio.create_task(self._turn_in_background(self.session.run("\n\n".join(left))))
+        elif finished:
+            self._suggest()
 
     async def run_turn(self, events: AsyncGenerator[Event, None]) -> None:
         """Render one agent turn. Ctrl-C cancels the turn but keeps the REPL alive."""

@@ -134,6 +134,11 @@ class Config(BaseModel):
     # so the model can load one with Read when a task matches. False: skills run only by /name.
     skill_tool: bool = True
 
+    # --- the CLI ---
+    # After each turn, suggest your likely next message in the input box (Tab takes it), as
+    # Claude Code does: one short extra model call per turn, mostly read from the cache.
+    prompt_suggestions: bool = True
+
     # --- tool calls ---
     # How models call tools: "native" (the API's tool-calling interface), "text" (written in
     # the reply; some small and self-hosted models do much better), or "auto": the first time

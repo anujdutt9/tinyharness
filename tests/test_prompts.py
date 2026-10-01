@@ -11,6 +11,8 @@ PROMPT_VARIABLES = {
     "system": {"model_name", "model_id", "provider"},
     "compaction": set(),
     "classifier": set(),
+    "aside": set(),
+    "next_prompt": set(),
 }
 
 

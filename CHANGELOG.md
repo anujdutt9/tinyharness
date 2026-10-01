@@ -45,6 +45,12 @@ First release.
   the session's total). Cost when the provider reports it (OpenRouter), its model list has
   prices, or `[pricing]` in the config sets them; otherwise tokens only, never a guess.
 - The input box grows only by the `/` menu entries it shows, not a fixed 6 rows.
+- `/btw <question>`: a side question answered from the conversation so far, without
+  tools, even while the agent works; neither question nor answer joins the conversation.
+  It reuses the agent's cached prefix (one short call). SDK: `Session.aside()`.
+- After each turn the empty input box suggests your likely next message (Tab takes it), as
+  Claude Code does: one short call per turn, mostly cache reads. `prompt_suggestions =
+  false` turns it off. SDK: `Session.suggest_next()`.
 - `ctrl+t` after a turn shows its hidden reasoning once, not again on every press.
 - Images: the model can see them. `Read` shows it a PNG, JPEG, GIF or WebP (a
   screenshot it took of a page or a deck, a chart) instead of refusing it; image file

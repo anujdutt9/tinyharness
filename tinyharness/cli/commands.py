@@ -219,6 +219,22 @@ def cost(repl: Repl, arg: str) -> None:
     )
 
 
+@command(
+    "/btw",
+    "ask a side question; the answer isn't added to the conversation",
+    group="Session",
+    usage="<question>",
+)
+def btw(repl: Repl, arg: str) -> None:
+    if not arg:
+        repl.console.print(
+            "  [muted]Usage: /btw <question>. It's answered from the conversation so far, without tools,\n"
+            "  and works while the agent is busy; neither the question nor the answer is kept.[/]"
+        )
+        return
+    repl.ask_aside(arg)
+
+
 @command("/compact", "summarize the conversation so far to free up context", group="Session")
 async def compact(repl: Repl, arg: str) -> None:
     session = repl.session

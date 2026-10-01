@@ -789,7 +789,7 @@ async def test_esc_stops_the_turn_and_sends_the_waiting_message_now(repl):
                 if len(prompts) >= 2:
                     break
                 await asyncio.sleep(0.1)
-            assert prompts == ["start", "use the db in demo_data/"]
+            assert prompts[:2] == ["start", "use the db in demo_data/"]  # then the next-message suggestion
             assert "Sending your message now." in repl.console.export_text()
         finally:
             repl.running = False

@@ -721,23 +721,38 @@ def _account(turn: _Turn, deps: LoopDeps) -> TokenUsage:
     """Price one model call (unless the provider already did), add it to the session's
     meter and report it."""
     assert turn.usage is not None
-    usage = turn.usage
-    model = deps.model or deps.llm.model
-    provider = getattr(getattr(deps.llm, "provider", None), "name", "")
+    return record_usage(turn.usage, deps.llm, deps.ctx, deps.transcript, model=deps.model, route=turn.route)
+
+
+def record_usage(
+    usage: Usage,
+    llm: LLMClient,
+    ctx: ToolContext,
+    transcript: LogWriter,
+    *,
+    model: str | None = None,
+    route: str = "",
+    kind: str = "",
+) -> TokenUsage:
+    """Price one model call (unless the provider already did), add it to the session's
+    meter and write it to the log. `kind` marks calls outside the agent's turn ("aside")."""
+    model = model or llm.model
+    provider = getattr(getattr(llm, "provider", None), "name", "")
     if usage.cost is None:
-        info = deps.llm.model_info(model) if hasattr(deps.llm, "model_info") else None
-        price = deps.ctx.config.price(provider, model) or (info.price if info else None)
+        info = llm.model_info(model) if hasattr(llm, "model_info") else None
+        price = ctx.config.price(provider, model) or (info.price if info else None)
         if price is not None:
             usage.cost = price.cost(usage)
-    deps.ctx.usage.add(usage)
-    deps.transcript.write(
+    ctx.usage.add(usage)
+    transcript.write(
         "usage",
         model=model,
         input=usage.input,
         cached=usage.cached,
         output=usage.output,
         cost=usage.cost,
-        **({"route": turn.route} if turn.route else {}),
+        **({"route": route} if route else {}),
+        **({"kind": kind} if kind else {}),
     )
     return TokenUsage(model, usage.input, usage.cached, usage.output, usage.cost)
 
