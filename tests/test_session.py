@@ -228,3 +228,30 @@ async def test_every_turn_records_how_it_ended(session):
     ends = [r for r in records if r["event"] == "turn_end"]
     assert [e["reason"] for e in ends] == ["stop", "error"]
     assert "upstream exploded" in ends[1]["error"]
+
+
+def test_skills_are_offered_to_the_model_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    skills = tmp_path / "home" / "skills" / "frontend-design"
+    skills.mkdir(parents=True)
+    (skills / "SKILL.md").write_text(
+        "---\nname: frontend-design\ndescription: "
+        + "Design web pages well. " * 40
+        + "\n---\nDo it like this."
+    )
+    monkeypatch.setenv("TINYHARNESS_HOME", str(tmp_path / "home"))
+    on = Session(SessionOptions(config_path=tmp_path / "none.toml", working_dir=tmp_path / "work"))
+    off = Session(
+        SessionOptions(
+            config_path=tmp_path / "none.toml", working_dir=tmp_path / "work", expose_skill_tool=False
+        )
+    )
+    try:
+        assert "Skill" in on.tools.names() and "Skill" not in off.tools.names()
+        listing = on.tools.get("Skill").description
+        assert (
+            "frontend-design: Design web pages well." in listing and len(listing) < 1500
+        )  # the description is cut short
+    finally:
+        on.close()
+        off.close()

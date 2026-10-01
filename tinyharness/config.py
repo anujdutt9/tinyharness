@@ -107,6 +107,11 @@ class Config(BaseModel):
     # TINYHARNESS_TODO_LIST=1 turns it on too.
     todo_list: bool = False
 
+    # The Skill tool: the model sees each skill's name and a short description, and loads a
+    # skill's instructions when its task matches (a frontend-design skill for a web page).
+    # A few hundred tokens, in the cached part of the prompt. False: skills run only by /name.
+    skill_tool: bool = True
+
     # --- context management ---
     context_window_tokens: int | None = None  # None = what the provider reports for the model
     auto_compact_threshold: float = Field(default=0.90, gt=0, le=1)

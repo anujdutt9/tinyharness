@@ -20,7 +20,7 @@ class AgentInput(ToolInput):
     )
     prompt: str = Field(
         min_length=1,
-        description="Self-contained task description for the subagent. It sees only this, not your conversation: include full paths to the files, folders or databases involved, and anything else it needs to know.",
+        description="Self-contained task description for the subagent. It sees only this, not your conversation: include full paths to the files, folders or databases involved, and anything else it needs to know. Brief it like a capable colleague new to the work: what it's for, how deep to go, and what to deliver (exact data, if another task builds on it).",
     )
     description: str = Field(default="", description="Short label for this run")
 

@@ -173,6 +173,16 @@ First release.
 - A call allowed without asking says by what, on its own line under it:
   `⎿ auto mode · read-only query in the project`, `⎿ allow rule`, `⎿ hook`.
 
+### Skills and delegation
+- Skills are offered to the model by default: the `Skill` tool lists each skill's name and
+  the start of its description (about 600 tokens for 8 skills, cached with the prompt), so
+  an agent building a web page finds and loads a design skill instead of improvising.
+  Subagents and teammates can load them too. It used to be off unless you passed
+  `--expose-skills`; `skill_tool = false` (or `--no-skill-tool`) turns it off now.
+- The system prompt and the Agent and Team tools tell the lead to brief subagents like a
+  capable colleague new to the work (what it's for, how deep to go, what to deliver),
+  and to ask for exact data, not only prose, when one agent's output feeds another.
+
 ### Reports and pages
 - A page written with `<script src="chart.umd.min.js">` gets the bundled Chart.js
   embedded by Write itself, in one step. The agent used to have to run an inliner

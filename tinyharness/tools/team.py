@@ -202,7 +202,7 @@ class TeamTaskInput(BaseModel):
     title: str = Field(min_length=1, description="A few words")
     prompt: str = Field(
         min_length=1,
-        description="Self-contained instructions for this teammate. It sees only this, not your conversation: include full paths to the files, folders or databases involved, and anything else it needs to know.",
+        description="Self-contained instructions for this teammate. It sees only this, not your conversation: include full paths to the files, folders or databases involved, and anything else it needs to know. Brief it like a capable colleague new to the work: what it's for, how deep to go, and what to deliver (exact data, if another task builds on it).",
     )
     agent: str = Field(default="general-purpose", description="Agent type from the list above")
     depends_on: list[str] = Field(default_factory=list, description="Ids of tasks that must finish first")
@@ -468,7 +468,9 @@ def _teammate_prompt(board: Board, task: TaskState) -> str:
         f"starting with '{task.id}') so teammates' files don't overwrite yours. If a file, table "
         "or value you need is missing or empty, say so in your report: never make up data.",
         "Compute every derived number (percentage, share, total, average, ratio) with a query or "
-        "code, never in your head: the lead will chart your numbers as given.",
+        "code, never in your head. If your results feed another task or a chart, include the exact "
+        "data (the labels and values your queries returned), so it can be copied, not retyped.",
+        "If a skill fits your task (see the Skill tool), load it before you start.",
         "End with a concise report of what you did or found, with the actual numbers: it is "
         "all the team lead sees.",
     ]

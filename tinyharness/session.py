@@ -146,7 +146,7 @@ class SessionOptions:
     enable_skills: bool = True
     enable_subagents: bool = True  # load agents from files (built-in, ~/.tinyharness, project)
     enable_plugins: bool = True
-    expose_skill_tool: bool = False  # let the model invoke skills itself (costs tokens every turn)
+    expose_skill_tool: bool | None = None  # offer the Skill tool; None: the config's `skill_tool`
 
     def resolve_config(self) -> Config:
         cfg = load_config(self.config_path, use_last_model=self.use_last_model)
@@ -165,6 +165,8 @@ class SessionOptions:
             cfg.api_key = self.api_key
         if self.todo_list is not None:
             cfg.todo_list = self.todo_list
+        if self.expose_skill_tool is not None:
+            cfg.skill_tool = self.expose_skill_tool
         return cfg
 
 
@@ -232,7 +234,7 @@ class Session:
         self.tools.register(ScreenshotTool(self.sandbox, self.sandbox_policy))
         for tool in self.options.tools:  # before the Agent tool, so subagents can use them too
             self.tools.register(tool)
-        if self.options.expose_skill_tool and len(self.skills):
+        if self.config.skill_tool and len(self.skills):
             self.tools.register(SkillTool(self.skills))
         if self.agents:
             self.tools.register(AgentTool(self.agents, self._spawn_subagent, self._agent_is_read_only))

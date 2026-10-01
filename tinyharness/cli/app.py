@@ -52,7 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cwd", type=Path, help="working directory (default: current directory)")
     p.add_argument("--config", type=Path, help="config file (default: ~/.tinyharness/config.toml)")
     p.add_argument("--setup", action="store_true", help="choose a provider and add or replace its API key")
-    p.add_argument("--expose-skills", action="store_true", help="let the model invoke skills on its own")
+    p.add_argument(
+        "--no-skill-tool", action="store_true", help="don't offer skills to the model (run them with /name)"
+    )
+    p.add_argument("--expose-skills", action="store_true", help=argparse.SUPPRESS)  # the default now
     p.add_argument("--debug", action="store_true", help="verbose logging and full tracebacks")
     p.add_argument("--version", action="version", version=f"tinyharness {__version__}")
 
@@ -214,7 +217,7 @@ async def run(args: argparse.Namespace, console: Console) -> None:
         permission_mode=args.mode,
         permission_callback=renderer.ask_permission,
         on_event=renderer.handle,
-        expose_skill_tool=args.expose_skills,
+        expose_skill_tool=False if args.no_skill_tool else None,
         use_last_model=True,
     )
     interactive = not args.prompt and sys.stdin.isatty()
