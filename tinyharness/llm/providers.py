@@ -97,11 +97,21 @@ class Provider(BaseModel):
 def load_catalog(overrides: dict[str, dict[str, Any]] | None = None) -> dict[str, Provider]:
     """Built-in providers merged with the user's `[providers.*]` tables.
 
-    For a built-in, the user's fields replace the catalog's. A new name defines a
-    new provider (it needs at least `base_url`; `api_key_env` too unless it needs no key).
+    For a built-in, the user's fields replace the catalog's, except tables (`extra_body`,
+    `extra_headers`), which are merged key by key: adding OpenRouter routing preferences
+    mustn't drop the built-in caching and cost settings. A new name defines a new provider
+    (it needs at least `base_url`; `api_key_env` too unless it needs no key).
     """
     with CATALOG_PATH.open("rb") as f:
         raw: dict[str, dict[str, Any]] = tomllib.load(f)
     for name, fields in (overrides or {}).items():
-        raw.setdefault(name, {}).update(fields)
+        _merge(raw.setdefault(name, {}), fields)
     return {name: Provider(name=name, **fields) for name, fields in raw.items()}
+
+
+def _merge(base: dict[str, Any], extra: dict[str, Any]) -> None:
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge(base[key], value)
+        else:
+            base[key] = value

@@ -301,3 +301,15 @@ def test_permission_rules_in_config(tmp_path):
 def test_typo_in_permissions_section_is_an_error(tmp_path):
     with pytest.raises(ValueError):
         load_config(write_config(tmp_path, '[permissions]\nalow = ["Edit"]\n'))
+
+
+def test_a_providers_tables_merge_with_the_built_in_ones():
+    """Adding OpenRouter routing preferences used to replace the whole built-in extra_body,
+    silently dropping prompt caching and cost reporting."""
+    from tinyharness.llm.providers import load_catalog
+
+    body = load_catalog({"openrouter": {"extra_body": {"provider": {"ignore": ["Novita"]}}}})[
+        "openrouter"
+    ].extra_body
+    assert body["provider"] == {"ignore": ["Novita"]}
+    assert body["usage"] == {"include": True} and "cache_control" in body

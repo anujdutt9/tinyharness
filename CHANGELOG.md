@@ -181,6 +181,8 @@ First release.
   (the permission classifier, summaries) stay without it. `/effort none` or
   `effort = "none"` turns reasoning off; a cached model list from before this is
   refetched once.
+- A built-in provider's tables (`extra_body`, `extra_headers`) merge with yours key by key:
+  adding OpenRouter routing preferences used to drop its prompt caching and cost reporting.
 
 ### Skills and delegation
 - Skills are offered to the model by default: the `Skill` tool lists each skill's name and
