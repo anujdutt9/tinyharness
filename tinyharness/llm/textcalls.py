@@ -5,10 +5,11 @@ that parser trips, the call arrives as text in the model's own format, and a har
 only reads `tool_calls` takes it for the final answer. Seen in tinyharness's logs from
 Qwen3-Coder and Qwen3.5 (a teammate's "result" was the XML of the call it meant to make).
 
-Two formats cover the open models in use:
+Three formats cover the open models in use:
 
     <tool_call>{"name": "Read", "arguments": {"path": "a.py"}}</tool_call>      Hermes, Qwen2.5
     <tool_call><function=Read><parameter=path>a.py</parameter></function></tool_call>  Qwen3-Coder
+    <|tool_call>call:read{path: "a.py"}<tool_call|>                             Gemma 4
 
 `recover_calls` is strict, since running a tool the model only described would be worse
 than missing a call: the calls must name tools that exist, start a line outside any code
@@ -35,7 +36,10 @@ _FUNCTION = re.compile(r"<function=([\w.-]+)>((?:(?!<function=|</function>).)*)(
 _PARAMETER = re.compile(
     r"<parameter=([\w.-]+)>\n?((?:(?!<parameter=|</parameter>).)*?)\n?</parameter>", re.DOTALL
 )
-_START = re.compile(r"^[ \t]*(<tool_call>|<function=)", re.MULTILINE)
+_GEMMA = re.compile(
+    r"<\|tool_call>\s*call:([\w.-]+)\s*(\{(?:(?!<tool_call\|>).)*\})\s*<tool_call\|>", re.DOTALL
+)
+_START = re.compile(r"^[ \t]*(<tool_call>|<function=|<\|tool_call>)", re.MULTILINE)
 MAX_CHARS = 200_000  # a reply longer than this isn't scanned
 _FENCE = re.compile(r"^```[\w-]*\s*\n?(.*?)\n?```$", re.DOTALL)
 
@@ -47,6 +51,8 @@ def recover_calls(text: str, schema_of: Callable[[str], dict[str, Any] | None]) 
     if start < 0:
         return text, []
     tail = text[start:]
+    if tail.startswith("<|tool_call>"):
+        return _from_gemma(text, start, schema_of)
     # Nothing but calls from here on, and none of it code: otherwise it's prose about calls.
     if (
         "```" in tail
@@ -67,6 +73,29 @@ def recover_calls(text: str, schema_of: Callable[[str], dict[str, Any] | None]) 
                 calls.append(_call(name, _from_parameters(params, schema)))
     if not calls:
         return text, []
+    return text[:start].rstrip(), calls
+
+
+def _from_gemma(
+    text: str, start: int, schema_of: Callable[[str], dict[str, Any] | None]
+) -> tuple[str, list[ToolCall]]:
+    """Gemma 4's own format: `call:name{key: "value"}`, keys bare, strings in plain quotes or
+    its `<|"|>` delimiter. Taken only if every call parses and names a real tool."""
+    tail = text[start:]
+    if _GEMMA.sub("", tail).strip():
+        return text, []
+    calls: list[ToolCall] = []
+    for name, body in _GEMMA.findall(tail):
+        if schema_of(name) is None:
+            return text, []
+        source = re.sub(r"([{,]\s*)([A-Za-z_][\w-]*)\s*:", r'\1"\2":', body.replace('<|"|>', '"'))
+        try:
+            arguments = json.loads(source)
+        except json.JSONDecodeError:
+            return text, []
+        if not isinstance(arguments, dict):
+            return text, []
+        calls.append(_call(name, arguments))
     return text[:start].rstrip(), calls
 
 

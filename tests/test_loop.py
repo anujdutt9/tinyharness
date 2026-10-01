@@ -911,3 +911,15 @@ async def test_a_changed_page_counts_as_checked_only_once_it_is_looked_at(tmp_pa
         m.content for m in history.messages if m.role == "user" and "Screenshot of it" in (m.content or "")
     ]
     assert len(notes) == 1  # running it as a script didn't count
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<|tool_call>call:read{seconds: 3}<tool_call|>",  # seen live from Gemma 4 on OpenRouter
+        'Checking.\n<|tool_call>call:Read{seconds:<|"|>3<|"|>}<tool_call|>',  # its template's string delimiter
+    ],
+)
+async def test_gemmas_own_tool_call_format_is_recovered(tmp_path, text):
+    events, _ = await run(tmp_path, ScriptedLLM([text, "done"]), [Echo()])
+    assert [e.output for e in events if isinstance(e, ToolResult)] == ["read 3.0"]
