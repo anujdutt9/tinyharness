@@ -255,3 +255,15 @@ def test_skills_are_offered_to_the_model_by_default(tmp_path, monkeypatch):
     finally:
         on.close()
         off.close()
+
+
+def test_a_skill_the_user_names_becomes_an_explicit_instruction():
+    from tinyharness.skills import Skill, SkillRegistry
+    from tinyharness.tools.skill import skill_request_note, skills_named_in
+
+    skills = SkillRegistry([Skill("claude-design-skill", "Design.", "..."), Skill("pdf", "PDFs.", "...")])
+    assert skills_named_in("Use the claude-design-skill for report.html", skills) == ["claude-design-skill"]
+    assert skills_named_in("export a pdf of it", skills) == []  # short names don't trigger
+    assert skills_named_in("my-claude-design-skill-v2 is different", skills) == []  # whole names only
+    note = skill_request_note(["claude-design-skill"])
+    assert "not a suggestion" in note and "tell it in its brief" in note

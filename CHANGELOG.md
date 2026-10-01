@@ -195,6 +195,10 @@ First release.
   6,000 in the lead's report) is saved whole in the session's scratch folder, and the next
   task and the lead are told where: it used to be cut off with no way to get the rest, so
   a report builder saw only the start of each analyst's findings.
+- A skill you name in your message ("use the claude-design-skill for the report") becomes an
+  explicit instruction: the message gets a note that loading it is part of the task, and
+  that a subagent doing that part must be told to load it. A model used to read the request,
+  judge the skill unsuitable from its one-line description, and skip it.
 - The system prompt and the Agent and Team tools tell the lead to brief subagents like a
   capable colleague new to the work (what it's for, how deep to go, what to deliver),
   and to ask for exact data, not only prose, when one agent's output feeds another.
