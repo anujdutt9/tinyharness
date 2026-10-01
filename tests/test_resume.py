@@ -391,3 +391,26 @@ def test_clearing_an_empty_conversation_makes_no_new_one(work):
         assert session.id == before
     finally:
         session.close()
+
+
+async def test_after_resume_a_file_changed_by_the_user_must_be_read_again(work):
+    """Resume restored which files were read but not their versions, so a Write could
+    overwrite what the user changed after resuming without any error."""
+    (work / "plan.md").write_text("v1\n")
+    first = Session(options(work))
+    await turn(first, "read it", [("Read", '{"path": "plan.md"}')], "ok")
+    first.close()
+
+    resumed = Session(options(work, resume="latest", permission_mode="acceptEdits"))
+    try:
+        (work / "plan.md").write_text("v2 from the user\n")  # after resuming
+        events = await turn(
+            resumed, "rewrite it", [("Write", '{"path": "plan.md", "content": "agent"}')], "done"
+        )
+        from tinyharness.events import ToolResult
+
+        result = next(e for e in events if isinstance(e, ToolResult))
+        assert result.is_error and "changed since you last read it" in result.output
+        assert (work / "plan.md").read_text() == "v2 from the user\n"
+    finally:
+        resumed.close()

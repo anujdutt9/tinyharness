@@ -62,7 +62,7 @@ from tinyharness.skills import SkillRegistry, build_skill_prompt, load_skills
 from tinyharness.subagents import AgentSpec, load_agents
 from tinyharness.subagents.runner import run_subagent
 from tinyharness.tools.agent import AgentTool
-from tinyharness.tools.base import Tool, ToolContext, ToolError
+from tinyharness.tools.base import Tool, ToolContext, ToolError, file_version
 from tinyharness.tools.bash import BashTool
 from tinyharness.tools.registry import default_registry
 from tinyharness.tools.screenshot import ScreenshotTool
@@ -322,6 +322,9 @@ class Session:
         self.history = history
         self.ctx.todos = list(saved.todos)
         self.ctx.read_paths = set(report.current_reads)
+        # Those files are as the agent last saw them, so a change from now on (the user
+        # editing one) must make Edit and Write ask for a fresh Read, as in a live session.
+        self.ctx.seen_versions = {p: v for p in report.current_reads if (v := file_version(Path(p)))}
         self.resume_report = report
         self._resume_note = report.note()
         self._sync()

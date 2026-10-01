@@ -47,24 +47,31 @@ session.tools.register(WordCount())
 Hooks run at lifecycle events. A `PreToolUse` hook can allow or deny a tool call,
 and it runs before the permission mode is applied.
 
-| Event | Payload |
-|---|---|
-| `SessionStart` | `session_id` |
-| `UserPromptSubmit` | `prompt` |
-| `PreToolUse` | `tool`, `args` |
-| `PostToolUse` | `tool`, `args`, `result` |
-| `Stop` | — |
+| Event | Payload | What a result does |
+|---|---|---|
+| `SessionStart` | `session_id` | nothing |
+| `UserPromptSubmit` | `prompt` | nothing |
+| `PreToolUse` | `tool`, `args` | `deny` stops the call; the reason goes to the model |
+| `PostToolUse` | `tool`, `args`, `result` | a `reason` is added to the tool's result |
+| `Stop` | — | `block` (or `deny`) keeps the agent going, with the reason as its next instruction (twice per turn at most) |
 
 **Shell hooks** go in `hooks.toml`. The payload arrives as JSON on stdin. Print
 `{"decision": "deny", "reason": "..."}` to block the call. A non-zero exit code also
-blocks it. Hook processes never see environment variables that look like credentials, and credentials
-are masked out of the JSON they receive.
+denies, with what the command printed as the reason. Hook processes never see
+environment variables that look like credentials, and credentials are masked out of
+the JSON they receive. A hook gets 10 seconds unless it sets `timeout`.
 
 ```toml
 [[hook]]
 event = "PreToolUse"
 matcher = { tool = "Write" }
 command = "./scripts/no-generated-files.sh"
+
+# The turn can't end while the tests fail: their output goes back to the agent.
+[[hook]]
+event = "Stop"
+command = "uv run pytest -q -x"
+timeout = 300
 ```
 
 **Python hooks** are passed through the SDK:

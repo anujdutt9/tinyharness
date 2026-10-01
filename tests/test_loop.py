@@ -742,3 +742,95 @@ async def test_a_number_or_object_for_a_text_field_is_taken_as_text(tmp_path):
     await run(tmp_path, ScriptedLLM([calls, "done"]), [WriteTool()])
     assert (tmp_path / "n.txt").read_text() == "233"
     assert json.loads((tmp_path / "d.json").read_text()) == {"a": 1}
+
+
+# ---- finishing: checks before the turn ends ----
+
+
+async def test_changed_code_with_nothing_run_since_is_checked_once(tmp_path):
+    from tinyharness.sandbox.policy import SandboxPolicy
+    from tinyharness.tools.bash import BashTool
+    from tinyharness.tools.write import WriteTool
+
+    tools = [WriteTool(), BashTool(None, SandboxPolicy(write_roots=(tmp_path,)))]
+    llm = ScriptedLLM([[("Write", '{"path": "app.py", "content": "x = 1\\n"}')], "Done.", "Still done."])
+    events, history = await run(tmp_path, llm, tools)
+    notes = [
+        m.content
+        for m in history.messages
+        if m.role == "user" and "haven't run anything" in (m.content or "")
+    ]
+    assert len(notes) == 1 and "app.py" in notes[0]
+    assert events[-1] == Done() and len(llm.requests) == 3
+
+
+async def test_docs_or_a_check_after_the_change_need_no_reminder(tmp_path):
+    from tinyharness.sandbox.policy import SandboxPolicy
+    from tinyharness.tools.bash import BashTool
+    from tinyharness.tools.write import WriteTool
+
+    tools = [WriteTool(), BashTool(None, SandboxPolicy(write_roots=(tmp_path,)))]
+    for turns in (
+        [[("Write", '{"path": "NOTES.md", "content": "hi"}')], "Done."],
+        [
+            [("Write", '{"path": "b.py", "content": "y = 2"}')],
+            [("Bash", '{"command": "python3 b.py"}')],
+            "Done.",
+        ],
+    ):
+        llm = ScriptedLLM(turns)
+        await run(tmp_path, llm, tools)
+        assert len(llm.requests) == len(turns)
+
+
+async def test_a_stop_hook_can_keep_the_agent_going(tmp_path):
+    from tinyharness.hooks import Hook
+    from tinyharness.hooks.hooks import HookRunner
+
+    verdicts = iter([{"decision": "block", "reason": "2 tests fail: test_a, test_b"}, None])
+    runner = HookRunner([Hook(event="Stop", type="python", callable=lambda e, p: next(verdicts))])
+    llm = ScriptedLLM(["Finished.", "Fixed them."])
+    history = History([Message(role="system", content="test")])
+    with Transcript(tmp_path, "test") as transcript:
+        deps = LoopDeps(
+            llm=llm,
+            tools=ToolRegistry([]),
+            compactor=Compactor(llm),
+            transcript=transcript,
+            gate=PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS),
+            ctx=make_ctx(tmp_path),
+            hooks=runner,
+        )
+        events = [e async for e in run_agent_loop("go", history, deps)]
+    assert "2 tests fail" in history.messages[3].content and history.messages[-1].content == "Fixed them."
+    assert events[-1] == Done()
+
+
+async def test_a_post_tool_hook_can_tell_the_model_something(tmp_path):
+    from tinyharness.hooks import Hook
+    from tinyharness.hooks.hooks import HookRunner
+
+    runner = HookRunner(
+        [Hook(event="PostToolUse", type="python", callable=lambda e, p: {"reason": "lint: unused import"})]
+    )
+    llm = ScriptedLLM([[("A", '{"seconds": 0}')], "ok"])
+    history = History([Message(role="system", content="test")])
+    with Transcript(tmp_path, "test") as transcript:
+        deps = LoopDeps(
+            llm=llm,
+            tools=ToolRegistry([sleep_tool("A", True)]),
+            compactor=Compactor(llm),
+            transcript=transcript,
+            gate=PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS),
+            ctx=make_ctx(tmp_path),
+            hooks=runner,
+        )
+        [e async for e in run_agent_loop("go", history, deps)]
+    assert history.messages[3].content == "A done\n\n[hook] lint: unused import"
+
+
+async def test_a_failing_shell_hook_reports_its_output(tmp_path):
+    from tinyharness.hooks.hooks import HookRunner
+
+    result = await HookRunner(cwd=tmp_path)._run_shell("sh -c 'echo FAILED test_x; exit 1'", "Stop", {}, 5)
+    assert result["decision"] == "deny" and "FAILED test_x" in result["reason"]
