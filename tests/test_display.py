@@ -199,7 +199,7 @@ def test_the_footer_sums_up_the_turn(renderer):
     renderer.meter.add(Usage(input=900, cached=11300, output=450, cost=0.002))  # re-sends it all
     renderer.handle(Done())
     footer = shown(renderer)[-1]
-    assert footer.startswith("✻ ")
+    assert footer.startswith("── ")
     # The largest call and the output; not 24.9k, the sum of both calls' re-sent input.
     assert "3 tools · 2 files +55 −3 · tests ✓ · 12.2k context · 1.5k out · $0.04" in footer
 
@@ -871,3 +871,16 @@ def test_calls_allowed_by_the_users_own_rules_get_no_credit_line(renderer):
     renderer.handle(PermissionDecision("Bash", True, "rule", "matches allow rule Bash(ls)"))
     renderer.handle(ToolResult("Bash", "(no output)", False, id="c1"))
     assert len(shown(renderer)) == 1
+
+
+def test_a_passing_test_run_shows_its_result_on_the_row():
+    from tinyharness.cli.render import _test_summary
+
+    assert (
+        _test_summary(
+            "...\n----------------------------------------------------------------------\nRan 3 tests in 0.001s\n\nOK\n"
+        )
+        == "3 passed"
+    )
+    assert _test_summary("tests/a.py ....\n======= 212 passed in 4.10s =======") == "212 passed in 4.10s"
+    assert _test_summary("all good") == ""

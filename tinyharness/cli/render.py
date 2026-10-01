@@ -19,7 +19,7 @@ run; once done they fold into its row (a failed one keeps a line of its own):
     ✓ Agent   reviewer: check the retry logic         haiku-4.5 · 3 tools · 3.4s
     ✓ Team    compare three laptops · 3 tasks          3 agents · 41 tools · 1m 2s
 
-    ✻ 9s · 4 tools · 1 file +4 −1 · tests ✗ · 12.3k tokens · $0.03
+    ── 9s · 4 tools · 1 file +4 −1 · tests ✗ · 12.3k tokens · $0.03
 
 The spinner says "Working" while waiting on the model, and "Thinking" only once the
 model reports that it is actually reasoning (many replies involve none).
@@ -340,7 +340,8 @@ class Renderer:
         return rows
 
     def _row(self, glyph: Text, tool: _RunningTool, right: Text, indent: str = "") -> Text:
-        """`✓ Edit    src/app.py ……………… +4 −1`, fitted to the terminal's width."""
+        """`✓ Edit    src/app.py ·········· +4 −1`, fitted to the terminal's width: dot
+        leaders take the eye from what the call was on to its result, like a notebook index."""
         name, label = tool.name, tool_label(tool.name)
         detail = self._detail(tool)
         width = self.console.width
@@ -353,7 +354,12 @@ class Renderer:
         style = Style(color=MUTED) + (file_link(self._absolute(str(path))) if path else Style())
         line.append("  ").append(ellipsize(detail, max(room, 8)), style=style)
         if right.cell_len:
-            line.append(" " * max(width - line.cell_len - right.cell_len - 1, 2)).append_text(right)
+            gap = max(width - line.cell_len - right.cell_len - 1, 2)
+            if gap >= 5:
+                line.append(" ").append("·" * (gap - 2), style="subtle").append(" ")
+            else:
+                line.append(" " * gap)
+            line.append_text(right)
         return line
 
     def _detail(self, tool: _RunningTool) -> str:
@@ -532,6 +538,8 @@ class Renderer:
             return Text(FAILED, style="err"), Text(f"exit {m.group(1)}", style="err"), under
         if is_test:
             self._turn.tests_passed = True
+            if summary := _test_summary(text):  # the result on the row: `212 passed in 4.1s`
+                return Text(DONE, style="ok"), Text(summary, style="ok"), None
         if last:  # the output shows under the row
             return Text(DONE, style="ok"), Text(), None
         return Text(DONE, style="ok"), Text("no output", style="muted"), None
@@ -724,10 +732,10 @@ class Renderer:
             self._block(self.footer())
 
     def footer(self) -> Text:
-        """`✻ 9s · 4 tools · 2 files +14 −3 · tests ✓ · 83k context · 2.1k out · $0.03`, or
+        """`── 9s · 4 tools · 2 files +14 −3 · tests ✓ · 83k context · 2.1k out · $0.03`, or
         `128 tools (111 by 4 agents)` when agents did some of the work."""
         turn = self._turn
-        line = Text("✻ ", style="brand").append(_duration(time.monotonic() - turn.started), style="muted")
+        line = Text("── ", style="subtle").append(_duration(time.monotonic() - turn.started), style="muted")
         dot = (" · ", "subtle")
         total = turn.tools + turn.agent_tools
         line.append(*dot).append(f"{total} tool{'s' if total != 1 else ''}", style="muted")
@@ -781,6 +789,19 @@ class Renderer:
         self._last_was_row = False
         self._start_live()
         return decision
+
+
+_PASSED = re.compile(r"\b\d+ passed\b[^=\n]*")
+_UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in [\d.]+s\s*\n\s*\nOK\b", re.MULTILINE)
+
+
+def _test_summary(output: str) -> str:
+    """A passing test run's result in a few words: pytest's and most runners' "N passed",
+    or unittest's "Ran N tests ... OK"."""
+    if m := _UNITTEST_RAN.search(output):
+        return f"{m.group(1)} passed"
+    found = _PASSED.findall(output)
+    return found[-1].strip(" ,") if found else ""
 
 
 def _one_line(text: str) -> str:

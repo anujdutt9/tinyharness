@@ -51,8 +51,10 @@ from tinyharness.agent.history import Image
 from tinyharness.cli.commands import COMMANDS
 from tinyharness.cli.render import Renderer, dollars, tokens, without_links
 from tinyharness.cli.theme import (
+    HIGHLIGHT,
     MODE_LABEL,
     MODE_STYLE,
+    ON_HIGHLIGHT,
     PROMPT,
     PT_STYLE,
     SUBTLE,
@@ -473,9 +475,11 @@ class Repl:
     def _echo(self, line: str, *, queued: bool = False) -> None:
         """Print the submitted message back into the transcript (the input box is erased)."""
         first, *rest = line.splitlines()
-        text = Text().append(f"{PROMPT} ", style="brand").append(first, style="bold")
+        # Under the highlighter, as in the README: what you asked stands out in the scrollback.
+        marked = f"bold {ON_HIGHLIGHT} on {HIGHLIGHT}"
+        text = Text().append(f"{PROMPT} ", style="brand").append(f" {first} ", style=marked)
         for more in rest:
-            text.append(f"\n  {more}", style="bold")
+            text.append("\n  ").append(f" {more} ", style=marked)
         if queued and not is_command(line):
             text.append("  · for the agent's next step", style="subtle")
         self.console.print(text, highlight=False)
