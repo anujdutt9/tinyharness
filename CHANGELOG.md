@@ -183,6 +183,13 @@ First release.
   capable colleague new to the work (what it's for, how deep to go, what to deliver),
   and to ask for exact data, not only prose, when one agent's output feeds another.
 
+### Working habits
+- The system prompt adds habits that hold for any coding task: reproduce a bug before
+  fixing it, fix the cause and re-run the same steps, never silence an error; after two
+  failures on the same step, rethink instead of trying a third variation; try what you
+  built the way a user would, awkward cases included; no unasked-for dependencies or
+  renames; and give each subagent one job with a clear done condition.
+
 ### Reports and pages
 - A page written with `<script src="chart.umd.min.js">` gets the bundled Chart.js
   embedded by Write itself, in one step. The agent used to have to run an inliner
