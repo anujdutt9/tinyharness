@@ -163,6 +163,7 @@ on this; you can build your own orchestration the same way.
 - `th.state_dir`: a folder for the extension's own files,
   `~/.tinyharness/extensions-data/<name>/`.
 - `th.log`: a logger named for the extension.
+- `await th.run(command, timeout=120)`: a sandboxed shell command (see below).
 
 ## Rules
 
@@ -177,22 +178,31 @@ on this; you can build your own orchestration the same way.
 4. **Visible cost.** `/extensions` shows the tokens each extension adds to every request
    (its tool definitions and prompt sections).
 
-## Declaring what an extension needs
+## What an extension needs
 
-An extension can declare what it needs beyond the sandbox, and `/extensions` shows it:
+An extension declares what it needs beyond the sandbox:
 
 ```python
 NEEDS = ["network:api.github.com", "write:~/notes"]
 ```
 
-Today this is a declaration for you to read; it isn't enforced. Planned: asking once
-before loading an extension with needs (remembered with a fingerprint of the file, like
-folder trust), adding its hosts to the sandbox's allowlist for its own tools, and a
-`th.run(cmd)` helper that runs commands in the sandbox with those needs applied.
+- **Approval.** The CLI asks once, when the extension first loads: `The extension sync
+  asks to: reach api.github.com, write to ~/notes`. The answer is remembered with a
+  fingerprint of the extension's code, so a changed extension (or changed needs) asks
+  again. Declined, it still loads, without those needs. `/extensions` shows the state, and
+  `/extensions allow <name>` approves later. An extension you pass in code
+  (`SessionOptions(extensions=[...])`) is yours, and its needs apply without asking; from
+  the SDK, `session.grant_needs(name)` approves a named one.
+- **Its tools.** Once approved, the extension's own tools reach its hosts and write in its
+  folders without asking. Other tools, and the model's Bash commands, get nothing from it.
+- **Its commands.** `await th.run(command)` runs a shell command in the same sandbox as Bash,
+  plus the extension's approved needs: its hosts through a proxy of its own, its folders
+  writable. It returns a `RunResult` with `.code` (None if it timed out) and `.output`.
 
-What no extension system in this design does: sandbox an extension's own Python code.
-It runs in the harness's process with the harness's rights, as in pi, opencode and
-Claude Code. Only load extensions you trust, as you would any package.
+An extension's own Python still runs in the harness's process with the harness's rights,
+as in pi, opencode and Claude Code: `NEEDS` governs its tools and the commands it runs
+through `th.run`, not arbitrary code in its module. Only load extensions you trust, as you
+would any package.
 
 ## Built-in extensions
 

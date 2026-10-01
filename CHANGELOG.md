@@ -198,6 +198,13 @@ First release.
   built the way a user would, awkward cases included; no unasked-for dependencies or
   renames; and give each subagent one job with a clear done condition.
 
+### Extension needs
+- An extension's `NEEDS` (`network:<host>`, `write:<path>`) are enforced. The CLI asks
+  once when it loads (remembered with a fingerprint of its code; a change asks again);
+  approved, its own tools reach those hosts and folders without asking, and
+  `th.run(command)` runs commands in the sandbox with them added. Declined, it loads
+  without them. `/extensions allow <name>` approves later.
+
 ### Permission modes
 - `default` no longer asks for routine work: reads, edits inside the project and
   sandboxed commands run; anything that leaves that boundary (another folder,

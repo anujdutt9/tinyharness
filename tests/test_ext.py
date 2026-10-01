@@ -306,3 +306,113 @@ def test_an_extension_in_config_and_in_code_loads_once(tmp_path, monkeypatch):
         assert session._system_prompt().count("# Subagents") == 1
     finally:
         session.close()
+
+
+NEEDY = '''
+"""Syncs notes."""
+NEEDS = ["network:api.example.com", "write:{notes}"]
+
+
+def setup(th):
+    @th.tool(network=True)
+    async def fetch_notes(url: str) -> str:
+        """Fetch notes."""
+        return "notes"
+
+    th.prompt_section("Notes", "Use fetch_notes.")
+'''
+
+
+def test_needs_must_be_hosts_or_folders(tmp_path, monkeypatch, isolated_home):
+    write_ext(isolated_home, "bad", 'NEEDS = ["everything"]\ndef setup(th):\n    pass\n')
+    session = make_session(tmp_path, monkeypatch, ["bad"])
+    try:
+        assert "NEEDS entries are 'network:<host>' or 'write:<path>'" in session.extension_errors[0].error
+    finally:
+        session.close()
+
+
+async def test_an_extensions_needs_apply_only_once_approved_and_until_it_changes(
+    tmp_path, monkeypatch, isolated_home
+):
+    """Declared needs used to be shown and never enforced. Unapproved, the extension loads
+    but its tools ask; approved, its own tools reach its hosts and folders without asking;
+    a changed file asks again."""
+    from tinyharness.permissions import Decision
+
+    notes = tmp_path / "notes"
+    write_ext(isolated_home, "sync", NEEDY.replace("{notes}", str(notes)))
+    asked = []
+
+    async def user(request):
+        asked.append(request.tool)
+        return Decision(False, "no", "user")
+
+    session = make_session(tmp_path, monkeypatch, ["sync"], permission_callback=user)
+    try:
+        [ext] = session.extensions
+        tool = session.tools.get("fetch_notes")
+        args = {"url": "https://api.example.com/notes?all=1"}
+        assert not ext.granted
+        assert not (await session.gate.check(tool, args, None, target_host="api.example.com")).allow
+        session.grant_needs("sync")
+        assert (await session.gate.check(tool, args, None, target_host="api.example.com")).allow
+        assert not (await session.gate.check(tool, args, None, target_host="other.example")).allow
+        assert asked == ["fetch_notes", "fetch_notes"]
+    finally:
+        session.close()
+
+    again = make_session(tmp_path, monkeypatch, ["sync"])
+    try:
+        assert again.extensions[0].granted  # remembered
+    finally:
+        again.close()
+    write_ext(isolated_home, "sync", NEEDY.replace("{notes}", str(notes)) + "\n# changed\n")
+    changed = make_session(tmp_path, monkeypatch, ["sync"])
+    try:
+        assert not changed.extensions[0].granted  # its code changed: ask again
+    finally:
+        changed.close()
+
+
+def test_an_extension_given_in_code_has_its_needs(tmp_path, monkeypatch):
+    def mine(th):
+        pass
+
+    mine.NEEDS = ["network:api.example.com"]  # type: ignore[attr-defined]
+    session = make_session(tmp_path, monkeypatch, [], extensions=[mine])
+    try:
+        assert session.extensions[0].granted and session.extensions[0].hosts == ["api.example.com"]
+    finally:
+        session.close()
+
+
+async def test_th_run_gets_the_extensions_folders_and_hosts_once_approved(
+    tmp_path, monkeypatch, isolated_home
+):
+    """th.run runs a command through the same sandbox as Bash; approved needs widen that
+    sandbox for this extension only: its folders writable, its hosts on its own proxy."""
+    from tinyharness.tools import bash
+
+    notes = tmp_path / "notes"
+    write_ext(isolated_home, "sync", NEEDY.replace("{notes}", str(notes)))
+    session = make_session(tmp_path, monkeypatch, ["sync"])
+    seen = []
+
+    async def record(self, args, ctx):
+        seen.append((self.policy.write_roots, self.proxy.allowed if self.proxy else ()))
+        return bash.Execution("ok\n", 0, False, True, [])
+
+    monkeypatch.setattr(bash.BashTool, "execute", record)
+    session.sandbox = session.sandbox or object()  # the sandbox's presence is what matters here
+    try:
+        [ext] = session.extensions
+        await ext.run("sync-notes")
+        session.grant_needs("sync")
+        result = await ext.run("sync-notes")
+        (before_roots, before_hosts), (after_roots, after_hosts) = seen
+        assert notes.resolve() not in before_roots and "api.example.com" not in before_hosts
+        assert notes.resolve() in after_roots and "api.example.com" in after_hosts
+        assert "pypi.org" in after_hosts and result.code == 0 and result.output == "ok\n"
+    finally:
+        session.close()

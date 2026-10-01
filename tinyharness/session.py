@@ -41,7 +41,7 @@ from tinyharness.agent.sessionlog import (
 from tinyharness.config import Config, dotenv_paths, load_auth, load_config, load_dotenv_files
 from tinyharness.events import Compacted, Done, Event, ToolResult, ToolUse
 from tinyharness.ext import Command as ExtCommand
-from tinyharness.ext import Extension, LoadError, load_extensions
+from tinyharness.ext import Extension, LoadError, NeedsConsent, RunResult, load_extensions
 from tinyharness.hooks import Hook, HookRunner, load_hooks
 from tinyharness.llm.client import LLMClient, Ping
 from tinyharness.llm.models import ModelDirectory
@@ -59,6 +59,7 @@ from tinyharness.permissions import (
     PermissionRules,
 )
 from tinyharness.permissions.classifier import AutoModeClassifier
+from tinyharness.permissions.rules import DOMAIN, Rule
 from tinyharness.plugins import load_plugins
 from tinyharness.sandbox import Sandbox, SandboxPolicy, detect_sandbox
 from tinyharness.sandbox.proxy import AllowlistProxy
@@ -66,7 +67,7 @@ from tinyharness.skills import SkillRegistry, build_skill_prompt, load_skills, s
 from tinyharness.subagents import AgentSpec, load_agents
 from tinyharness.subagents.runner import run_subagent
 from tinyharness.tools.base import Tool, ToolContext, ToolError, file_version
-from tinyharness.tools.bash import BashTool
+from tinyharness.tools.bash import BashInput, BashTool
 from tinyharness.tools.registry import default_registry
 from tinyharness.trust import TrustStore
 from tinyharness.workspace import Scratch, Workspace
@@ -254,6 +255,10 @@ class Session:
                 default_config_path().parent.expanduser().resolve(),
             ),
         )
+
+        self._needs_rules: list[Rule] = []
+        self._extension_proxies: dict[str, AllowlistProxy] = {}
+        self._apply_needs()
 
         self.models = ModelDirectory(home_dir() / "cache" / "models")
         self._connect_llm()
@@ -508,11 +513,50 @@ class Session:
         request rebuilds the provider's prompt cache once."""
         self.config.extensions.enabled = list(names)
         self._load_extensions(self.config.extensions.enabled)
+        self._apply_needs()
         if self.history.messages and self.history.messages[0].role == "system":
             first = self.history.messages[0].content or ""
             if not first.startswith(SUMMARY_MARK):
                 self.history.messages[0] = Message(role="system", content=self._system_prompt())
         self.transcript.write("extensions", enabled=[e.name for e in self.extensions])
+
+    def _apply_needs(self) -> None:
+        """Let each extension's own tools do what its approved NEEDS say without asking:
+        reach its hosts, write in its folders. Other tools get nothing from them."""
+        for rule in self._needs_rules:
+            self.gate.rules.remove_allow(rule)
+        self._needs_rules = [
+            Rule(tool.name, pattern)
+            for ext in self.extensions
+            if ext.granted
+            for tool in ext.tools
+            for pattern in [*(f"{DOMAIN}{h.lower()}" for h in ext.hosts), *(f"{w}/*" for w in ext.writes)]
+        ]
+        for rule in self._needs_rules:
+            self.gate.rules.add_allow(rule)
+
+    def grant_needs(self, name: str) -> None:
+        """Approve what an extension's NEEDS ask for (remembered with its code's fingerprint)."""
+        ext = next((e for e in self.extensions if e.name == name), None)
+        if ext is None:
+            raise ValueError(f"no extension {name!r} is loaded")
+        NeedsConsent().grant(ext)
+        self._apply_needs()
+
+    async def run_for_extension(self, ext: Extension, command: str, *, timeout: float = 120) -> RunResult:
+        """`th.run`: a command in the sandbox, with the extension's approved needs added to
+        what the sandbox allows (its hosts through its own proxy, its folders writable)."""
+        policy, proxy = self.sandbox_policy, self.proxy
+        if ext.granted and ext.writes:
+            policy = replace(policy, write_roots=(*policy.write_roots, *ext.writes))
+        if ext.granted and ext.hosts and self.sandbox is not None:
+            if ext.name not in self._extension_proxies:
+                base = tuple(self.config.sandbox.allow_hosts)
+                self._extension_proxies[ext.name] = AllowlistProxy((*base, *ext.hosts))
+            proxy = self._extension_proxies[ext.name]
+        bash = BashTool(self.sandbox, policy, proxy=proxy)
+        run = await bash.execute(BashInput(command=command, timeout=max(1, min(600, int(timeout)))), self.ctx)
+        return RunResult(run.code, run.output)
 
     def extension_command(self, name: str) -> ExtCommand | None:
         return next((c for ext in self.extensions for c in ext.commands if c.name == name), None)
@@ -719,8 +763,9 @@ class Session:
             yield event
 
     def close(self) -> None:
-        if self.proxy is not None:
-            self.proxy.close()
+        for proxy in [self.proxy, *self._extension_proxies.values()]:
+            if proxy is not None:
+                proxy.close()
         self.transcript.close()
         self.scratch.cleanup()
 

@@ -17,7 +17,7 @@ import asyncio
 import shlex
 import shutil
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +77,15 @@ class BashInput(ToolInput):
         "sandbox blocks (the network, e.g. installing packages; writes outside the project). "
         "The user must approve every such command.",
     )
+
+
+@dataclass
+class Execution:
+    output: str
+    code: int | None  # None: it timed out and was killed
+    timed_out: bool
+    sandboxed: bool
+    blocked: list[str]  # hosts the sandbox proxy refused while it ran
 
 
 class BashTool(Tool[BashInput]):
@@ -149,6 +158,11 @@ class BashTool(Tool[BashInput]):
         return None if self.sandbox else "runs a shell command without a sandbox"
 
     async def run(self, args: BashInput, ctx: ToolContext) -> str:
+        run = await self.execute(args, ctx)
+        return self._report(run.output, run.code, run.timed_out, args, run.sandboxed, run.blocked)
+
+    async def execute(self, args: BashInput, ctx: ToolContext) -> Execution:
+        """Run the command; what it printed and how it ended, before any notes are added."""
         argv = [self.shell, "-c", args.command]
         sandboxed = self.sandbox is not None and args.sandbox
         policy, denied_before = self.policy, 0
@@ -186,7 +200,7 @@ class BashTool(Tool[BashInput]):
             await kill_group(proc)
             raise
         blocked = list(dict.fromkeys(self.proxy.denied[denied_before:])) if sandboxed and self.proxy else []
-        return self._report(output.text(), proc.returncode, timed_out, args, sandboxed, blocked)
+        return Execution(output.text(), None if timed_out else proc.returncode, timed_out, sandboxed, blocked)
 
     def _report(
         self,

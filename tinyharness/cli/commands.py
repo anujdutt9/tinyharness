@@ -552,7 +552,10 @@ def sandbox(repl: Repl, arg: str) -> None:
 
 
 @command(
-    "/extensions", "list extensions, or turn one on or off", group="Tools & skills", usage="[on|off name]"
+    "/extensions",
+    "list extensions, or turn one on or off",
+    group="Tools & skills",
+    usage="[on|off|allow name]",
 )
 def extensions(repl: Repl, arg: str) -> None:
     from tinyharness.ext import builtin_names
@@ -560,6 +563,14 @@ def extensions(repl: Repl, arg: str) -> None:
     session = repl.session
     action, _, name = arg.partition(" ")
     name = name.strip()
+    if action == "allow" and name:
+        try:
+            session.grant_needs(name)
+        except ValueError as e:
+            _fail(repl, str(e))
+            return
+        _ok(repl, f"{name} can now do what it needs [muted](remembered until it changes)[/]")
+        return
     if action in ("on", "off") and name:
         names = [n for n in session.config.extensions.enabled if n != name]
         if action == "on":
@@ -576,13 +587,20 @@ def extensions(repl: Repl, arg: str) -> None:
         )
         return
     if arg:
-        _fail(repl, "usage: /extensions [on|off name]")
+        _fail(repl, "usage: /extensions [on|off|allow name]")
         return
     table = _grid()
     for ext in session.extensions:
         cost = session.extension_tokens(ext)
         what = ", ".join(t.name for t in ext.tools) or "no tools"
-        needs = f"  [warn]needs {', '.join(ext.needs)}[/]" if ext.needs else ""
+        needs = ""
+        if ext.needs:
+            state = (
+                "[subtle]approved[/]"
+                if ext.granted
+                else f"[warn]not approved: /extensions allow {ext.name}[/]"
+            )
+            needs = f"  [muted]needs {', '.join(ext.needs)}[/] · {state}"
         table.add_row(
             f"  [bold default]{ext.name}[/]",
             f"{_short(ext.description or what, 56)}  [subtle]+{cost:,} tokens per request[/]{needs}",

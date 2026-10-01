@@ -235,6 +235,8 @@ async def run(args: argparse.Namespace, console: Console) -> None:
     session = open_session(options, console, interactive=interactive)
     if session is None:
         return
+    if interactive:
+        await confirm_needs(session, console)
     renderer.root = f"{session.workspace.root}/"
     renderer.meter = session.ctx.usage
     renderer.show_thinking = session.config.show_thinking
@@ -304,6 +306,40 @@ async def confirm_trust(options: SessionOptions, console: Console) -> SessionOpt
     if choice:
         store.trust(code)
     return replace(options, trust_project=bool(choice))
+
+
+async def confirm_needs(session: Session, console: Console) -> None:
+    """Ask once about each loaded extension that needs more than the sandbox gives, again
+    only if its code or needs change. Declined, it still loads, without those needs."""
+    for ext in session.extensions:
+        if ext.granted:
+            continue
+        needs = Text()
+        for need in ext.needs:
+            kind, _, what = need.partition(":")
+            needs.append(f"\n  • {'reach' if kind == 'network' else 'write to'} {what}", style="muted")
+        console.print()
+        console.print(
+            Panel(
+                Group(
+                    Text.assemble(("The extension ", ""), (ext.name, "bold"), (" asks to:", "")),
+                    needs,
+                    Text("\nOnly its own tools and commands get these.", style="muted"),
+                ),
+                title=Text(ext.description or ext.name, style="bold"),
+                title_align="left",
+                box=box.ROUNDED,
+                border_style="warn",
+                padding=(0, 1),
+            )
+        )
+        choice = await pick(
+            f"Allow what {ext.name} needs?",
+            [(True, "Yes (remembered until it changes)"), (False, "No, load it without them")],
+            mark_current=False,
+        )
+        if choice:
+            session.grant_needs(ext.name)
 
 
 async def pick_session(options: SessionOptions, console: Console) -> str | None:

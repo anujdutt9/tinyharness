@@ -20,14 +20,16 @@ keeps hitting.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.metadata
 import importlib.util
 import inspect
+import json
 import logging
 import re
 import sys
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -110,6 +112,14 @@ class CommandContext:
 
 
 @dataclass
+class RunResult:
+    """What `th.run` returns: the exit code (None if it timed out) and the combined output."""
+
+    code: int | None
+    output: str
+
+
+@dataclass
 class Extension:
     """The `th` object an extension's `setup()` receives. Everything it registers belongs
     to this extension, so it can be listed (with its token cost) and unloaded."""
@@ -122,8 +132,20 @@ class Extension:
     sections: list[tuple[str, str]] = field(default_factory=list)
     hooks: list[Hook] = field(default_factory=list)
     commands: list[Command] = field(default_factory=list)
-    needs: list[str] = field(default_factory=list)
+    needs: list[str] = field(default_factory=list)  # NEEDS, as declared
     replaces: list[str] = field(default_factory=list)  # tools it removes from the core
+    fingerprint: str = ""  # of its code, so a changed extension asks for its needs again
+    granted: bool = True  # its needs are in effect (no needs, given in code, or you approved)
+
+    @property
+    def hosts(self) -> list[str]:
+        """Hosts its NEEDS ask to reach (`network:<host>`)."""
+        return [n.split(":", 1)[1] for n in self.needs if n.startswith("network:")]
+
+    @property
+    def writes(self) -> list[Path]:
+        """Folders its NEEDS ask to write (`write:<path>`)."""
+        return [Path(n.split(":", 1)[1]).expanduser().resolve() for n in self.needs if n.startswith("write:")]
 
     @property
     def log(self) -> logging.Logger:
@@ -192,6 +214,13 @@ class Extension:
         return register
 
     # ---- subagents
+
+    async def run(self, command: str, *, timeout: float = 120) -> RunResult:
+        """Run a shell command in the sandbox, with this extension's needs applied (its
+        hosts reachable, its folders writable) once you've approved them."""
+        if self.session is None:
+            raise RuntimeError("run needs a session")
+        return await self.session.run_for_extension(self, command, timeout=timeout)
 
     async def run_agent(
         self,
@@ -361,8 +390,12 @@ def load_extensions(
                 description=(inspect.getdoc(source) or "").split("\n\n")[0].strip(),
                 config=dict(config) if isinstance(config, dict) else {},
                 session=session,
-                needs=list(getattr(source, "NEEDS", []) or []),
+                needs=check_needs(getattr(source, "NEEDS", []) or []),
+                fingerprint=fingerprint(source),
             )
+            # Needs take effect once approved; an extension you pass in code is your own.
+            given_in_code = any(source is item for item in given)
+            ext.granted = not ext.needs or given_in_code or NeedsConsent().granted(ext)
             setup(ext)
             loaded.append(ext)
         except Exception as e:  # one broken extension shouldn't stop the session
@@ -375,3 +408,63 @@ def builtin_names() -> list[str]:
     from tinyharness import extensions
 
     return sorted(p.stem for p in Path(extensions.__file__).parent.glob("*.py") if not p.stem.startswith("_"))
+
+
+# ---------------------------------------------------------------------- needs
+
+_NEED = re.compile(r"^(network:[A-Za-z0-9*.-]+|write:.+)$")
+
+
+def check_needs(needs: Iterable[Any]) -> list[str]:
+    """NEEDS as declared, each `network:<host>` or `write:<path>`; anything else is an error."""
+    out = []
+    for need in needs:
+        if not isinstance(need, str) or not _NEED.match(need):
+            raise ValueError(f"NEEDS entries are 'network:<host>' or 'write:<path>', not {need!r}")
+        out.append(need)
+    return out
+
+
+def fingerprint(source: ModuleType | Setup) -> str:
+    """A hash of an extension's code: its file, or every .py file of a package."""
+    path = getattr(source, "__file__", None)
+    if not path:
+        return "code"
+    file = Path(path)
+    files = sorted(file.parent.rglob("*.py")) if file.name == "__init__.py" else [file]
+    digest = hashlib.sha256()
+    for f in files:
+        digest.update(str(f.relative_to(file.parent)).encode() + b"\0" + f.read_bytes())
+    return digest.hexdigest()
+
+
+class NeedsConsent:
+    """The needs you've approved, per extension, with a fingerprint of its code then: a
+    changed extension (or changed needs) asks again. Kept in ~/.tinyharness/, which
+    nothing in a project and no sandboxed command can write."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = path or home_dir() / "extension-needs.json"
+
+    def granted(self, ext: Extension) -> bool:
+        entry = self._load().get(ext.name)
+        if not isinstance(entry, dict):
+            return False
+        return entry.get("fingerprint") == ext.fingerprint and entry.get("needs") == sorted(ext.needs)
+
+    def grant(self, ext: Extension) -> None:
+        data = self._load()
+        data[ext.name] = {"fingerprint": ext.fingerprint, "needs": sorted(ext.needs)}
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(data, indent=2, sort_keys=True))
+        except OSError as e:
+            log.warning("could not save extension consent to %s: %s", self.path, e)
+        ext.granted = True
+
+    def _load(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
