@@ -191,6 +191,10 @@ First release.
   The built-in agents (explore, plan, general-purpose, researcher) have the Skill tool
   too, so a teammate can load a skill its task needs. It used to be off unless you passed
   `--expose-skills`; `skill_tool = false` (or `--no-skill-tool`) turns it off now.
+- A teammate's result longer than a prompt carries (4,000 characters to a dependent task,
+  6,000 in the lead's report) is saved whole in the session's scratch folder, and the next
+  task and the lead are told where: it used to be cut off with no way to get the rest, so
+  a report builder saw only the start of each analyst's findings.
 - The system prompt and the Agent and Team tools tell the lead to brief subagents like a
   capable colleague new to the work (what it's for, how deep to go, what to deliver),
   and to ask for exact data, not only prose, when one agent's output feeds another.

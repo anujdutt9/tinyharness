@@ -914,3 +914,31 @@ async def test_built_in_agents_can_load_skills(tmp_path):
         gate=gate,
     )
     assert "Use a grid." in llm.requests[1][-1].content
+
+
+async def test_a_long_result_is_handed_on_whole_through_a_file(tmp_path):
+    """Dependency results were cut at 4,000 characters with no way to get the rest, so a
+    report builder saw only the start of each analyst's findings."""
+    from tinyharness.workspace.scratch import Scratch
+
+    findings = "FINDING " + "x" * 9_000 + " LAST LINE"
+    seen = {}
+
+    async def spawner(spec, prompt, ctx, /, *, label, extra_tools, inbox):
+        seen[label] = prompt
+        return findings if label.startswith("a:") else "report written"
+
+    board = Board(
+        "goal",
+        {
+            "a": TaskState("a", "A", "analyze", "general-purpose", []),
+            "b": TaskState("b", "B", "write", "general-purpose", ["a"]),
+        },
+    )
+    ctx = make_ctx(tmp_path)
+    ctx.scratch = Scratch(tmp_path, "s1")
+    await run_team(board, {"general-purpose": AgentSpec("general-purpose", "x")}, spawner, ctx)
+    path = board.tasks["a"].result_file
+    assert path and Path(path).read_text().endswith("LAST LINE")
+    assert f"the whole result is in {path}" in seen["b: B"]
+    assert path in report(board)

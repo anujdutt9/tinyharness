@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -73,6 +74,7 @@ class TaskState:
     result: str = ""
     attempts: int = 1
     retry_note: str = ""  # why the previous attempt failed, for the next one
+    result_file: str = ""  # the whole result, when it's longer than what a prompt carries
 
 
 @dataclass
@@ -406,6 +408,7 @@ async def run_team(
                 task = running.pop(job)
                 if (error := job.exception()) is None:
                     task.status, task.result = "done", job.result()
+                    _keep_whole(task, ctx)
                 elif task.attempts < MAX_ATTEMPTS:  # a fresh teammate, told what went wrong
                     task.attempts += 1
                     task.retry_note = f"{type(error).__name__}: {error}"
@@ -447,7 +450,7 @@ def _teammate_prompt(board: Board, task: TaskState) -> str:
     if deps:
         parts += ["", "Results of the tasks yours builds on:"]
         for d in deps:
-            parts += ["", f"### {d.id}: {d.title}", _clip(d.result, RESULT_CHARS_IN_PROMPT)]
+            parts += ["", f"### {d.id}: {d.title}", _handed_off(d, RESULT_CHARS_IN_PROMPT)]
         if failed := [d.id for d in deps if d.status != "done"]:
             parts += [
                 "",
@@ -487,12 +490,37 @@ def report(board: Board) -> str:
         lines += [
             "",
             f"## {t.id}: {t.title} · {t.agent} · {t.status}",
-            _clip(t.result, RESULT_CHARS_IN_REPORT),
+            _handed_off(t, RESULT_CHARS_IN_REPORT),
         ]
     if board.messages:
         lines += ["", "## Messages between teammates"]
         lines += [f"- {sender} → {to}: {text}" for sender, to, text in board.messages]
     return "\n".join(lines)
+
+
+def _keep_whole(task: TaskState, ctx: ToolContext) -> None:
+    """Save a result too long for the prompts it goes into, so nothing is silently lost:
+    the next task and the lead get the start of it and the path to the rest."""
+    if len(task.result) <= RESULT_CHARS_IN_PROMPT or ctx.scratch is None:
+        return
+    path = ctx.scratch.dir / f"team-{uuid.uuid4().hex[:6]}-{task.id}.md"
+    try:
+        path.write_text(task.result, encoding="utf-8")
+    except OSError:
+        return
+    task.result_file = str(path)
+
+
+def _handed_off(task: TaskState, limit: int) -> str:
+    """A task's result as passed on: whole, or its start and where the rest is."""
+    text = task.result.strip()
+    if len(text) <= limit:
+        return text
+    rest = f"{len(text) - limit:,} more characters"
+    where = (
+        f"; the whole result is in {task.result_file}: Read it before you use it" if task.result_file else ""
+    )
+    return f"{text[:limit]}\n[… {rest}{where}]"
 
 
 def _clip(text: str, limit: int) -> str:
