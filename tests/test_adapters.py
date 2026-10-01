@@ -425,9 +425,48 @@ async def test_openrouter_reasoning_is_sent_back_once():
 
 
 async def test_chat_mid_stream_error_is_raised():
+    stream = sse({"error": {"message": "invalid tool schema"}, "choices": []})
+    server = Server(stream, stream)
+    with pytest.raises(LLMError, match="invalid tool schema"):
+        await run(client("openrouter", server), CONVERSATION)
+    assert len(server.requests) == 1  # a problem with the request isn't retried
+
+
+async def test_a_busy_error_inside_the_stream_is_retried_before_any_output():
+    busy = sse({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}, named=True)
+    server = Server(busy, ANTHROPIC_STREAM)
+    text, _, _ = await run(client("anthropic", server), CONVERSATION)
+    assert len(server.requests) == 2 and text
+
+
+async def test_a_busy_error_that_persists_is_raised():
     stream = sse({"error": {"message": "upstream overloaded"}, "choices": []})
     with pytest.raises(LLMError, match="overloaded"):
-        await run(client("openrouter", Server(stream)), CONVERSATION)
+        await run(client("openrouter", Server(*[stream] * 4)), CONVERSATION)
+
+
+async def test_a_body_that_is_not_an_event_stream_is_reported():
+    """A proxy's error page, or a server that ignored `stream: true`, with status 200."""
+    body = '{"object": "error", "message": "model not loaded"}'
+    with pytest.raises(LLMError, match=r"didn't answer with an event stream.*model not loaded"):
+        await run(client("openrouter", Server(body)), CONVERSATION)
+
+
+async def test_an_event_split_over_several_data_lines_is_joined():
+    event = json.dumps(chat_chunk({"content": "hello"}, finish="stop"), indent=2)
+    stream = "".join(f"data: {line}\n" for line in event.splitlines()) + "\ndata: [DONE]\n\n"
+    text, _, _ = await run(client("openrouter", Server(stream)), CONVERSATION)
+    assert text == "hello"
+
+
+async def test_stop_reasons_are_normalized_and_the_route_is_reported():
+    stream = (
+        sse({**chat_chunk({"content": "hi"}, finish="length"), "provider": "Novita"}) + "data: [DONE]\n\n"
+    )
+    chunks = [c async for c in client("openrouter", Server(stream)).stream(CONVERSATION, [READ])]
+    finish = next(c for c in chunks if c.finish_reason)
+    assert (finish.finish_reason, finish.finish_detail) == ("length", "length")
+    assert chunks[-1].route == "Novita"
 
 
 @pytest.mark.parametrize(

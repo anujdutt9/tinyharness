@@ -21,7 +21,7 @@ from tinyharness.events import (
     ToolsDispatched,
     ToolUse,
 )
-from tinyharness.llm.types import RepeatedFailureError, RunawayOutputError, StreamChunk
+from tinyharness.llm.types import LLMError, RepeatedFailureError, RunawayOutputError, StreamChunk
 from tinyharness.paths import state_dir
 from tinyharness.permissions import Decision, PermissionGate, PermissionMode
 from tinyharness.tools.base import Tool, ToolError, ToolInput
@@ -584,3 +584,58 @@ async def test_after_an_edit_earlier_copies_of_the_file_are_marked_stale(tmp_pat
     reads = [m.content for m in history.messages if m.role == "tool" and m.meta.get("content")]
     assert reads[0].startswith("[stale:") and "changed since this was read" in reads[0]
     assert "plugins" in reads[1] and "scales" not in "".join(reads)
+
+
+def _call(i, name, arguments, finish=None):
+    return StreamChunk(
+        tool_call_delta={"index": i, "id": f"cut_{i}", "function": {"name": name, "arguments": arguments}},
+        finish_reason=finish,
+    )
+
+
+async def test_a_tool_call_cut_off_by_the_output_limit_is_not_run(tmp_path):
+    """Seen live: a big Write cut off mid-arguments got "invalid JSON", and the model sent
+    the same oversized call again until the repeat guard stopped it."""
+    ran = []
+
+    class Recorder(Tool[SleepInput]):
+        name, description, Input, read_only = "A", "a", SleepInput, True
+
+        async def run(self, args, ctx):
+            ran.append(args.seconds)
+            return "ok"
+
+    cut = [
+        _call(0, "A", '{"seconds": 0}'),
+        _call(1, "A", '{"seconds": 0.0'),
+        StreamChunk(finish_reason="length"),
+    ]
+    _, history = await run(tmp_path, ScriptedLLM([cut, "done"]), [Recorder()])
+    results = {m.tool_call_id: m.content for m in history.messages if m.role == "tool"}
+    assert ran == [0]  # the complete call ran; the cut-off one didn't
+    assert "hit the output token limit" in results["cut_1"] and "Write the first part" in results["cut_1"]
+    assert results["cut_0"] == "ok"
+
+
+async def test_a_filtered_empty_reply_is_reported_not_retried(tmp_path):
+    llm = ScriptedLLM([[StreamChunk(finish_reason="filtered", finish_detail="content_filter")], "never"])
+    with pytest.raises(LLMError, match=r"withheld the model's reply \(content_filter\)"):
+        await run(tmp_path, llm, [])
+    assert len(llm.requests) == 1
+
+
+async def test_a_tool_call_in_the_step_limit_reply_leaves_the_history_valid(tmp_path):
+    tools = [sleep_tool("A", True)]
+    llm = ScriptedLLM([[("A", '{"seconds": 0}')], [("A", '{"seconds": 0}')]])
+    events, history = await run(tmp_path, llm, tools, max_steps=1)
+    assert events[-1] == Done(reason="max_steps")
+    calls = [c.id for m in history.messages for c in m.tool_calls]
+    answered = [m.tool_call_id for m in history.messages if m.role == "tool"]
+    assert sorted(calls) == sorted(answered) and len(calls) == 2
+    assert history.messages[-1].content == "(not run: the step limit was reached)"
+
+
+async def test_an_empty_step_limit_reply_adds_no_empty_message(tmp_path):
+    llm = ScriptedLLM([[("A", '{"seconds": 0}')], [StreamChunk(finish_reason="stop")]])
+    _, history = await run(tmp_path, llm, [sleep_tool("A", True)], max_steps=1)
+    assert history.messages[-1].role == "user"  # the step-limit note; no empty assistant reply after it

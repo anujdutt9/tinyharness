@@ -607,7 +607,15 @@ class Session:
             async for event in run_agent_loop(prompt, self.history, deps, images):
                 if isinstance(event, (ToolUse, ToolResult, Compacted, Done)):
                     self._sync()  # saved as it goes, so a crash loses at most one step
+                if isinstance(event, Done):
+                    self.transcript.write("turn_end", reason=event.reason or "done")
                 yield event
+        except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
+            self.transcript.write("turn_end", reason="interrupted")
+            raise
+        except Exception as e:  # recorded, so a failed turn can be told apart from a stopped one
+            self.transcript.write("turn_end", reason="error", error=f"{type(e).__name__}: {e}"[:1000])
+            raise
         finally:
             # If the turn was interrupted mid tool call, keep the history valid.
             self.history.repair()

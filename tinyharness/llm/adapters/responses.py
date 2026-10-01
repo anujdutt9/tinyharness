@@ -94,11 +94,16 @@ class _ResponsesParser(StreamParser):
     def __init__(self) -> None:
         self.output: list[dict[str, Any]] = []
         self.streamed_arguments: set[int] = set()
+        self.refused = False
 
     def feed(self, event: dict[str, Any]) -> list[StreamChunk]:
         match event.get("type"):
             case "response.output_text.delta":
                 return [StreamChunk(text=event.get("delta", ""))]
+            case "response.refusal.delta":  # shown like text, so a refusal isn't an empty reply
+                return [StreamChunk(text=event.get("delta", ""))]
+            case "response.refusal.done":
+                self.refused = True
             case "response.reasoning_summary_text.delta":
                 return [StreamChunk(reasoning_text=event.get("delta", ""))]
             case "response.reasoning_summary_part.done":
@@ -121,7 +126,7 @@ class _ResponsesParser(StreamParser):
                 return self._item_done(event["output_index"], event["item"])
             case "response.completed":
                 self.output = event.get("response", {}).get("output") or self.output
-                return [StreamChunk(finish_reason="stop")]
+                return [StreamChunk(finish_reason="refusal" if self.refused else "stop")]
             case "response.incomplete":
                 details = event.get("response", {}).get("incomplete_details") or {}
                 return [StreamChunk(finish_reason=details.get("reason", "incomplete"))]

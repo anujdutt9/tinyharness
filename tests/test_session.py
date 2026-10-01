@@ -204,3 +204,28 @@ async def test_a_session_closes_at_the_end_of_an_async_with(tmp_path, monkeypatc
         scratch = s.scratch.dir
         assert scratch.exists()
     assert not scratch.exists()
+
+
+async def test_every_turn_records_how_it_ended(session):
+    """Failed turns used to leave no trace in the log, so a provider error, a stuck model
+    and the user pressing Ctrl+C all looked the same afterwards."""
+    import json
+
+    from conftest import ScriptedLLM
+    from tinyharness.llm.types import LLMError
+
+    session.llm.stream = ScriptedLLM(["hello"]).stream
+    [e async for e in session.run("hi")]
+
+    async def failing(*a, **k):
+        raise LLMError("LLM error 500: upstream exploded")
+        yield
+
+    session.llm.stream = failing
+    with pytest.raises(LLMError):
+        [e async for e in session.run("again")]
+    session.transcript.close()
+    records = [json.loads(line) for line in session.transcript.path.read_text().splitlines()]
+    ends = [r for r in records if r["event"] == "turn_end"]
+    assert [e["reason"] for e in ends] == ["stop", "error"]
+    assert "upstream exploded" in ends[1]["error"]

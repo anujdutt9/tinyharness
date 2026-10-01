@@ -47,7 +47,7 @@ from tinyharness.events import (
 )
 from tinyharness.images import fit_image
 from tinyharness.llm.client import ContextOverflowError, ImageTooLargeError, ToolCallAccumulator
-from tinyharness.llm.types import RepeatedFailureError, RunawayOutputError, StreamChunk
+from tinyharness.llm.types import LLMError, RepeatedFailureError, RunawayOutputError, StreamChunk
 from tinyharness.llm.usage import Usage
 from tinyharness.security import mask_secrets
 from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolOutput
@@ -80,6 +80,14 @@ MAX_EMPTY_REPLIES = SILENT_RETRIES + 2  # in a row, before the turn is stopped
 CUT_OFF_NOTE = (
     "[tinyharness] Your last reply was cut off at the output token limit. Continue exactly "
     "where it stopped; don't repeat what you already wrote."
+)
+# The result for a tool call whose arguments were cut off by the output limit. It isn't
+# run: what it would write is incomplete. Without this the model only hears "invalid JSON"
+# and sends the same oversized call again.
+CUT_OFF_CALL = (
+    "error: not run: your reply hit the output token limit while writing this call, so its "
+    "arguments are incomplete. Make it smaller: write a large file in parts (Write the first "
+    "part, then add the rest with Edit), or change only what's needed with Edit."
 )
 # Sent when the step limit is reached, for one last reply without tools.
 STEP_LIMIT_NOTE = (
@@ -149,7 +157,9 @@ class _Turn:
     reported: dict[int, tuple[int, str]] = field(default_factory=dict)  # index -> (KB, target) last sent
     state: ReasoningState | None = None
     usage: Usage | None = None
-    finish_reason: str | None = None
+    finish_reason: str | None = None  # normalized: see llm/types.py FinishReason
+    finish_detail: str = ""  # the provider's own word for it
+    route: str = ""
 
 
 async def run_agent_loop(
@@ -221,11 +231,24 @@ async def run_agent_loop(
             # Nothing to show or do. That isn't "finished": ask the model to carry on, and
             # stop the turn if it happens again straight away.
             if turn.usage is not None:
-                yield _account(turn.usage, deps)
+                yield _account(turn, deps)
+            if turn.finish_reason in ("filtered", "refused"):  # asking again won't change that
+                deps.transcript.write("stuck", reason="withheld", finish=turn.finish_detail, route=turn.route)
+                raise LLMError(
+                    f"the provider withheld the model's reply ({turn.finish_detail}). "
+                    "Rephrase the request, or try another model with /model."
+                )
             empty_replies += 1
             if empty_replies >= MAX_EMPTY_REPLIES:
                 raise _stuck_again(RunawayOutputError("its replies were empty"))
-            deps.transcript.write("stuck", reason="empty reply", attempt=empty_replies)
+            deps.transcript.write(
+                "stuck",
+                reason="empty reply",
+                attempt=empty_replies,
+                finish=turn.finish_detail,
+                route=turn.route,
+                output_tokens=turn.usage.output if turn.usage else None,
+            )
             if empty_replies > SILENT_RETRIES:
                 yield ModelStuck("its reply was empty")
                 deps.transcript.write("user", text=EMPTY_NOTE)
@@ -235,16 +258,18 @@ async def run_agent_loop(
         if deps.inbox is not None and TEAMMATE_NOTE in text and not stuck_once:
             stuck_once = True
             if turn.usage is not None:
-                yield _account(turn.usage, deps)
+                yield _account(turn, deps)
             deps.transcript.write("stuck", reason="forged teammate message", text=text[:500])
             yield ModelStuck("it wrote a message as if from a teammate")
             deps.transcript.write("user", text=FORGED_NOTE)
             history.append(Message(role="user", content=FORGED_NOTE))
             continue
-        deps.transcript.write("assistant", text=text, tool_calls=[c.to_dict() for c in calls])
+        deps.transcript.write(
+            "assistant", text=text, tool_calls=[c.to_dict() for c in calls], finish=turn.finish_detail
+        )
         history.append(Message(role="assistant", content=text or None, tool_calls=calls, state=turn.state))
         if turn.usage is not None:
-            yield _account(turn.usage, deps)
+            yield _account(turn, deps)
 
         # 2. No tool calls means the model is finished, unless its reply was cut off.
         if not calls and turn.finish_reason == "length":
@@ -262,7 +287,8 @@ async def run_agent_loop(
             if batch.interrupted:
                 history.add_tool_result(call.id, "(not run: the user interrupted)")
                 continue
-            async for event in _prepare_call(call, available, history, deps, batch, failures):
+            cut_off = turn.finish_reason == "length"
+            async for event in _prepare_call(call, available, history, deps, batch, failures, cut_off):
                 yield event
 
         # The user said "no". Skip the rest of the batch (it was planned without their
@@ -341,11 +367,19 @@ async def _wrap_up(history: History, deps: LoopDeps) -> AsyncGenerator[Event, No
     except (ContextOverflowError, RunawayOutputError) as e:
         deps.transcript.write("wrap_up_failed", reason=str(e))
         return
-    text = "".join(turn.text)
-    deps.transcript.write("assistant", text=text, tool_calls=[])
-    history.append(Message(role="assistant", content=text or None, state=turn.state))
+    text, calls = "".join(turn.text), turn.calls.calls()
     if turn.usage is not None:
-        yield _account(turn.usage, deps)
+        yield _account(turn, deps)
+    if not text.strip() and not calls:
+        return  # an empty assistant message would be rejected by the next request
+    deps.transcript.write(
+        "assistant", text=text, tool_calls=[c.to_dict() for c in calls], finish=turn.finish_detail
+    )
+    # Calls it made anyway are kept, each answered, so the history stays valid (saved
+    # reasoning can contain them, and every provider wants a result for every call).
+    history.append(Message(role="assistant", content=text or None, tool_calls=calls, state=turn.state))
+    for call in calls:
+        history.add_tool_result(call.id, "(not run: the step limit was reached)")
 
 
 class _Failures:
@@ -490,7 +524,9 @@ def _take(chunk: StreamChunk, turn: _Turn) -> list[Event]:
         if (progress := _streaming(turn, chunk.tool_call_delta.get("index", 0))) is not None:
             events.append(progress)
     if chunk.finish_reason is not None:
-        turn.finish_reason = chunk.finish_reason
+        turn.finish_reason, turn.finish_detail = chunk.finish_reason, chunk.finish_detail
+    if chunk.route:
+        turn.route = chunk.route
     if chunk.state is not None:
         turn.state = chunk.state
     if chunk.usage is not None:
@@ -518,10 +554,12 @@ async def _prepare_call(
     deps: LoopDeps,
     batch: _Batch,
     failures: _Failures | None = None,
+    cut_off: bool = False,
 ) -> AsyncGenerator[Event, None]:
     """Parse, validate and permission-check one call. Rejections are answered
     immediately (the model must get a result for every call); approvals are
-    added to `batch`."""
+    added to `batch`. `cut_off`: the reply hit the output limit, so arguments that don't
+    parse are incomplete rather than malformed."""
 
     def reject(message: str) -> ToolResult:
         if failures is not None and message.startswith("error:"):  # not a denial: a bad call
@@ -537,8 +575,16 @@ async def _prepare_call(
 
     try:
         raw = json.loads(call.arguments or "{}")
+    except json.JSONDecodeError as e:
+        yield reject(
+            CUT_OFF_CALL
+            if cut_off
+            else f"error: invalid arguments for {tool.name}: {_explain_invalid(tool, e)}"
+        )
+        return
+    try:
         args = tool.parse(raw)
-    except (json.JSONDecodeError, ValidationError) as e:
+    except ValidationError as e:
         yield reject(f"error: invalid arguments for {tool.name}: {_explain_invalid(tool, e)}")
         return
 
@@ -587,9 +633,11 @@ async def _execute(item: _ApprovedCall, deps: LoopDeps) -> tuple[ToolOutput, boo
     return (result if isinstance(result, ToolOutput) else ToolOutput(result)), False
 
 
-def _account(usage: Usage, deps: LoopDeps) -> TokenUsage:
+def _account(turn: _Turn, deps: LoopDeps) -> TokenUsage:
     """Price one model call (unless the provider already did), add it to the session's
     meter and report it."""
+    assert turn.usage is not None
+    usage = turn.usage
     model = deps.model or deps.llm.model
     provider = getattr(getattr(deps.llm, "provider", None), "name", "")
     if usage.cost is None:
@@ -599,7 +647,13 @@ def _account(usage: Usage, deps: LoopDeps) -> TokenUsage:
             usage.cost = price.cost(usage)
     deps.ctx.usage.add(usage)
     deps.transcript.write(
-        "usage", model=model, input=usage.input, cached=usage.cached, output=usage.output, cost=usage.cost
+        "usage",
+        model=model,
+        input=usage.input,
+        cached=usage.cached,
+        output=usage.output,
+        cost=usage.cost,
+        **({"route": turn.route} if turn.route else {}),
     )
     return TokenUsage(model, usage.input, usage.cached, usage.output, usage.cost)
 

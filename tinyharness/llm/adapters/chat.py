@@ -116,6 +116,8 @@ class _ChatParser(StreamParser):
     def feed(self, event: dict[str, Any]) -> list[StreamChunk]:
         if error := event.get("error"):  # OpenRouter reports mid-stream errors this way
             raise LLMError(f"LLM error: {error.get('message', error) if isinstance(error, dict) else error}")
+        if event.get("object") == "error":  # ...and vLLM this way
+            raise LLMError(f"LLM error: {event.get('message', event)}")
         choices = event.get("choices") or []
         if not choices:
             return []

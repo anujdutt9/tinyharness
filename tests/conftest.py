@@ -73,11 +73,11 @@ async def call(tool: Tool[Any], args: dict[str, Any], ctx: ToolContext) -> str:
 class ScriptedLLM:
     """A fake LLM that replays a fixed list of turns.
 
-    Each turn is either a string (plain text reply) or a list of
-    (tool_name, arguments_json) tool calls.
+    Each turn is either a string (plain text reply), a list of
+    (tool_name, arguments_json) tool calls, or a list of raw StreamChunks.
     """
 
-    def __init__(self, turns: list[str | list[tuple[str, str]]]) -> None:
+    def __init__(self, turns: list[Any]) -> None:
         self.turns = list(turns)
         self.requests: list[list[Message]] = []
         self.model = "fake"
@@ -89,6 +89,10 @@ class ScriptedLLM:
         turn = self.turns.pop(0) if self.turns else "done"
         if isinstance(turn, str):
             yield StreamChunk(text=turn, finish_reason="stop")
+            return
+        if turn and isinstance(turn[0], StreamChunk):
+            for chunk in turn:
+                yield chunk
             return
         for i, (name, arguments) in enumerate(turn):
             yield StreamChunk(

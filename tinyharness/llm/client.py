@@ -13,7 +13,7 @@ import logging
 import random
 import re
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +32,7 @@ from tinyharness.llm.types import (
     Request,
     StreamChunk,
     ToolSpec,
+    normalize_finish,
 )
 from tinyharness.llm.usage import Usage, read_usage
 from tinyharness.net import describe as describe_network_error
@@ -71,11 +72,60 @@ _IMAGE_TOO_LARGE = re.compile(
 # Answers worth asking again, before any of the reply has streamed: rate limits (429, which
 # a gateway's admission control sends on purpose), overload (503, 529) and gateway errors.
 RETRY_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
-_RETRYABLE_TRANSPORT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError)
+# Failures before any reply arrived: the request can simply be sent again. (Not read
+# timeouts: the server took the request and went quiet, and waiting again rarely helps.)
+_RETRYABLE_TRANSPORT = (httpx.NetworkError, httpx.ConnectTimeout, httpx.RemoteProtocolError)
+# How errors reported inside a stream word "busy, try again" (Anthropic's overloaded_error,
+# OpenRouter's upstream errors), as opposed to a problem with the request itself.
+_TRANSIENT = re.compile(
+    r"overloaded|rate.?limit|too many requests|\b(429|5\d\d)\b|temporar|unavailable|timed? ?out"
+    r"|internal (server )?error|upstream|try again",
+    re.IGNORECASE,
+)
 MAX_RETRIES = 3
 STALL_SECONDS = 300.0  # no bytes from the server for this long ends the request
 RETRY_BASE_SECONDS = 1.0
 RETRY_MAX_SECONDS = 60.0
+
+
+def _retry_after(headers: httpx.Headers) -> str | None:
+    """The server's requested wait in seconds, from `retry-after-ms` or `retry-after`."""
+    if ms := headers.get("retry-after-ms"):
+        try:
+            return str(float(ms) / 1000)
+        except ValueError:
+            pass
+    return headers.get("retry-after")
+
+
+async def _sse_data(lines: AsyncIterator[str], other: list[str]) -> AsyncGenerator[str, None]:
+    """The data of each server-sent event. An event's `data:` lines are joined (some servers
+    pretty-print); servers that skip the blank line between events still work, because
+    lines that don't join into JSON are taken one by one. Lines that aren't part of an
+    event stream at all (an error page) are collected in `other`."""
+    data: list[str] = []
+    async for line in lines:
+        if line.startswith("data:"):
+            data.append(line[5:].strip())
+        elif not line.strip():
+            for item in _split_event(data):
+                yield item
+            data = []
+        elif not line.startswith(("event:", "id:", "retry:", ":")) and len(other) < 20:
+            other.append(line.strip())
+    for item in _split_event(data):
+        yield item
+
+
+def _split_event(data: list[str]) -> list[str]:
+    if len(data) > 1:
+        joined = "\n".join(data)
+        try:
+            json.loads(joined)
+            return [joined]
+        except json.JSONDecodeError:
+            pass
+    return data
 
 
 def retry_delay(retry_after: str | None, attempt: int) -> float:
@@ -235,7 +285,6 @@ class LLMClient:
             show_reasoning=self.show_reasoning,
         )
         payload = _merge(self.adapter.payload(request), self.provider.extra_body)
-        parser = self.adapter.parser()
         log.debug(
             "POST %s model=%s messages=%d tools=%d", self.endpoint, model, len(messages), len(request.tools)
         )
@@ -244,7 +293,10 @@ class LLMClient:
         finished = False  # a stream that just stops (a proxy dropping it) isn't a reply
         unreadable = 0  # events that weren't valid JSON: skipped, but said so (text may be missing)
         started = False  # once a chunk has gone out, a failure can't be retried invisibly
+        route = ""  # which upstream a router sent this to (OpenRouter names it in every chunk)
+        other: list[str] = []  # lines that aren't server-sent events: an error page, say
         for attempt in range(self.retries + 1):
+            parser = self.adapter.parser()
             try:
                 async with (
                     httpx.AsyncClient(timeout=self._timeouts(), transport=self.transport) as client,
@@ -253,7 +305,7 @@ class LLMClient:
                     if resp.status_code >= 400:
                         body = (await resp.aread()).decode(errors="replace")
                         if resp.status_code in RETRY_STATUSES and attempt < self.retries:
-                            delay = retry_delay(resp.headers.get("retry-after"), attempt)
+                            delay = retry_delay(_retry_after(resp.headers), attempt)
                             log.warning(
                                 "%s answered %d; retrying in %.1fs (%d of %d)",
                                 self.endpoint, resp.status_code, delay, attempt + 1, self.retries,
@@ -261,10 +313,8 @@ class LLMClient:
                             await asyncio.sleep(delay)
                             continue
                         raise _http_error(resp.status_code, body, self.endpoint)
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data:"):
-                            continue  # blank lines, `event:` names, `:` keep-alive comments
-                        data = line.removeprefix("data:").strip()
+                    other.clear()
+                    async for data in _sse_data(resp.aiter_lines(), other):
                         if data == "[DONE]":
                             finished = True
                             break
@@ -274,16 +324,25 @@ class LLMClient:
                             unreadable += 1
                             log.debug("unreadable stream event from %s: %.120s", self.endpoint, data)
                             continue
+                        if isinstance(event.get("provider"), str):
+                            route = event["provider"]
                         usage = read_usage(event, usage)
-                        try:
-                            chunks = parser.feed(event)
-                        except LLMError as e:
-                            raise _classify(e) from None
+                        chunks = parser.feed(event)
                         for chunk in chunks:
-                            finished = finished or chunk.finish_reason is not None
+                            if chunk.finish_reason is not None:
+                                chunk.finish_detail = chunk.finish_reason
+                                chunk.finish_reason = normalize_finish(chunk.finish_reason)
+                                finished = True
                             started = True
                             yield chunk
                 break
+            except LLMError as e:  # reported inside the stream
+                if not started and attempt < self.retries and _TRANSIENT.search(str(e)):
+                    delay = retry_delay(None, attempt)
+                    log.warning("%s: %s; retrying in %.1fs", self.endpoint, e, delay)
+                    await asyncio.sleep(delay)
+                    continue
+                raise _classify(e) from None
             except httpx.TransportError as e:  # refused, reset, DNS, TLS, timeouts, dropped mid-reply
                 if not started and attempt < self.retries and isinstance(e, _RETRYABLE_TRANSPORT):
                     delay = retry_delay(None, attempt)
@@ -295,6 +354,10 @@ class LLMClient:
                     failure.message, host=failure.host, code=failure.code, slow_reply=failure.slow_reply
                 ) from e
 
+        if not finished and not started and other:  # a JSON or HTML body instead of a stream
+            raise _classify(
+                LLMError(f"{self.endpoint} didn't answer with an event stream: {' '.join(other)[:500]}")
+            )
         if unreadable:
             log.warning(
                 "%d stream event(s) from %s weren't valid JSON and were skipped; the reply may be "
@@ -310,8 +373,8 @@ class LLMClient:
             )
         if (state := parser.state()) is not None:
             yield StreamChunk(state=ReasoningState(request.owner, state))
-        if usage is not None:
-            yield StreamChunk(usage=usage)
+        if usage is not None or route:
+            yield StreamChunk(usage=usage, route=route)
 
     async def collect(
         self,
