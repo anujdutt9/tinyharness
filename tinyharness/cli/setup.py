@@ -13,7 +13,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
-from tinyharness.cli.theme import LOGO, gradient
+from tinyharness.cli.theme import LOGO, wordmark
 from tinyharness.cli.widgets import ask, pick
 from tinyharness.config import Config, save_key
 from tinyharness.llm.client import LLMClient, Ping
@@ -27,7 +27,7 @@ async def run_setup(console: Console, config: Config) -> str | None:
     """Ask which provider to use and make sure it has a working key, saving a pasted
     one to the key file. Returns the provider's name, or None if the user backed out."""
     console.print()
-    console.print(Text.assemble(("  " + LOGO + " ", "brand"), gradient("Welcome to tinyharness")))
+    console.print(Text.assemble(("  " + LOGO + " ", "brand"), wordmark("Welcome to tinyharness")))
     console.print("\n  Pick the model provider to use. [muted]You can change it later with /model.[/]\n")
 
     width = max(len(p.label) for p in config.providers.values())
@@ -87,7 +87,7 @@ def print_key_guide(console: Console, config: Config) -> None:
     first = next(iter(config.providers.values()))
 
     console.print()
-    console.print(Text.assemble(("  " + LOGO + " ", "brand"), gradient("Welcome to tinyharness")))
+    console.print(Text.assemble(("  " + LOGO + " ", "brand"), wordmark("Welcome to tinyharness")))
     console.print("\n  To get started, you need an API key for [bold]one[/] of these providers:\n")
 
     table = Table.grid(padding=(0, 3))

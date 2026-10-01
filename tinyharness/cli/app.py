@@ -12,16 +12,18 @@ from pathlib import Path
 
 from rich import box
 from rich.console import Console, Group
+from rich.padding import Padding
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
 from tinyharness import __version__
 from tinyharness.agent.history import Message
+from tinyharness.cli import pip
 from tinyharness.cli.render import Renderer
 from tinyharness.cli.repl import Repl, report_error
 from tinyharness.cli.setup import print_key_guide, run_setup
-from tinyharness.cli.theme import BRAND, LOGO, MODE_HINT, MODE_LABEL, MODE_STYLE, THEME, gradient
+from tinyharness.cli.theme import BRAND, LOGO, MODE_HINT, MODE_LABEL, MODE_STYLE, MUTED, THEME, wordmark
 from tinyharness.cli.widgets import pick
 from tinyharness.config import note_launch, remember_model
 from tinyharness.paths import pretty_path, source_checkout
@@ -91,7 +93,7 @@ def print_banner(console: Console, session: Session, *, compact: bool = False) -
     if compact:
         line = Text.assemble(
             (f"{LOGO} ", BRAND),
-            gradient("tinyharness"),
+            wordmark(),
             (f" v{__version__}", "subtle"),
             ("  ·  ", "subtle"),
             (session.model_label, "bold"),
@@ -102,12 +104,12 @@ def print_banner(console: Console, session: Session, *, compact: bool = False) -
             (MODE_LABEL[mode], f"bold {MODE_STYLE[mode]}"),
         )
         console.print()
-        console.print(Panel(line, box=box.ROUNDED, border_style="subtle", padding=(0, 1), expand=False))
+        console.print(Text("  ").append_text(line))
         for warning in _attention(session):
             console.print(Text("  ").append_text(warning))
         console.print(KEYS)
         return
-    header = Text.assemble((f"{LOGO} ", BRAND), gradient("tinyharness"), (f"  v{__version__}", "subtle"))
+    header = Text.assemble(wordmark(), (f"  v{__version__}", "subtle"))
     details = Table.grid(padding=(0, 2))
     details.add_column(style="muted")
     details.add_column()
@@ -139,9 +141,22 @@ def print_banner(console: Console, session: Session, *, compact: bool = False) -
         )
     if n := len(session.skills):
         details.add_row("skills", f"{n} available [muted]· /skills[/]")
-    body = Group(header, Text("a small, hackable coding agent", style="muted"), Text(), details)
+    body = Group(
+        header,
+        Text("an agent harness you can read in an afternoon", style=f"italic {MUTED}"),
+        Text(),
+        details,
+    )
     console.print()
-    console.print(Panel(body, box=box.ROUNDED, border_style="subtle", padding=(1, 2), expand=False))
+    if pip.fits(console):  # Pip beside the details, like the README's notebook page
+        card = Table.grid(padding=(0, 3))
+        card.add_column(vertical="middle")
+        card.add_column(vertical="middle")
+        card.add_row(pip.portrait(), body)
+        console.print(Padding(card, (0, 0, 0, 2)))
+    else:
+        console.print(Padding(body, (0, 0, 0, 2)))
+    console.print()
     console.print(KEYS)
 
 
