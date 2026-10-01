@@ -200,6 +200,16 @@ First release.
   built the way a user would, awkward cases included; no unasked-for dependencies or
   renames; and give each subagent one job with a clear done condition.
 
+### Extensions
+- Extensions: one Python file with `setup(th)` adds tools (from an async function's
+  signature and docstring), prompt sections, slash commands, and handlers for
+  `user_prompt`, `tool_call`, `tool_result` and `turn_end` (the same bus as `hooks.toml`).
+  Turned on in `[extensions] enabled = [...]` or with `/extensions on|off`, which lists
+  each one's tokens per request. See docs/extension-api.md.
+- The core is six tools: Read, Write, Edit, Glob, Grep, Bash. Web, Pdf, Open and TodoWrite
+  are built-in extensions (`web`, `pdf`, `open`, `todo`), off until turned on, so a session
+  that doesn't use them doesn't send their schemas with every request.
+
 ### Reports and pages
 - Pages are written as models write them elsewhere, CDN links included: no offline
   rule, bundled Chart.js or Screenshot tool. Those sent models hunting for a library file

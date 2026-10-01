@@ -87,7 +87,7 @@ class BashTool(Tool[BashInput]):
             "and exit code. Use it to run tests, builds, linters, git and other CLI tools. Each call "
             "starts fresh in the working directory (use `cd dir && ...`); nothing interactive. "
             "Prefer Read/Grep/Glob/Edit over cat/grep/find/sed for files. "
-            f"{limits} To show the user a file or URL, use the Open tool, not `open`."
+            f"{limits}"
         )
 
     def describe(self, args: BashInput) -> str:

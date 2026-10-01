@@ -212,3 +212,36 @@ async def test_run_agent_names_the_agents_it_knows(tmp_path, monkeypatch):
             await session.run_agent("nope", "do it")
     finally:
         session.close()
+
+
+@pytest.mark.parametrize(
+    ("name", "tools", "section"),
+    [
+        ("web", ["WebSearch", "WebFetch"], "# Web"),
+        ("pdf", ["Pdf"], None),
+        ("open", ["Open"], "# Showing things"),
+        ("todo", ["TodoWrite"], "# Planning"),
+    ],
+)
+def test_built_in_extensions_add_their_tools_and_guidance(tmp_path, monkeypatch, name, tools, section):
+    off = make_session(tmp_path, monkeypatch, [])
+    on = make_session(tmp_path, monkeypatch, [name])
+    try:
+        assert not set(tools) & set(off.tools.names())
+        assert set(tools) <= set(on.tools.names())
+        if section:
+            assert section in on._system_prompt() and section not in off._system_prompt()
+    finally:
+        off.close()
+        on.close()
+
+
+def test_the_older_todo_list_setting_turns_on_the_todo_extension(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    config = tmp_path / "config.toml"
+    config.write_text("todo_list = true\n")
+    session = Session(SessionOptions(config_path=config, working_dir=tmp_path / "work"))
+    try:
+        assert [e.name for e in session.extensions] == ["todo"] and "TodoWrite" in session.tools.names()
+    finally:
+        session.close()

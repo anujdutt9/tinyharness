@@ -8,11 +8,7 @@ from tinyharness.tools.base import Tool
 from tinyharness.tools.edit import EditTool
 from tinyharness.tools.glob import GlobTool
 from tinyharness.tools.grep import GrepTool
-from tinyharness.tools.open import OpenTool
-from tinyharness.tools.pdf import PdfTool
 from tinyharness.tools.read import ReadTool
-from tinyharness.tools.todo import TodoWriteTool
-from tinyharness.tools.web import WebFetchTool
 from tinyharness.tools.write import WriteTool
 
 AnyTool = Tool[Any]
@@ -52,17 +48,9 @@ class ToolRegistry:
 
 
 def default_tools() -> list[AnyTool]:
-    return [
-        ReadTool(),
-        WriteTool(),
-        EditTool(),
-        PdfTool(),
-        GlobTool(),
-        GrepTool(),
-        TodoWriteTool(),
-        WebFetchTool(),
-        OpenTool(),
-    ]
+    """The core file tools; Bash is added by the session (it needs the sandbox). Everything
+    else (web, pdf, open, todo, agents) is an extension: tinyharness/extensions/."""
+    return [ReadTool(), WriteTool(), EditTool(), GlobTool(), GrepTool()]
 
 
 def default_registry() -> ToolRegistry:

@@ -70,7 +70,6 @@ from tinyharness.tools.bash import BashTool
 from tinyharness.tools.registry import default_registry
 from tinyharness.tools.skill import SkillTool
 from tinyharness.tools.team import TeamTool
-from tinyharness.tools.web import WebSearchTool
 from tinyharness.trust import TrustStore
 from tinyharness.workspace import Scratch, Workspace
 
@@ -229,7 +228,10 @@ class Session:
         )
         self.extensions: list[Extension] = []
         self.extension_errors: list[LoadError] = []
-        self._load_extensions(self.config.extensions.enabled)
+        enabled = list(self.config.extensions.enabled)
+        if self.config.todo_list and "todo" not in enabled:  # the older setting for the same thing
+            enabled.append("todo")
+        self._load_extensions(enabled)
 
         # One gate for the whole session, so "don't ask again" answers and mode
         # changes (e.g. Shift+Tab in the CLI) carry over from prompt to prompt.
@@ -472,7 +474,6 @@ class Session:
             model_id=self.config.model,
             provider=self.config.provider_info.label,
             extra="\n\n".join(filter(None, [*sections, self.options.extra_system])),
-            todo_list=self.config.todo_list,
         )
 
     # ------------------------------------------------------------------ extensions
@@ -486,9 +487,6 @@ class Session:
             names, self, self.config.extensions.settings(), project=self.project_trusted
         )
         self.tools = default_registry()
-        if not self.config.todo_list:
-            self.tools.remove("TodoWrite")
-        self.tools.register(WebSearchTool(lambda: self.llm))
         if shutil.which("bash") or shutil.which("sh"):
             self.tools.register(BashTool(self.sandbox, self.sandbox_policy))
         for tool in self.options.tools:  # before the Agent tool, so subagents can use them too

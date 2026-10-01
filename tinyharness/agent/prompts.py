@@ -99,11 +99,6 @@ NO_INSTRUCTIONS = (
     "This project has no instructions file (AGENTS.md, AGENT.md or CLAUDE.md); don't look for one."
 )
 
-# Only when the TodoWrite tool is offered (the `todo_list` setting).
-TODO_RULE = """# Planning
-For work with several distinct steps, keep a short plan with TodoWrite; the user sees it.
-Skip it for simple work. The tool's description says how to keep it useful."""
-
 
 def build_system_prompt(
     working_dir: Path,
@@ -113,7 +108,6 @@ def build_system_prompt(
     model_id: str,
     provider: str,
     extra: str = "",
-    todo_list: bool = False,
 ) -> str:
     parts = [
         load_prompt(
@@ -127,8 +121,6 @@ def build_system_prompt(
         )
     ]
     parts.append(environment(working_dir))
-    if todo_list:
-        parts.append(TODO_RULE)
     if context := load_agent_md(working_dir):
         parts.append(f"# User context (AGENT.md)\n\n{context}")
     else:  # say so, or the model goes looking for one

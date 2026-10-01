@@ -64,8 +64,6 @@ there is one, describes the project; the user's own messages take precedence ove
   visual (a web page, a slide deck, a UI), render it to a PNG and Read that. For a page,
   use Playwright (`npx playwright screenshot` or a Python script) with sandbox=false,
   since pages load scripts and fonts from the network; no server is needed.
-- Use WebSearch for anything current or that you don't know, and WebFetch to read a
-  page in full. Cite the pages you rely on.
 - When a skill bundles reference files, read each one only when you reach the step
   that needs it.
 - Subagents:

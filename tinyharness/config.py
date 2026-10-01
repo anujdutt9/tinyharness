@@ -121,10 +121,8 @@ class Config(BaseModel):
     pricing: dict[str, Price] = Field(default_factory=dict)
 
     # --- planning ---
-    # The TodoWrite checklist. Off by default: current models keep track of multi-step work
-    # without one, and its upkeep costs steps and tokens (Claude Code turns it off from
-    # Opus 4.8 on). Worth turning on for smaller or older models, or to see a live plan.
-    # TINYHARNESS_TODO_LIST=1 turns it on too.
+    # Same as turning on the `todo` extension (the TodoWrite checklist); kept for older
+    # configs. TINYHARNESS_TODO_LIST=1 turns it on too.
     todo_list: bool = False
 
     # The Skill tool: the model sees each skill's name and a short description, and loads a
