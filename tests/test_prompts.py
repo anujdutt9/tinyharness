@@ -119,3 +119,12 @@ def test_pages_are_written_the_usual_way(tmp_path):
     prompt = load_prompt("system", **{v: f"<{v}>" for v in PROMPT_VARIABLES["system"]})
     assert "offline" not in prompt and "bundled" not in prompt and "Screenshot" not in prompt
     assert "Playwright" in prompt and "sandbox=false" in prompt
+
+
+def test_the_system_prompt_carries_no_one_demos_instructions():
+    """A business-database Team example, "delegate without being asked", "re-run a
+    subagent's query" and "never do mental math" were in every session's prompt, from
+    one data-analysis demo. They pushed models into costly teams and double work."""
+    prompt = load_prompt("system", **{v: f"<{v}>" for v in PROMPT_VARIABLES["system"]})
+    for phrase in ("without being asked", "customers and", "run the query again", "Mental math"):
+        assert phrase not in prompt

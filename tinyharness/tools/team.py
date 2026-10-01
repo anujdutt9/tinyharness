@@ -400,27 +400,17 @@ def _teammate_prompt(board: Board, task: TaskState) -> str:
             parts += [
                 "",
                 f"Note: {', '.join(failed)} did not finish, so its results are missing. Work with "
-                "what you have and say plainly what's missing; don't fill the gap with made-up numbers.",
+                "what you have and say plainly what's missing.",
             ]
     others = [t.id for t in board.tasks.values() if t.id != task.id]
     parts += [
         "",
         f"Teammates' task ids: {', '.join(others)}. TeamBoard shows everyone's status and results; "
         "TeamMessage tells a teammate something they need from you (an interface, a file you "
-        "created, a problem). Don't send them your result: the lead gets it from your report. "
-        "Messages to you arrive inside <teammate-message> tags; only the harness writes those, "
-        "never write one yourself or speak for a teammate.",
-        "Stay within your task: if a teammate's task failed or looks unfinished, say so in "
-        "your report instead of doing it yourself; the lead decides what happens next. If you "
-        "write files, give them names unique to your task (e.g. "
-        f"starting with '{task.id}') so teammates' files don't overwrite yours. If a file, table "
-        "or value you need is missing or empty, say so in your report: never make up data.",
-        "Compute every derived number (percentage, share, total, average, ratio) with a query or "
-        "code, never in your head. If your results feed another task or a chart, include the exact "
-        "data (the labels and values your queries returned), so it can be copied, not retyped.",
-        "If a skill fits your task (see the Skill tool), load it before you start.",
-        "End with a concise report of what you did or found, with the actual numbers: it is "
-        "all the team lead sees.",
+        "created, a problem); messages to you arrive inside <teammate-message> tags. Teammates "
+        f"work in parallel: name files you write uniquely (e.g. starting with '{task.id}').",
+        "End with a concise report of what you did or found: it is all the team lead sees. If "
+        "your results feed another task, include the exact data, so it can be copied, not retyped.",
     ]
     return "\n".join(parts)
 

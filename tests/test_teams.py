@@ -663,7 +663,7 @@ def test_with_several_subagents_each_shows_only_its_latest_call():
     assert live.count("Grep") == 2 and "Read(" not in live and live.count("4 earlier") == 2
 
 
-async def test_teammates_know_the_request_and_not_to_invent_data(tmp_path):
+async def test_teammates_know_the_request_and_to_name_their_files_uniquely(tmp_path):
     prompts = {}
 
     async def spawner(spec, prompt, ctx, /, *, label, extra_tools, inbox):
@@ -675,7 +675,7 @@ async def test_teammates_know_the_request_and_not_to_invent_data(tmp_path):
     tool = team_tool(spawner)
     await tool.run(tool.parse(plan(("a", "reader", []), ("b", "reader", []))), ctx)
     assert "Why did revenue drop in July?" in prompts["a"]
-    assert "starting with 'a'" in prompts["a"] and "never make up data" in prompts["a"]
+    assert "starting with 'a'" in prompts["a"] and "never make up data" not in prompts["a"]
 
 
 async def test_a_chain_plan_and_a_folder_still_to_be_made_are_accepted(tmp_path):
