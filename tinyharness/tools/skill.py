@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from pydantic import Field
 
@@ -42,9 +43,32 @@ class SkillTool(Tool[SkillInput]):
 
     async def run(self, args: SkillInput, ctx: ToolContext) -> str:
         skill = self.skills.get(args.name)
-        if skill is None:
-            raise ToolError(f"unknown skill: {args.name!r}")
-        return build_skill_prompt(skill, args.args)
+        if skill is not None:
+            return build_skill_prompt(skill, args.args)
+        if guide := self._bundled_guide(args.name):
+            owner, path = guide
+            return (
+                f"# {args.name}: a guide bundled with the skill {owner}, at {path}\n\n"
+                "Instructions for you: carry them out now with your own tools.\n\n"
+                + path.read_text(encoding="utf-8", errors="replace")
+            )
+        names = ", ".join(s.name for s in self.skills.list()) or "none"
+        raise ToolError(f"unknown skill: {args.name!r}. Installed skills: {names}")
+
+    def _bundled_guide(self, name: str) -> tuple[str, Path] | None:
+        """A guide inside an installed skill, asked for by its bare name. Big skills split
+        their procedures into files (`references/discovery-questions.md`) and call them
+        skills too ("invoke `discovery-questions`"); seen live, a model then asked this tool
+        for one and got "unknown skill"."""
+        if not re.fullmatch(r"[\w.-]+", name):
+            return None
+        for skill in self.skills.list():
+            if skill.directory is None:
+                continue
+            for path in sorted(skill.directory.rglob(f"{name}.md")):
+                if path.is_file() and path.name != "SKILL.md":
+                    return skill.name, path
+        return None
 
 
 BRIEF_CHARS = 240  # of each skill's description, in the listing: enough to know when it applies
