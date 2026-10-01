@@ -189,6 +189,14 @@ def cost(repl: Repl, arg: str) -> None:
     rows.add_row("output", f"{total.output:,} tokens [muted](what the model wrote, reasoning included)[/]")
     cached = f" [muted]· {total.cached / sent:.0%} of it cache reads, billed at a fraction[/]" if sent else ""
     rows.add_row("input, all calls", f"{sent:,} tokens{cached}")
+    if (last := meter.last) is not None and (last_in := last.input + last.cached):
+        rows.add_row(
+            "latest call", f"{last.cached / last_in:.0%} of its {last_in:,} input tokens read from the cache"
+        )
+    rows.add_row(
+        "fixed prefix",
+        f"{repl.session.prefix_tokens():,} tokens [muted](system prompt and tools, sent with every call)[/]",
+    )
     if meter.cost is not None:
         note = (
             f" [muted]· {meter.unpriced} call(s) had no price and aren't included[/]"

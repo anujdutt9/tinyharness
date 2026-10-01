@@ -517,6 +517,12 @@ class Session:
     def extension_command(self, name: str) -> ExtCommand | None:
         return next((c for ext in self.extensions for c in ext.commands if c.name == name), None)
 
+    def prefix_tokens(self) -> int:
+        """Tokens sent before the conversation on every request: the system prompt and the
+        tool definitions. The provider caches them, as long as they stay the same."""
+        tools = [t.spec().__dict__ for t in self.tools.available(self.mode)]
+        return count_tokens(self._system_prompt() + json.dumps(tools, default=str))
+
     def extension_tokens(self, ext: Extension) -> int:
         """Tokens this extension adds to every request: its tool schemas and prompt sections."""
         text = json.dumps([t.spec().__dict__ for t in ext.tools], default=str)

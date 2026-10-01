@@ -270,3 +270,33 @@ def test_sandbox_and_extensions_commands_show_config_names_literally(tmp_path, m
         assert "[extensions] enabled" in out
     finally:
         repl.session.close()
+
+
+def test_cost_shows_the_latest_calls_cache_hits_and_the_fixed_prefix(tmp_path, monkeypatch):
+    """Whether the prompt cache is working shows on the latest call, not in a session total."""
+    import io
+
+    from rich.console import Console
+
+    from tinyharness import Session, SessionOptions
+    from tinyharness.cli.commands import COMMANDS
+    from tinyharness.cli.theme import THEME
+    from tinyharness.llm.usage import Usage
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    class Repl:
+        pass
+
+    repl = Repl()
+    repl.session = Session(SessionOptions(working_dir=tmp_path / "w", config_path=tmp_path / "c.toml"))
+    repl.console = Console(file=io.StringIO(), width=200, theme=THEME, color_system=None)
+    try:
+        repl.session.ctx.usage.add(Usage(input=9000, cached=0, output=100))
+        repl.session.ctx.usage.add(Usage(input=200, cached=9000, output=50))
+        COMMANDS["/cost"].handler(repl, "")
+        out = repl.console.file.getvalue()
+        assert "98% of its 9,200 input tokens read from the cache" in out
+        assert "fixed prefix" in out and "system prompt and tools" in out
+    finally:
+        repl.session.close()

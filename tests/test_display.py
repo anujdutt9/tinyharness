@@ -503,7 +503,8 @@ def test_cost_explains_where_the_tokens_went():
     meter.add(Usage(input=3164, cached=0, output=126, cost=0.001))
     meter.add(Usage(input=934, cached=82128, output=1137, cost=0.003))
     console = Console(width=120, record=True, theme=THEME)
-    cost(SimpleNamespace(console=console, session=SimpleNamespace(ctx=SimpleNamespace(usage=meter))), "")
+    session = SimpleNamespace(ctx=SimpleNamespace(usage=meter), prefix_tokens=lambda: 2900)
+    cost(SimpleNamespace(console=console, session=session), "")
     text = console.export_text()
     assert "2 (subagents included)" in text
     assert "83,062 tokens (the most any one call sent)" in text
