@@ -52,6 +52,8 @@ Each was a real failure; each has tests. A change that weakens one needs a reaso
 
 ## Lessons
 <!-- When corrected, add "When X, do Y". Newest first; delete what no longer applies. -->
+- When you add an `except` around a block, check what else is raised inside it: a
+  retry meant for stream errors once caught HTTP 4xx errors too and retried them.
 - When a fix touches the loop, check every `continue` path for a way to loop forever or
   burn the step limit (notes the harness adds count as steps).
 - When a model "keeps failing", read its session log before changing prompts: most
