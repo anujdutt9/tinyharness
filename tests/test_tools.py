@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from conftest import call
@@ -17,7 +19,7 @@ async def test_read_numbers_lines_and_pages(ctx, tmp_path):
     (tmp_path / "f.txt").write_text("\n".join(f"line{i}" for i in range(1, 11)))
     out = await call(ReadTool(), {"path": "f.txt", "offset": 2, "limit": 3}, ctx)
     assert out.splitlines()[0] == "     3\tline3"
-    assert "(5 more lines)" in out
+    assert out.splitlines()[-1] == "... (showing lines 3-5 of 10; continue with offset=5)"
 
 
 async def test_overwrite_requires_read(ctx, tmp_path):
@@ -332,3 +334,52 @@ async def test_glob_skips_dependency_directories_and_explains_absolute_patterns(
     assert "src.py" in out and "node_modules" not in out
     with pytest.raises(ToolError, match="must be relative"):
         await call(GlobTool(), {"pattern": str(tmp_path / "*.py")}, ctx)
+
+
+async def test_read_pages_large_files_by_size_and_says_how_to_continue(ctx, tmp_path):
+    """2000 lines of code is ~26k tokens; the old Read sent it all, and compaction then
+    cut it silently in the middle."""
+    (tmp_path / "big.py").write_text("".join(f"value_{i} = {'x' * 60}\n" for i in range(2000)))
+    out = await call(ReadTool(), {"path": "big.py"}, ctx)
+    assert len(out) <= 52_000
+    last = out.splitlines()[-1]
+    assert last.startswith("... (showing lines 1-") and "of 2000; continue with offset=" in last
+    offset = int(last.rsplit("=", 1)[1].rstrip(")"))
+    nxt = await call(ReadTool(), {"path": "big.py", "offset": offset}, ctx)
+    assert nxt.splitlines()[0].startswith(f"{offset + 1:>6}\t")
+
+
+async def test_read_explains_an_offset_past_the_end_and_splits_lines_like_edit(ctx, tmp_path):
+    (tmp_path / "s.txt").write_text("a\fb\nc\n")
+    out = await call(ReadTool(), {"path": "s.txt"}, ctx)
+    assert out == "     1\ta\fb\n     2\tc"  # a form feed doesn't start a line
+    assert "past the end" in await call(ReadTool(), {"path": "s.txt", "offset": 5}, ctx)
+
+
+async def test_bash_timeout_covers_a_command_that_closed_its_output(ctx, tmp_path):
+    import time
+
+    from tinyharness.sandbox.policy import SandboxPolicy
+    from tinyharness.tools.bash import BashTool
+
+    start = time.monotonic()
+    out = await call(
+        BashTool(None, SandboxPolicy(write_roots=(tmp_path,))),
+        {"command": "exec >out.txt 2>&1; sleep 8", "timeout": 1},
+        ctx,
+    )
+    assert time.monotonic() - start < 4 and "timed out" in out
+
+
+async def test_bash_is_non_interactive_and_keeps_omitted_output(ctx, tmp_path):
+    from tinyharness.sandbox.policy import SandboxPolicy
+    from tinyharness.tools.bash import BashTool
+    from tinyharness.workspace.scratch import Scratch
+
+    ctx.scratch = Scratch(tmp_path, "s1")
+    bash = BashTool(None, SandboxPolicy(write_roots=(tmp_path,)))
+    env = await call(bash, {"command": "echo $PAGER $GIT_PAGER $GIT_TERMINAL_PROMPT"}, ctx)
+    assert env.splitlines()[0] == "cat cat 0"
+    out = await call(bash, {"command": "seq 1 20000"}, ctx)
+    path = out.split("all of it is in ", 1)[1].split(":", 1)[0]
+    assert Path(path).read_text().splitlines()[9999] == "10000"  # the omitted middle is there

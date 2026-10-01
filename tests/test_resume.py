@@ -46,7 +46,7 @@ def contents(session: Session) -> list[tuple[str, str | None]]:
 
 
 async def test_a_resumed_conversation_is_the_same_conversation(work):
-    (work / "notes.txt").write_text("x" * 10_000)  # longer than the audit log keeps
+    (work / "notes.txt").write_text(("x" * 50 + "\n") * 300)  # longer than the audit log keeps
     first = Session(options(work, todo_list=True))
     await turn(first, "read notes", [("Read", '{"path": "notes.txt"}')], "It's all x.")
     await turn(first, "and now?", [("TodoWrite", json.dumps({"todos": [TODO]}))], "Planned.")

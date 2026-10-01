@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import shlex
 import shutil
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,16 @@ from tinyharness.tools.base import Tool, ToolContext, ToolInput
 
 HEAD_BYTES = 15_000  # output kept from the start...
 TAIL_BYTES = 15_000  # ...and from the end
+# Nothing waits for a person: no pagers, colors, terminal UIs or password prompts (the
+# same settings Codex and deepseek-harness use). A command that would ask hangs until it times out.
+NONINTERACTIVE_ENV = {
+    "PAGER": "cat",
+    "GIT_PAGER": "cat",
+    "GH_PAGER": "cat",
+    "NO_COLOR": "1",
+    "TERM": "dumb",
+    "GIT_TERMINAL_PROMPT": "0",
+}
 
 # Commands that only read, so subagents running side by side needn't take turns on them
 # (Tool.writes). Deliberately short: anything else counts as writing.
@@ -124,18 +135,23 @@ class BashTool(Tool[BashInput]):
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=ctx.workspace.root,
-            env={**sanitized_env(), **(self.policy.env if sandboxed else {})},
+            env={**sanitized_env(), **NONINTERACTIVE_ENV, **(self.policy.env if sandboxed else {})},
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,  # its own process group, so we can kill all of it
         )
-        output = _Capture()
+        spill = ctx.scratch.dir / f"bash-{uuid.uuid4().hex[:8]}.log" if ctx.scratch else None
+        output = _Capture(spill)
         timed_out = False
-        try:
+
+        async def finish() -> None:
             assert proc.stdout is not None
-            await asyncio.wait_for(output.drain(proc.stdout), args.timeout)
-            await proc.wait()
+            await output.drain(proc.stdout)
+            await proc.wait()  # inside the timeout: it may have closed its output and kept running
+
+        try:
+            await asyncio.wait_for(finish(), args.timeout)
         except TimeoutError:
             timed_out = True
             await kill_group(proc)
@@ -197,25 +213,46 @@ def default_shell() -> str:
 
 
 class _Capture:
-    """Keeps the first HEAD_BYTES and last TAIL_BYTES of a stream, whatever its size."""
+    """Keeps the first HEAD_BYTES and last TAIL_BYTES of a stream, whatever its size. Once
+    output is dropped, all of it also goes to `spill` (a file in the session's scratch
+    directory), so the model can read the middle instead of running a slow command again."""
 
-    def __init__(self) -> None:
+    def __init__(self, spill: Path | None = None) -> None:
         self.head = bytearray()
         self.tail = bytearray()
         self.dropped = 0
+        self.spill = spill
+        self._file: Any = None
 
     async def drain(self, stream: asyncio.StreamReader) -> None:
-        while chunk := await stream.read(65536):
-            room = HEAD_BYTES - len(self.head)
-            self.head += chunk[:room]
-            self.tail += chunk[room:] if room > 0 else chunk
-            if len(self.tail) > TAIL_BYTES:
-                self.dropped += len(self.tail) - TAIL_BYTES
-                del self.tail[:-TAIL_BYTES]
+        try:
+            while chunk := await stream.read(65536):
+                if self._file is not None:
+                    self._file.write(chunk)
+                room = HEAD_BYTES - len(self.head)
+                self.head += chunk[:room]
+                self.tail += chunk[room:] if room > 0 else chunk
+                if len(self.tail) > TAIL_BYTES:
+                    if self._file is None and self.spill is not None:
+                        try:
+                            self._file = self.spill.open("wb")
+                            self._file.write(self.head + self.tail)  # everything so far
+                        except OSError:
+                            self.spill = None
+                    self.dropped += len(self.tail) - TAIL_BYTES
+                    del self.tail[:-TAIL_BYTES]
+        finally:
+            if self._file is not None:
+                self._file.close()
 
     def text(self) -> str:
         head = self.head.decode("utf-8", errors="replace")
         tail = self.tail.decode("utf-8", errors="replace")
         if self.dropped:
-            return f"{head}\n… ({self.dropped:,} bytes of output omitted) …\n{tail}"
+            where = (
+                f"; all of it is in {self.spill}: Read or Grep that file instead of running the command again"
+                if self._file is not None and self.spill is not None
+                else ""
+            )
+            return f"{head}\n… ({self.dropped:,} bytes of output omitted{where}) …\n{tail}"
         return head + tail

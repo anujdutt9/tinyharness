@@ -86,3 +86,27 @@ def test_the_model_is_told_when_there_is_no_instructions_file(tmp_path):
     assert "no instructions file" in _prompt(tmp_path)
     (tmp_path / "AGENT.md").write_text("Use tabs.")
     assert "no instructions file" not in _prompt(tmp_path)
+
+
+def test_the_prompt_says_which_os_shell_and_git_state_it_runs_in(tmp_path):
+    import platform
+    import subprocess
+
+    from tinyharness.agent.prompts import environment
+
+    assert "not a git repository" in environment(tmp_path)
+    subprocess.run(["git", "init", "-q", "-b", "work"], cwd=tmp_path, check=True)
+    env = environment(tmp_path)
+    assert "on branch `work`" in env and "Shell for Bash:" in env
+    if platform.system() == "Darwin":
+        assert "sed -i ''" in env
+
+
+def test_subagents_get_the_projects_instructions(tmp_path):
+    from conftest import make_ctx
+    from tinyharness.subagents.runner import subagent_system_prompt
+    from tinyharness.subagents.specs import AgentSpec
+
+    (tmp_path / "AGENTS.md").write_text("Run tests with `make test`. Use pnpm, never npm.")
+    prompt = subagent_system_prompt(AgentSpec("worker", "does work"), make_ctx(tmp_path))
+    assert "use pnpm, never npm" in prompt.lower() and str(tmp_path) in prompt

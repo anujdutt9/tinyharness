@@ -50,6 +50,10 @@ def load_image(path: Path) -> Image:
     return Image(media_type, base64.b64encode(data).decode("ascii"), path.name)
 
 
+MAX_BYTES = 50_000  # per Read (~12k tokens): more is shown as pages, with the offset to continue
+MAX_LINE_CHARS = 2_000  # a minified line is cut, so one line can't fill the page
+
+
 class ReadInput(ToolInput):
     path: str = Field(description="Absolute path, or relative to the working directory")
     offset: int = Field(default=0, ge=0, description="0-indexed line to start at")
@@ -78,8 +82,9 @@ class ReadTool(Tool[ReadInput]):
     name = "Read"
     description = (
         "Read a UTF-8 text file, or an image (PNG, JPEG, GIF, WebP), which you then see: a "
-        "screenshot, a chart, a rendered page. Text comes back as numbered lines (`   42\\tcode`). "
-        "Use offset/limit to page through large files."
+        "screenshot, a chart, a rendered page. Text comes back as numbered lines (`    42\\tcode`); "
+        "the numbers aren't part of the file. Up to 2000 lines or 50 KB per call: for more, "
+        "continue with the offset it gives you."
     )
     Input = ReadInput
     read_only = True
@@ -106,12 +111,29 @@ class ReadTool(Tool[ReadInput]):
         if b"\x00" in data[:4096]:  # an archive, a binary: text would be noise in the context
             kind = "a PDF: use the Pdf tool" if path.suffix.lower() == ".pdf" else "not text"
             raise ToolError(f"can't read {path.name}: it's a binary file ({kind})")
-        lines = data.decode("utf-8", errors="replace").splitlines()
+        text = data.decode("utf-8", errors="replace")
+        # Lines as Edit and Grep count them: split at \n only (not at form feeds and the like),
+        # with a Windows \r dropped from the end.
+        lines = [line.removesuffix("\r") for line in text.removesuffix("\n").split("\n")] if text else []
 
         mark_seen(ctx, path)
-        window = lines[args.offset : args.offset + args.limit]
-        if not window:
+        if not lines:
             return "(empty file)"
-        numbered = "\n".join(f"{i:>6}\t{line}" for i, line in enumerate(window, start=args.offset + 1))
-        remaining = len(lines) - args.offset - len(window)
-        return numbered + (f"\n... ({remaining} more lines)" if remaining > 0 else "")
+        if args.offset >= len(lines):
+            return f"(the file has {len(lines)} lines; offset {args.offset} is past the end)"
+        page: list[str] = []
+        size = 0
+        for i, line in enumerate(lines[args.offset : args.offset + args.limit], start=args.offset + 1):
+            if len(line) > MAX_LINE_CHARS:
+                line = f"{line[:MAX_LINE_CHARS]}… [line cut: {len(line) - MAX_LINE_CHARS} more chars]"
+            entry = f"{i:>6}\t{line}"
+            if page and size + len(entry) > MAX_BYTES:
+                break
+            page.append(entry)
+            size += len(entry) + 1
+        end = args.offset + len(page)
+        if end < len(lines):
+            page.append(
+                f"... (showing lines {args.offset + 1}-{end} of {len(lines)}; continue with offset={end})"
+            )
+        return "\n".join(page)

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import datetime
+import platform
+import shutil
+import subprocess
 from pathlib import Path
 
 from tinyharness.assets import ASSETS_DIR
@@ -40,6 +43,39 @@ def load_agent_md(working_dir: Path) -> str:
     return "\n\n---\n\n".join(chunks)
 
 
+def environment(working_dir: Path) -> str:
+    """Facts about the machine a model otherwise guesses wrong: which userland its commands
+    meet (BSD on macOS: `sed -i ''`, no `timeout`), which Python command exists, and whether
+    this is a git repository. Worked out once per session, so the prompt stays cacheable."""
+    lines = ["# Environment"]
+    system = platform.system()
+    if system == "Darwin":
+        lines.append(
+            f"- OS: macOS {platform.mac_ver()[0]}. Commands are the BSD versions: `sed -i ''` takes "
+            "a suffix argument, and there is no GNU `timeout` (the Bash tool's timeout limits a command)."
+        )
+    else:
+        lines.append(f"- OS: {system} {platform.release()}")
+    shell = shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+    lines.append(f"- Shell for Bash: {shell}")
+    if shutil.which("python3") and not shutil.which("python"):
+        lines.append("- Python: run `python3` (there is no `python` command)")
+    branch = _git(working_dir, "branch", "--show-current")
+    if branch is not None:
+        lines.append(f"- Git: the working directory is a repository, on branch `{branch or '(detached)'}`")
+    else:
+        lines.append("- Git: the working directory is not a git repository")
+    return "\n".join(lines)
+
+
+def _git(cwd: Path, *args: str) -> str | None:
+    try:
+        done = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
 NO_INSTRUCTIONS = (
     "This project has no instructions file (AGENTS.md, AGENT.md or CLAUDE.md); don't look for one."
 )
@@ -72,6 +108,7 @@ def build_system_prompt(
             assets_dir=ASSETS_DIR,
         )
     ]
+    parts.append(environment(working_dir))
     if todo_list:
         parts.append(TODO_RULE)
     if context := load_agent_md(working_dir):
