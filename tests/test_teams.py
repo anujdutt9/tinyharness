@@ -817,3 +817,75 @@ async def test_a_subagent_keeps_its_own_record_of_the_files_it_has_read(tmp_path
 
 
 WRITER_EDIT = AgentSpec("editor", "edits", tools=["Read", "Edit"])
+
+
+# ---- result integrity (from tinyharness's own logs) ----
+
+
+async def test_a_reply_to_a_teammates_message_is_not_taken_as_the_report(tmp_path):
+    """Seen live: a teammate got a message, answered it ("waiting for your numbers") and
+    stopped; that answer became its result."""
+    inbox = [['<teammate-message from="b">\nwhat did you find?\n</teammate-message>']]
+    llm = ScriptedLLM(["Waiting for b's numbers.", "Report: SEV1 incidents = 1 (from incidents table)."])
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
+    answer = await run_subagent(
+        AgentSpec("general-purpose", "x"),
+        "count SEV1",
+        ctx=make_ctx(tmp_path),
+        llm=llm,
+        tools=default_registry(),
+        gate=gate,
+        inbox=lambda: inbox.pop() if inbox else [],
+    )
+    assert answer == "Report: SEV1 incidents = 1 (from incidents table)."
+    assert "Write your final report now" in llm.requests[1][-1].content
+
+
+async def test_the_team_board_waits_for_news_instead_of_being_polled(monkeypatch):
+    from tinyharness.tools import team
+    from tinyharness.tools.team import BoardInput, TeamBoardTool
+
+    monkeypatch.setattr(team, "BOARD_WAIT_SECONDS", 5)
+    board = Board(
+        "goal",
+        {
+            "a": TaskState("a", "A", "p", "general-purpose", []),
+            "b": TaskState("b", "B", "p", "general-purpose", []),
+        },
+    )
+    tool = TeamBoardTool(board)
+    await tool.run(BoardInput(), None)  # the first look is immediate
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.2, board.post, "b", "a", "schema is in schema.sql")
+    start = loop.time()
+    seen = await tool.run(BoardInput(), None)  # nothing new: waits until b posts
+    assert 0.15 < loop.time() - start < 2 and "schema is in schema.sql" in seen
+
+
+async def test_a_failed_subagent_hands_back_its_work_so_far(tmp_path):
+    from tinyharness.llm.types import LLMError
+    from tinyharness.subagents.runner import SubagentFailed
+
+    (tmp_path / "data.txt").write_text("42\n")
+
+    class Breaks(ScriptedLLM):
+        async def stream(self, messages, tools=None, **kw):
+            if len(self.requests) >= 1:
+                self.requests.append(messages)
+                raise LLMError("LLM error 502: upstream died")
+            async for chunk in super().stream(messages, tools, **kw):
+                yield chunk
+
+    llm = Breaks([[("Read", '{"path": "data.txt"}')]])
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
+    with pytest.raises(SubagentFailed) as failed:
+        await run_subagent(
+            AgentSpec("general-purpose", "x"),
+            "read it",
+            ctx=make_ctx(tmp_path),
+            llm=llm,
+            tools=default_registry(),
+            gate=gate,
+        )
+    message = str(failed.value)
+    assert "upstream died" in message and "Read(" in message and "transcript" in message

@@ -27,6 +27,7 @@ from tinyharness.events import (
     ToolUse,
 )
 from tinyharness.llm.providers import DEFAULT_CONTEXT
+from tinyharness.llm.types import LLMError
 from tinyharness.subagents.specs import AgentSpec
 
 if TYPE_CHECKING:
@@ -163,7 +164,7 @@ async def run_subagent(
             write_lock=write_lock,
         )
         report("started")
-        # Keep only the text of the final turn: earlier text is narration between tool calls.
+        # Text since the last tool result: what it was saying, if it fails (see SubagentFailed).
         final: list[str] = []
         try:
             async for event in run_agent_loop(task, history, deps):
@@ -188,12 +189,37 @@ async def run_subagent(
         except BaseException as e:
             transcript.write("session_failed", error=f"{type(e).__name__}: {e}"[:500])
             report("failed", type(e).__name__ if not str(e) else str(e).splitlines()[0][:120])
+            if isinstance(e, Exception):  # not a cancellation: its work so far isn't lost
+                raise SubagentFailed(e, "".join(final), [c.summary for c in tool_calls], log) from e
             raise
-        answer = "".join(final).strip()
+        # The answer is its last reply as kept in the history: not every streamed piece since
+        # the last tool call (a reply the harness asked it to redo would be glued on).
+        answer = next(
+            (m.content.strip() for m in reversed(history.messages) if m.role == "assistant" and m.content),
+            "",
+        )
         transcript.write("session_end", final=answer[:2000])
         report("done", f"{used} tool call{'s' if used != 1 else ''}")
 
     return answer or "(subagent finished without a summary)"
+
+
+class SubagentFailed(LLMError):
+    """A subagent stopped before finishing (stuck, a provider error). The message carries
+    what it had done and said by then, so the caller can use the partial work or decide
+    what to do instead of starting over blind."""
+
+    def __init__(self, error: Exception, text: str, calls: list[str], log: str) -> None:
+        parts = [f"{type(error).__name__}: {error}"]
+        if calls:
+            shown = calls[-8:]
+            more = f" (the last {len(shown)} of {len(calls)})" if len(calls) > len(shown) else ""
+            parts.append(f"Before it stopped it had made these tool calls{more}: " + "; ".join(shown))
+        if text.strip():
+            parts.append(f"Its last words: {text.strip()[-1500:]}")
+        parts.append(f"Its full transcript: {log}")
+        super().__init__("\n".join(parts))
+        self.error = error
 
 
 def subagent_system_prompt(spec: AgentSpec, ctx: ToolContext) -> str:

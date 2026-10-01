@@ -16,6 +16,7 @@ skipped only if none of them finished. The lead gets one report with every resul
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
 MAX_TASKS = 12
 MAX_PARALLEL = 4
 MAX_ATTEMPTS = 2  # a teammate that fails (stuck, a provider error) is started once more
+BOARD_WAIT_SECONDS = 60  # TeamBoard with nothing new waits this long for news
 RESULT_CHARS_IN_PROMPT = 4_000  # a dependency's result, as passed to the next teammate
 RESULT_CHARS_IN_REPORT = 6_000  # each result, in the report for the lead
 REQUEST_CHARS_IN_PROMPT = 2_000  # the user's request, as context for each teammate
@@ -81,11 +83,25 @@ class Board:
     inboxes: dict[str, list[str]] = field(default_factory=dict)
     request: str = ""  # the user's message that led to the team, for context
     context: str = ""  # the lead's shared brief, the same for every teammate
+    version: int = 0  # goes up whenever a task ends or a message is posted
+    _changed: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def bump(self) -> None:
+        self.version += 1
+        self._changed.set()
+        self._changed = asyncio.Event()
+
+    async def wait_for_news(self, seen: int, timeout: float) -> None:
+        """Return once the board changes after version `seen`, or after `timeout`."""
+        if self.version == seen:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._changed.wait(), timeout)
 
     def post(self, sender: str, to: str, text: str) -> str:
         if to != "all" and to not in self.tasks:
             raise ToolError(f"no task {to!r}; send to a task id ({', '.join(self.tasks)}) or 'all'")
         self.messages.append((sender, to, text))
+        self.bump()
         note = teammate_message(sender, text)
         recipients = [t for t in self.tasks if t != sender] if to == "all" else [to]
         delivered = []
@@ -132,12 +148,21 @@ class TeamBoardTool(Tool[BoardInput]):
     Input = BoardInput
     read_only = True
     needs_permission = False
-    description = "See the team's goal, every task's status and result so far, and the team's messages."
+    description = (
+        "See the team's goal, every task's status and result so far, and the team's messages. "
+        "If nothing changed since you last looked, it waits up to a minute for news. Don't wait "
+        "on a teammate's result: if your task needed it, it would depend on theirs. Report what's missing instead."
+    )
 
     def __init__(self, board: Board) -> None:
         self.board = board
+        self.seen = -1  # the board version this teammate last saw
 
     async def run(self, args: BoardInput, ctx: ToolContext) -> str:
+        # Each look costs a model call: looking again with nothing new waits for news
+        # instead (seen live: 11 looks in a row).
+        await self.board.wait_for_news(self.seen, BOARD_WAIT_SECONDS)
+        self.seen = self.board.version
         return self.board.render()
 
 
@@ -376,6 +401,7 @@ async def run_team(
                     continue  # just skipped something; look again
                 return
             finished, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+            board.bump()
             for job in finished:
                 task = running.pop(job)
                 if (error := job.exception()) is None:

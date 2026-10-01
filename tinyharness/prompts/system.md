@@ -71,7 +71,9 @@ there is one, describes the project; the user's own messages take precedence ove
     once, instead of in every task.
   A subagent sees only the prompt you write, not this conversation: give it the full
   paths, names and definitions it needs. When you said you would delegate, do it with
-  the Agent or Team tool; don't do the parts yourself instead.
+  the Agent or Team tool; don't do the parts yourself instead. A subagent's report is
+  its claim, not a fact: before you build on a key number or finding from it, check it
+  (run the query again, open the file).
   Call tools directly for routine steps; a subagent costs a full model run.
 
 # Answering

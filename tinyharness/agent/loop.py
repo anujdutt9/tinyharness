@@ -119,6 +119,14 @@ UNVERIFIED_NOTE = (
 _NOT_CODE = (".md", ".txt", ".rst", ".csv", ".log")
 _CHECKS = frozenset({"Bash", "Screenshot"})  # tools that can verify a change
 MAX_STOP_BLOCKS = 2  # a Stop hook can keep a turn going this many times
+# A teammate's answer is its last reply. When that reply came right after a teammate's
+# message, it's usually an answer to the message ("waiting for your numbers"), not the
+# report the lead needs (seen live: placeholders and invented numbers as "results").
+REPORT_NOTE = (
+    "[tinyharness] That reply ends your task, and your last reply is all the lead sees. "
+    "Write your final report now: what you did and found, with the actual results. Don't "
+    "wait for teammates; say what's missing instead."
+)
 TEAMMATE_NOTE = "<teammate-message"  # how the team board delivers a teammate's message
 # Sent when a reply contains a made-up teammate message: models copy the framing they see
 # and "report" other teammates' (invented) numbers, which the lead then trusts.
@@ -187,11 +195,12 @@ async def run_agent_loop(
     empty_replies = 0  # empty replies in a row
     failures = _Failures()
     unverified: list[str] = []  # code files changed since the last command that could check them
-    asked_to_verify = False
+    asked_to_verify = asked_for_report = False
     stop_blocks = 0
     for _ in range(deps.max_steps):
         # Messages from teammates arrive between steps, as a user message.
-        for note in deps.inbox() if deps.inbox is not None else []:
+        delivered = deps.inbox() if deps.inbox is not None else []
+        for note in delivered:
             deps.transcript.write("user", text=note)
             history.append(Message(role="user", content=note))
             yield MessageDelivered(note)
@@ -301,6 +310,11 @@ async def run_agent_loop(
             history.append(Message(role="user", content=CUT_OFF_NOTE))
             continue
         if not calls:
+            if delivered and not asked_for_report:
+                asked_for_report = True
+                deps.transcript.write("user", text=REPORT_NOTE)
+                history.append(Message(role="user", content=REPORT_NOTE))
+                continue
             if unverified and not asked_to_verify and _CHECKS & set(available):
                 asked_to_verify = True
                 note = UNVERIFIED_NOTE.format(files=", ".join(unverified[:5]))
