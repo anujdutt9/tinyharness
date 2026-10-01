@@ -77,26 +77,3 @@ BRIEF_CHARS = 240  # of each skill's description, in the listing: enough to know
 def _brief(description: str) -> str:
     text = " ".join(description.split())
     return text if len(text) <= BRIEF_CHARS else text[: BRIEF_CHARS - 1].rsplit(" ", 1)[0] + "…"
-
-
-def skills_named_in(text: str, skills: SkillRegistry) -> list[str]:
-    """Installed skills the user named in their message, by exact name ("use the
-    claude-design-skill for the report"). Short or common names (under 4 characters)
-    don't count: too easy to match by accident."""
-    return [
-        s.name
-        for s in skills.list()
-        if len(s.name) >= 4 and re.search(rf"(?<![\w-]){re.escape(s.name)}(?![\w-])", text, re.IGNORECASE)
-    ]
-
-
-def skill_request_note(names: list[str]) -> str:
-    """Added to a message that names skills: the user's request, made explicit. (Seen live:
-    a model read "use the claude-design-skill for the report", judged from the skill's
-    one-line description that it was for mockups, and wrote the page without it.)"""
-    listed = ", ".join(f"`{n}`" for n in names)
-    return (
-        f"[tinyharness] The user asked for the skill {listed}. Using it is part of the task, not a "
-        "suggestion: load it with the Skill tool before that part of the work and follow it. If a "
-        "subagent or teammate does that part, tell it in its brief to load the skill first."
-    )

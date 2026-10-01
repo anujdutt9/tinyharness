@@ -257,13 +257,16 @@ def test_skills_are_offered_to_the_model_by_default(tmp_path, monkeypatch):
         off.close()
 
 
-def test_a_skill_the_user_names_becomes_an_explicit_instruction():
-    from tinyharness.skills import Skill, SkillRegistry
-    from tinyharness.tools.skill import skill_request_note, skills_named_in
+async def test_a_prompt_naming_a_skill_is_sent_as_typed(session):
+    """A note telling the model to load any skill the user named was appended to every
+    such prompt, even "don't use the claude-design-skill". The system prompt already says
+    a skill the user asks for isn't optional."""
+    from conftest import ScriptedLLM
+    from tinyharness.skills import Skill
 
-    skills = SkillRegistry([Skill("claude-design-skill", "Design.", "..."), Skill("pdf", "PDFs.", "...")])
-    assert skills_named_in("Use the claude-design-skill for report.html", skills) == ["claude-design-skill"]
-    assert skills_named_in("export a pdf of it", skills) == []  # short names don't trigger
-    assert skills_named_in("my-claude-design-skill-v2 is different", skills) == []  # whole names only
-    note = skill_request_note(["claude-design-skill"])
-    assert "not a suggestion" in note and "tell it in its brief" in note
+    session.skills.add(Skill("claude-design-skill", "Design.", "..."))
+    session.llm.stream = ScriptedLLM(["ok"]).stream
+    prompt = "Don't use the claude-design-skill for this one."
+    [e async for e in session.run(prompt)]
+    assert [m.content for m in session.history.messages if m.role == "user"] == [prompt]
+    assert "a skill, tool or approach they name isn't optional" in session.history.messages[0].content

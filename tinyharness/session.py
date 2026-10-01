@@ -65,7 +65,7 @@ from tinyharness.tools.agent import AgentTool
 from tinyharness.tools.base import Tool, ToolContext, ToolError, file_version
 from tinyharness.tools.bash import BashTool
 from tinyharness.tools.registry import default_registry
-from tinyharness.tools.skill import SkillTool, skill_request_note, skills_named_in
+from tinyharness.tools.skill import SkillTool
 from tinyharness.tools.team import TeamTool
 from tinyharness.tools.web import WebSearchTool
 from tinyharness.trust import TrustStore
@@ -589,8 +589,6 @@ class Session:
         if not self.history.messages:
             self.history.append(Message(role="system", content=self._system_prompt()))
         self.ctx.request = prompt
-        if self.config.skill_tool and (asked := skills_named_in(prompt, self.skills)):
-            prompt += "\n\n" + skill_request_note(asked)
         if self._resume_note:  # tell the model once what changed while the session was away
             prompt = f"<session-resumed>\n{self._resume_note}\n</session-resumed>\n\n{prompt}"
             self._resume_note = ""
