@@ -118,6 +118,7 @@ UNVERIFIED_NOTE = (
     "there is something, and fix what fails. If nothing can check it, say so in your answer."
 )
 _NOT_CODE = (".md", ".txt", ".rst", ".csv", ".log")
+_PAGES = (".html", ".htm", ".svg")  # checked by looking at them (Screenshot)
 _CHECKS = frozenset({"Bash", "Screenshot"})  # tools that can verify a change
 MAX_STOP_BLOCKS = 2  # a Stop hook can keep a turn going this many times
 # A teammate's answer is its last reply. When that reply came right after a teammate's
@@ -325,6 +326,8 @@ async def run_agent_loop(
             if unverified and not asked_to_verify and _CHECKS & set(available):
                 asked_to_verify = True
                 note = UNVERIFIED_NOTE.format(files=", ".join(unverified[:5]))
+                if any(path.lower().endswith(_PAGES) for path in unverified):
+                    note += " For a page, take a Screenshot of it and look at the result: are the charts drawn, is anything empty or broken?"
                 deps.transcript.write("user", text=note)
                 history.append(Message(role="user", content=note))
                 continue
@@ -767,9 +770,13 @@ async def _fire_hook(deps: LoopDeps, event: str, payload: dict[str, Any]) -> dic
 
 
 def _track_changes(unverified: list[str], tool: str, args: Any) -> None:
-    """Keep `unverified` as the code files changed since the last command that could check them."""
-    if tool in _CHECKS:
+    """Keep `unverified` as the code files changed since the last command that could check them.
+    A page counts as checked only once it's been looked at: running it as a script, or a
+    server that can't start, says nothing about what it shows (seen live: empty charts)."""
+    if tool == "Screenshot":
         unverified.clear()
+    elif tool in _CHECKS:
+        unverified[:] = [path for path in unverified if path.lower().endswith(_PAGES)]
     elif tool in ("Edit", "Write"):
         path = str(getattr(args, "path", ""))
         if path and not path.lower().endswith(_NOT_CODE) and path not in unverified:

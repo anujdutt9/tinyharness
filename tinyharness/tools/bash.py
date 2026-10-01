@@ -14,6 +14,7 @@ ask to skip the sandbox (sandbox=false) for one command, which asks the user eve
 from __future__ import annotations
 
 import asyncio
+import re
 import shlex
 import shutil
 import uuid
@@ -39,6 +40,11 @@ NONINTERACTIVE_ENV = {
     "TERM": "dumb",
     "GIT_TERMINAL_PROMPT": "0",
 }
+
+# Commands that start a web server or talk to one on this machine (blocked by the sandbox).
+_SERVER = re.compile(
+    r"http\.server|\blocalhost\b|127\.0\.0\.1|\b(uvicorn|flask run|npm run (dev|start)|npx serve)\b"
+)
 
 # Commands that only read, so subagents running side by side needn't take turns on them
 # (Tool.writes). Deliberately short: anything else counts as writing.
@@ -168,6 +174,11 @@ class BashTool(Tool[BashInput]):
             text += (
                 "\n(note: macOS apps, including browsers, can't run in the sandbox. To look "
                 "at a page, use the Screenshot tool; otherwise run this command with sandbox=false)"
+            )
+        elif sandboxed and code and _SERVER.search(args.command):
+            text += (
+                "\n(note: servers can't run in the sandbox: it has no network, not even localhost. "
+                "To look at an HTML page, use the Screenshot tool on the file; no server is needed)"
             )
         elif sandboxed and "Operation not permitted" in text:
             text += (

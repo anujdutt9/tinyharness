@@ -8,7 +8,7 @@ from tinyharness.subagents import builtin_agents
 
 # Every prompt file and the variables its caller provides.
 PROMPT_VARIABLES = {
-    "system": {"working_dir", "scratch_dir", "model_name", "model_id", "provider", "date", "assets_dir"},
+    "system": {"working_dir", "scratch_dir", "model_name", "model_id", "provider", "date"},
     "compaction": set(),
     "classifier": set(),
 }

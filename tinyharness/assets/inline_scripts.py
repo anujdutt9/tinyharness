@@ -23,6 +23,14 @@ _CHART_CDN = re.compile(
 )
 
 
+_CHART_FILE = re.compile(r"(^|/)chart(\.umd)?(\.min)?\.js$", re.IGNORECASE)
+
+
+def wants_chart_js(html: str) -> bool:
+    """Whether a page links Chart.js (the bundled name, or a CDN copy)."""
+    return any(_CHART_FILE.search(m.group(3)) or _CHART_CDN.match(m.group(3)) for m in _SCRIPT.finditer(html))
+
+
 def inline(html: str, base: Path) -> tuple[str, list[str], list[str]]:
     """The page with local scripts inlined; which sources were inlined; which were left."""
     done: list[str] = []
@@ -30,7 +38,7 @@ def inline(html: str, base: Path) -> tuple[str, list[str], list[str]]:
 
     def replace(match: re.Match[str]) -> str:
         before, src, after = match.group(1), match.group(3), match.group(4)
-        if _CHART_CDN.match(src):
+        if _CHART_CDN.match(src) or (_CHART_FILE.search(src) and not (base / src).is_file()):
             path = BUNDLED_CHART_JS
         elif re.match(r"^[a-z][a-z0-9+.-]*:|^//", src, re.IGNORECASE):
             left.append(src)  # some other remote script: leave it to the author

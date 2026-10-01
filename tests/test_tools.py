@@ -413,3 +413,28 @@ async def test_read_caps_a_page_by_bytes(ctx, tmp_path):
     (tmp_path / "u.txt").write_text(("é" * 100 + "\n") * 2000)
     out = await call(ReadTool(), {"path": "u.txt"}, ctx)
     assert len(out.encode()) <= 52_000
+
+
+async def test_a_page_that_links_chart_js_gets_it_embedded_on_write(ctx, tmp_path):
+    """Seen live: a model wrote the <script src="chart.umd.min.js"> tag, skipped the step
+    that inlines it, and every chart in the report was empty."""
+    page = '<html><head><script src="chart.umd.min.js"></script></head><body><canvas id="c"></canvas></body></html>'
+    out = await call(WriteTool(), {"path": "report.html", "content": page}, ctx)
+    html = (tmp_path / "report.html").read_text()
+    assert "Chart.js embedded" in out
+    assert 'src="chart.umd.min.js"' not in html and "Chart" in html and len(html) > 100_000
+
+
+async def test_a_server_in_the_sandbox_points_to_screenshot(ctx, tmp_path):
+    from tinyharness.sandbox.policy import SandboxPolicy
+    from tinyharness.tools.bash import BashInput, BashTool
+
+    tool = BashTool(object(), SandboxPolicy(write_roots=(tmp_path,)))  # a sandbox is present
+    text = tool._report(
+        "Couldn't connect to server",
+        7,
+        False,
+        BashInput(command="curl -I http://localhost:8000/r.html"),
+        True,
+    )
+    assert "use the Screenshot tool" in text and text.endswith("(exit code 7)")

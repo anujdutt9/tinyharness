@@ -8,7 +8,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from tinyharness.assets import ASSETS_DIR
 from tinyharness.paths import home_dir, project_dir
 from tinyharness.prompts import load_prompt
 
@@ -125,7 +124,6 @@ def build_system_prompt(
             model_id=model_id,
             provider=provider,
             date=datetime.date.today().isoformat(),
-            assets_dir=ASSETS_DIR,
         )
     ]
     parts.append(environment(working_dir))

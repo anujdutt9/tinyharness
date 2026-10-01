@@ -173,6 +173,17 @@ First release.
 - A call allowed without asking says by what, on its own line under it:
   `⎿ auto mode · read-only query in the project`, `⎿ allow rule`, `⎿ hook`.
 
+### Reports and pages
+- A page written with `<script src="chart.umd.min.js">` gets the bundled Chart.js
+  embedded by Write itself, in one step. The agent used to have to run an inliner
+  afterwards; a model that skipped it produced a report with every chart empty.
+- A changed HTML page counts as checked only once it's been looked at with Screenshot
+  (running it as a script doesn't count), and the reminder says what to look for.
+- A web server or localhost request that fails in the sandbox explains that the sandbox
+  has no network and points to Screenshot for looking at a page.
+- The system prompt gives the typical Team case: a full analysis of a database, dataset
+  or codebase across several areas, one teammate per area.
+
 ### Project instructions
 - AGENTS.md (and AGENT.md, CLAUDE.md) are read from the repository's root down to the
   folder tinyharness runs in, as Codex does: launching in `src/` still gets the repo's
