@@ -241,3 +241,32 @@ async def test_a_run_without_a_terminal_denies_approvals_instead_of_prompting(mo
     )  # fmt: skip
     await app.run(args, Console(file=io.StringIO()))
     assert seen == {"callback": None, "interactive": False}
+
+
+def test_sandbox_and_extensions_commands_show_config_names_literally(tmp_path, monkeypatch):
+    """`[sandbox]` in a Rich string is markup and vanished from the hint."""
+    import io
+
+    from rich.console import Console
+
+    from tinyharness import Session, SessionOptions
+    from tinyharness.cli.commands import COMMANDS
+    from tinyharness.cli.theme import THEME
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    class Repl:
+        pass
+
+    repl = Repl()
+    repl.session = Session(SessionOptions(working_dir=tmp_path / "w", config_path=tmp_path / "c.toml"))
+    repl.console = Console(file=io.StringIO(), width=200, theme=THEME, color_system=None)
+    try:
+        COMMANDS["/sandbox"].handler(repl, "")
+        COMMANDS["/extensions"].handler(repl, "on todo")
+        out = repl.console.file.getvalue()
+        if repl.session.sandbox is not None:
+            assert "[sandbox] allow_hosts" in out and "pypi.org" in out
+        assert "[extensions] enabled" in out
+    finally:
+        repl.session.close()

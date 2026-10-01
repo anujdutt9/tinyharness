@@ -118,7 +118,7 @@ def test_pages_are_written_the_usual_way(tmp_path):
     as everywhere else, and are checked with Playwright outside the sandbox."""
     prompt = load_prompt("system", **{v: f"<{v}>" for v in PROMPT_VARIABLES["system"]})
     assert "offline" not in prompt and "bundled" not in prompt and "Screenshot" not in prompt
-    assert "Playwright" in prompt and "sandbox=false" in prompt
+    assert "playwright screenshot --proxy-server" in prompt
 
 
 def test_the_system_prompt_carries_no_one_demos_instructions():

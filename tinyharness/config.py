@@ -42,6 +42,7 @@ from tinyharness.llm.types import Effort
 from tinyharness.llm.usage import Price
 from tinyharness.paths import auth_path, default_config_path, home_dir, legacy_config_dir, source_checkout
 from tinyharness.permissions.modes import PermissionMode
+from tinyharness.sandbox.proxy import DEFAULT_ALLOWED_HOSTS
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +64,10 @@ class SandboxSettings(BaseModel):
     enabled: bool = True  # False: commands run unsandboxed, and every one asks first
     allow_write: list[Path] = Field(default_factory=list)  # more writable dirs, e.g. a second repo
     allow_localhost: bool = False  # let commands use loopback (tests that start a local server)
+    # Hosts commands may reach from inside the sandbox, through a local proxy: package
+    # registries, GitHub and script CDNs by default. `*.example.com` covers subdomains.
+    # [] turns the network off entirely. Anything else needs sandbox=false (it asks).
+    allow_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))
 
 
 class ExtensionSettings(BaseModel):

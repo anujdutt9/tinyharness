@@ -23,8 +23,9 @@ is denied, don't retry it or work around it: adjust, or ask. Commands run in a s
 
 # Pages and images
 Read shows you images (PNG, JPEG, GIF, WebP). To check a page or UI, render it to a PNG
-with Playwright (`npx playwright screenshot`, with sandbox=false, since pages load from
-the network) and Read it.
+and Read it: `npx -y playwright screenshot --proxy-server "$HTTPS_PROXY" page.html out.png`
+works in the sandbox (the flag lets the browser load allowed CDNs; without a proxy, use
+sandbox=false).
 
 # Harness notes
 `<session-resumed>` lists what changed while the session was away: trust it over memory.

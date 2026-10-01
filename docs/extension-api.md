@@ -208,6 +208,9 @@ on (`subagents/runner.py` today), and anyone else can build their own orchestrat
 NEEDS = ["network:api.github.com", "write:~/notes"]
 ```
 
+(`NEEDS` is read and shown today; consent and enforcement come next, on top of the
+sandbox proxy.)
+
 - **Consent.** The first time an extension with `NEEDS` is loaded, you're shown the list
   once and asked to allow it. The answer is stored with a fingerprint of the file, as
   folder trust is, so a changed extension asks again.

@@ -17,6 +17,7 @@ import asyncio
 import shlex
 import shutil
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from pydantic import Field, ValidationError
 
 from tinyharness.process import kill_group
 from tinyharness.sandbox import Sandbox, SandboxPolicy
+from tinyharness.sandbox.proxy import AllowlistProxy
 from tinyharness.security import sanitized_env
 from tinyharness.tools.base import Tool, ToolContext, ToolInput
 
@@ -68,14 +70,27 @@ class BashTool(Tool[BashInput]):
     name = "Bash"
     Input = BashInput
 
-    def __init__(self, sandbox: Sandbox | None, policy: SandboxPolicy, shell: str | None = None) -> None:
+    def __init__(
+        self,
+        sandbox: Sandbox | None,
+        policy: SandboxPolicy,
+        shell: str | None = None,
+        proxy: AllowlistProxy | None = None,
+    ) -> None:
         self.sandbox = sandbox
         self.policy = policy
         self.shell = shell or default_shell()
+        self.proxy = proxy if sandbox is not None else None
+        network = (
+            "network only to package registries (PyPI, npm), GitHub and common CDNs, through a "
+            "proxy (/sandbox lists them)"
+            if self.proxy
+            else "no network access"
+        )
         limits = (
             "It runs in a sandbox: it can write only inside the working directory, scratch and temp "
-            "directories, can't read credential files, and has no network access"
-            + (" (except localhost)" if policy.allow_localhost else "")
+            f"directories, can't read credential files, and has {network}"
+            + (" (and localhost)" if policy.allow_localhost else "")
             + ". API key variables are stripped, and apps (`open`, browsers like Chrome.app) can't "
             "start. A command that needs any of these (a download, an API call, a browser, a "
             "write elsewhere) needs sandbox=false: the user approves each such command."
@@ -123,13 +138,18 @@ class BashTool(Tool[BashInput]):
     async def run(self, args: BashInput, ctx: ToolContext) -> str:
         argv = [self.shell, "-c", args.command]
         sandboxed = self.sandbox is not None and args.sandbox
+        policy, denied_before = self.policy, 0
+        if sandboxed and self.proxy is not None:
+            port = await self.proxy.start()
+            policy = replace(policy, proxy_port=port, env={**policy.env, **self.proxy.env()})
+            denied_before = len(self.proxy.denied)
         if sandboxed:
             assert self.sandbox is not None
-            argv = self.sandbox.wrap(argv, self.policy)
+            argv = self.sandbox.wrap(argv, policy)
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=ctx.workspace.root,
-            env={**sanitized_env(), **NONINTERACTIVE_ENV, **(self.policy.env if sandboxed else {})},
+            env={**sanitized_env(), **NONINTERACTIVE_ENV, **(policy.env if sandboxed else {})},
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -152,10 +172,24 @@ class BashTool(Tool[BashInput]):
         except BaseException:  # Ctrl-C: don't leave the command running
             await kill_group(proc)
             raise
-        return self._report(output.text(), proc.returncode, timed_out, args, sandboxed)
+        blocked = list(dict.fromkeys(self.proxy.denied[denied_before:])) if sandboxed and self.proxy else []
+        return self._report(output.text(), proc.returncode, timed_out, args, sandboxed, blocked)
 
-    def _report(self, text: str, code: int | None, timed_out: bool, args: BashInput, sandboxed: bool) -> str:
+    def _report(
+        self,
+        text: str,
+        code: int | None,
+        timed_out: bool,
+        args: BashInput,
+        sandboxed: bool,
+        blocked: list[str] | None = None,
+    ) -> str:
         text = text.rstrip() or "(no output)"
+        if blocked:
+            text += (
+                f"\n(note: the sandbox blocked {', '.join(blocked[:5])}: not in the allowed hosts. "
+                "Run the command with sandbox=false if it needs them.)"
+            )
         # Sandbox failures don't say "sandbox": a blocked write says "Operation not permitted",
         # and a macOS app (which needs LaunchServices) dies with "Abort trap: 6".
         if sandboxed and ("Operation not permitted" in text or (code and ".app/" in args.command)):

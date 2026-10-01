@@ -61,6 +61,7 @@ from tinyharness.permissions import (
 from tinyharness.permissions.classifier import AutoModeClassifier
 from tinyharness.plugins import load_plugins
 from tinyharness.sandbox import Sandbox, SandboxPolicy, detect_sandbox
+from tinyharness.sandbox.proxy import AllowlistProxy
 from tinyharness.skills import SkillRegistry, build_skill_prompt, load_skills, skills_section
 from tinyharness.subagents import AgentSpec, load_agents
 from tinyharness.subagents.runner import run_subagent
@@ -225,6 +226,8 @@ class Session:
             extra_write=self.config.sandbox.allow_write,
             allow_localhost=self.config.sandbox.allow_localhost,
         )
+        hosts = self.config.sandbox.allow_hosts
+        self.proxy = AllowlistProxy(tuple(hosts)) if self.sandbox is not None and hosts else None
         self.extensions: list[Extension] = []
         self.extension_errors: list[LoadError] = []
         enabled = list(self.config.extensions.enabled)
@@ -483,7 +486,7 @@ class Session:
         )
         self.tools = default_registry()
         if shutil.which("bash") or shutil.which("sh"):
-            self.tools.register(BashTool(self.sandbox, self.sandbox_policy))
+            self.tools.register(BashTool(self.sandbox, self.sandbox_policy, proxy=self.proxy))
         for tool in self.options.tools:  # before the Agent tool, so subagents can use them too
             self.tools.register(tool)
         for ext in self.extensions:
@@ -704,6 +707,8 @@ class Session:
             yield event
 
     def close(self) -> None:
+        if self.proxy is not None:
+            self.proxy.close()
         self.transcript.close()
         self.scratch.cleanup()
 

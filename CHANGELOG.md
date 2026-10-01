@@ -198,6 +198,16 @@ First release.
   built the way a user would, awkward cases included; no unasked-for dependencies or
   renames; and give each subagent one job with a clear done condition.
 
+### Sandbox network
+- Sandboxed commands can reach an allowlist of hosts through a small local proxy
+  (`sandbox/proxy.py`): PyPI, npm, GitHub, the common script and font CDNs, and
+  Playwright's browser downloads. `pip install`, `npm`, `git clone` and a page that loads
+  Chart.js from a CDN (rendered with `npx playwright screenshot --proxy-server
+  "$HTTPS_PROXY"`) work without asking. Seatbelt lets commands connect only to the
+  proxy; other hosts get a 403, and the command's output names the blocked host. Change
+  the list with `[sandbox] allow_hosts`; `[]` turns the network off. `/sandbox` shows
+  what commands can write, read and reach.
+
 ### Extensions
 - Extensions: one Python file with `setup(th)` adds tools (from an async function's
   signature and docstring), prompt sections, slash commands, and handlers for

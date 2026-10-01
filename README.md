@@ -101,7 +101,7 @@ hooks, skills, and subagents on different models.
 | **Tools** | Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash`. Built-in extensions you turn on: `web` (WebSearch, WebFetch), `pdf`, `open`, `todo`, `agents` (Agent, Team) |
 | **Extensions** | One Python file with `setup(th)` adds tools, prompt sections, slash commands and event handlers ([docs/extension-api.md](docs/extension-api.md)); `/extensions on|off` |
 | **Permissions** | Reads never ask, edits ask with a diff; modes `default`, `acceptEdits`, `plan`, `auto` (an LLM classifier) and `bypassPermissions`; persistent allow/deny rules |
-| **Sandbox** | Seatbelt on macOS: commands write only inside the project, can't read credential files, have no network |
+| **Sandbox** | Seatbelt on macOS: commands write only inside the project, can't read credential files, and reach only an allowlist of hosts (package registries, GitHub, CDNs) through a local proxy; `/sandbox` shows it |
 | **Context** | Cap oversized messages, stub old tool output, then summarize, without rebuilding the prompt cache every turn |
 | **Subagents and teams** | Isolated contexts on any model; `Team` runs a dependency graph of tasks, up to 4 teammates at once |
 | **Skills, hooks, plugins** | `SKILL.md` skills (compatible with Claude Code's), shell or Python hooks on 5 events, plugins that bundle them |

@@ -35,6 +35,7 @@ from tinyharness.cli.theme import (
 )
 from tinyharness.cli.widgets import ask, pick
 from tinyharness.config import RECENT_MODELS, forget_model, recent_models, remember_model, save_theme
+from tinyharness.paths import pretty_path
 from tinyharness.permissions import PermissionMode
 from tinyharness.security import redact
 from tinyharness.session import MissingAPIKeyError
@@ -519,6 +520,29 @@ def tools(repl: Repl, arg: str) -> None:
     repl.console.print(table)
 
 
+@command("/sandbox", "what sandboxed commands can write, read and reach", group="Tools & skills")
+def sandbox(repl: Repl, arg: str) -> None:
+    session = repl.session
+    if session.sandbox is None:
+        repl.console.print("  [warn]No sandbox[/] [muted]· every command asks before it runs[/]")
+        return
+    policy = session.sandbox_policy
+    table = _grid(12)
+    table.add_row("  [bold default]writes[/]", ", ".join(pretty_path(p) for p in policy.write_roots[:4]))
+    table.add_row("  [bold default]reads[/]", "anything except credential files (.env, keys, auth.json)")
+    network = ", ".join(session.proxy.allowed) if session.proxy is not None else "none"
+    table.add_row("  [bold default]network[/]", network)
+    repl.console.print(table)
+    repl.console.print(
+        "  [muted]Anything else asks first (sandbox=false). Change the hosts with \\[sandbox] "
+        "allow_hosts in config.toml.[/]"
+    )
+    if session.proxy is not None and session.proxy.denied:
+        repl.console.print(
+            f"  [muted]Blocked this session:[/] {', '.join(dict.fromkeys(session.proxy.denied))}"
+        )
+
+
 @command(
     "/extensions", "list extensions, or turn one on or off", group="Tools & skills", usage="[on|off name]"
 )
@@ -540,7 +564,7 @@ def extensions(repl: Repl, arg: str) -> None:
         _ok(
             repl,
             f"{name} turned {action} for this session [muted]· the next request rebuilds the "
-            f"prompt cache once. To keep it, list it under [extensions] enabled in config.toml[/]",
+            f"prompt cache once. To keep it, list it under \\[extensions] enabled in config.toml[/]",
         )
         return
     if arg:

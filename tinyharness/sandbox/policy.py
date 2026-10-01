@@ -2,7 +2,8 @@
 
     writes   only under `write_roots`, and never under `protected` paths inside them
     reads    anywhere, except the contents of `deny_read` paths (credential-shaped files)
-    network  none, except loopback when `allow_localhost`
+    network  none, except loopback when `allow_localhost`, and the allowlist proxy's port
+             when `proxy_port` is set (sandbox/proxy.py decides which hosts)
 
 Reads stay open on purpose: a coding agent needs your toolchain, other repos and
 dotfiles. What keeps data from leaving is the network rule, not file isolation.
@@ -33,6 +34,7 @@ class SandboxPolicy:
     deny_read: tuple[str, ...] = ()  # regexes over absolute, symlink-resolved paths
     allow_read: tuple[str, ...] = ()  # exceptions to deny_read (.env.example)
     allow_localhost: bool = False
+    proxy_port: int | None = None  # the allowlist proxy (sandbox/proxy.py), the one way out
     cache_dir: Path | None = None  # package managers cache here instead of the user's own cache
     env: dict[str, str] = field(default_factory=dict)  # extra environment for the command
 
