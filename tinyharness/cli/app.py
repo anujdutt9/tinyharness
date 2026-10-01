@@ -215,7 +215,9 @@ async def run(args: argparse.Namespace, console: Console) -> None:
         provider=args.provider,
         model=args.model,
         permission_mode=args.mode,
-        permission_callback=renderer.ask_permission,
+        # No terminal to ask in (a script, a pipe): the gate denies what needs approval and
+        # tells the model why. Prompting anyway crashed the run with OSError (Errno 22).
+        permission_callback=renderer.ask_permission if sys.stdin.isatty() else None,
         on_event=renderer.handle,
         expose_skill_tool=False if args.no_skill_tool else None,
         use_last_model=True,

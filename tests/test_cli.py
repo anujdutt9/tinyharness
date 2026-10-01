@@ -213,3 +213,31 @@ def test_pip_greets_you_on_every_launch_when_the_terminal_can_show_him(tmp_path,
         assert "▀" not in plain.file.getvalue()  # no colors, no Pip
     finally:
         session.close()
+
+
+async def test_a_run_without_a_terminal_denies_approvals_instead_of_prompting(monkeypatch):
+    """Seen live: `tinyharness -p ...` from a script ended with "OSError: [Errno 22]" the
+    first time the model asked for something that needs approval (Bash sandbox=false):
+    the prompt tried to open a terminal that wasn't there. With no terminal there's no
+    one to ask: the gate denies it and tells the model why."""
+    import argparse
+    import io
+
+    from rich.console import Console
+
+    from tinyharness.cli import app
+
+    seen = {}
+
+    def fake_open(options, console, interactive):
+        seen["callback"], seen["interactive"] = options.permission_callback, interactive
+        return None
+
+    monkeypatch.setattr(app, "open_session", fake_open)
+    monkeypatch.setattr(app.sys, "stdin", io.StringIO(""))  # not a TTY
+    args = argparse.Namespace(
+        config=None, cwd=None, provider=None, model=None, mode=None, no_skill_tool=False,
+        prompt="hi", setup=False, resume_latest=False, resume=None,
+    )  # fmt: skip
+    await app.run(args, Console(file=io.StringIO()))
+    assert seen == {"callback": None, "interactive": False}

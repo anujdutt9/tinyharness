@@ -223,7 +223,9 @@ class PermissionGate:
 
     async def _ask(self, request: PermissionRequest) -> Decision:
         if self.callback is None:
-            return Decision(False, "no permission handler available", "prompt")
+            return Decision(
+                False, "no one is here to approve it (a non-interactive run): do without it", "prompt"
+            )
         return await self.callback(request)
 
     async def _check_mode(
