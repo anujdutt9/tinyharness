@@ -889,3 +889,28 @@ async def test_a_failed_subagent_hands_back_its_work_so_far(tmp_path):
         )
     message = str(failed.value)
     assert "upstream died" in message and "Read(" in message and "transcript" in message
+
+
+async def test_built_in_agents_can_load_skills(tmp_path):
+    """Teammates are general-purpose agents: without Skill in their tools, a report builder
+    couldn't load the user's design skill, however well the lead briefed it."""
+    from tinyharness.skills import Skill, SkillRegistry
+    from tinyharness.subagents.specs import builtin_agents
+    from tinyharness.tools.skill import SkillTool
+
+    for name, spec in builtin_agents().items():
+        assert "Skill" in (spec.tools or ["Skill"]), name
+    registry = default_registry().with_tools(
+        [SkillTool(SkillRegistry([Skill("design", "Design pages well.", "Use a grid.")]))]
+    )
+    llm = ScriptedLLM([[("Skill", '{"name": "design"}')], "done"])
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
+    await run_subagent(
+        builtin_agents()["general-purpose"],
+        "build the page",
+        ctx=make_ctx(tmp_path),
+        llm=llm,
+        tools=registry,
+        gate=gate,
+    )
+    assert "Use a grid." in llm.requests[1][-1].content
