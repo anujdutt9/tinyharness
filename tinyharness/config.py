@@ -73,7 +73,9 @@ class Config(BaseModel):
     model: str = ""  # "" = the provider's default; "provider:model" also picks the provider
     api_key: str = Field(default="", repr=False)  # literal key (SDK use); normally from the env
     providers: dict[str, Provider] = Field(default_factory=load_catalog)
-    effort: Effort | None = None  # reasoning effort: low | medium | high | max; None = the model's default
+    # Reasoning effort: none | low | medium | high | max. None: the model's own default, and
+    # medium for models whose reasoning is off unless asked for (Gemma 4, Qwen3 on OpenRouter).
+    effort: Effort | None = None
     request_timeout: float = 1800.0  # seconds; slow reasoning models can take minutes per turn
     request_retries: int = 3  # on 429/5xx or a refused connection, before the reply starts
     # True when nothing named a provider or model and one was picked from the keys found

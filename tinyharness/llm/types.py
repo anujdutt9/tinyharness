@@ -8,8 +8,12 @@ from typing import Any, Literal
 from tinyharness.agent.history import Message, ReasoningState
 from tinyharness.llm.usage import Price, Usage
 
-Effort = Literal["low", "medium", "high", "max"]
+Effort = Literal["none", "low", "medium", "high", "max"]  # "none": no reasoning, even where it's the default
 EFFORTS: tuple[Effort, ...] = ("low", "medium", "high", "max")
+# For models whose reasoning is off unless asked for (ModelInfo.reasoning): the effort used
+# when the user hasn't chosen one. A model with reasoning on scales it to the step, so a
+# simple step still costs little; with it off, it never thinks, however hard the task.
+DEFAULT_OPT_IN_EFFORT: Effort = "medium"
 
 
 class LLMError(RuntimeError):
@@ -107,6 +111,7 @@ class ModelInfo:
     max_output: int | None = None
     adaptive_thinking: bool | None = None
     efforts: frozenset[str] | None = None  # supported reasoning efforts
+    reasoning: bool | None = None  # reasoning can be switched on per request, and is off unless it is
     price: Price | None = None  # when the model list says (OpenRouter's does)
 
     @property

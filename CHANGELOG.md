@@ -173,6 +173,15 @@ First release.
 - A call allowed without asking says by what, on its own line under it:
   `⎿ auto mode · read-only query in the project`, `⎿ allow rule`, `⎿ hook`.
 
+### Reasoning
+- Models whose thinking is a per-request switch (OpenRouter lists `reasoning` among their
+  parameters: Gemma 4, Claude, Qwen3 thinking models) now reason at medium effort on agent
+  turns unless you chose an effort. They used to run with thinking off, so a Gemma 4 team
+  planned, briefed and did arithmetic without reasoning. The harness's own quick calls
+  (the permission classifier, summaries) stay without it. `/effort none` or
+  `effort = "none"` turns reasoning off; a cached model list from before this is
+  refetched once.
+
 ### Skills and delegation
 - Skills are offered to the model by default: the `Skill` tool lists each skill's name and
   the start of its description (about 600 tokens for 8 skills, cached with the prompt), so

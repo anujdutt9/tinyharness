@@ -411,7 +411,8 @@ async def ping(repl: Repl, arg: str) -> None:
 
 
 _EFFORT_HELP = {
-    "default": "whatever the model does on its own",
+    "default": "the model's own choice (medium where reasoning is opt-in)",
+    "none": "no reasoning: fastest",
     "low": "quick answers, least reasoning",
     "medium": "balanced",
     "high": "more reasoning for harder problems",

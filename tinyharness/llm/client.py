@@ -23,6 +23,7 @@ from tinyharness.agent.history import Message, ReasoningState, ToolCall, well_fo
 from tinyharness.llm.adapters import ADAPTERS
 from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.types import (
+    DEFAULT_OPT_IN_EFFORT,
     ContextOverflowError,
     Effort,
     ImageTooLargeError,
@@ -306,7 +307,7 @@ class LLMClient:
             system="\n\n".join(m.content or "" for m in messages if m.role == "system"),
             messages=[m for m in messages if m.role != "system"],
             tools=list(tools or []),
-            effort=self.effort,
+            effort=self._effort(model, agent_turn=bool(tools)),
             info=self.model_info(model),
             owner=owner,
             web_search=web_search,
@@ -409,6 +410,16 @@ class LLMClient:
             yield StreamChunk(state=ReasoningState(request.owner, state))
         if usage is not None or route:
             yield StreamChunk(usage=usage, route=route)
+
+    def _effort(self, model: str, *, agent_turn: bool) -> Effort | None:
+        """The effort to request: the user's choice ("none" sends nothing); otherwise, on an
+        agent's turn, a default for models whose reasoning is off unless asked for. Not for
+        the harness's own quick calls (the permission classifier, summaries), which have
+        no tools and would only get slower."""
+        if self.effort is not None:
+            return None if self.effort == "none" else self.effort
+        info = self.model_info(model)
+        return DEFAULT_OPT_IN_EFFORT if agent_turn and info is not None and info.reasoning else None
 
     async def collect(
         self,

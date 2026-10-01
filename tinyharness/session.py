@@ -512,7 +512,8 @@ class Session:
         self.llm.show_reasoning = show
 
     def set_effort(self, effort: Effort | None) -> None:
-        """Reasoning effort for every model: low | medium | high | max, or None for the model's default."""
+        """Reasoning effort for every model: none | low | medium | high | max, or None for the
+        model's default (medium for models whose reasoning is off unless asked for)."""
         self.config.effort = effort
         self.llm.effort = effort
 

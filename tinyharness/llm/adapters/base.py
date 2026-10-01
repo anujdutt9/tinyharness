@@ -74,6 +74,11 @@ class Adapter(ABC):
                         keys=("context_length", "context_window", "max_context_length", "max_model_len"),
                     ),
                     max_output=_first_int(item, top, keys=("max_output_tokens", "max_completion_tokens")),
+                    # OpenRouter lists the parameters each model takes; "reasoning" there means
+                    # thinking is a per-request switch (Gemma 4, Qwen3 and others).
+                    reasoning=True
+                    if {"reasoning", "include_reasoning"} & set(item.get("supported_parameters") or [])
+                    else None,
                     price=price_from_listing(item["pricing"])
                     if isinstance(item.get("pricing"), dict)
                     else None,

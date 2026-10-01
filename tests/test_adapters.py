@@ -999,3 +999,44 @@ def test_ids_inside_echoed_reasoning_are_left_alone():
     assert same[0].tool_calls[0].id == same[1].tool_call_id == "fc:abc.1"  # matches the echoed state
     other, _ = well_formed([call, result], valid_id=pattern, owner="anthropic:c")
     assert pattern.fullmatch(other[0].tool_calls[0].id) and other[1].tool_call_id == other[0].tool_calls[0].id
+
+
+async def test_opt_in_reasoning_models_think_at_medium_by_default(tmp_path):
+    """Seen live: Gemma 4 on OpenRouter ran agent tasks with zero reasoning tokens, because
+    its thinking is a per-request switch and nothing switched it on."""
+    from tinyharness.llm.adapters.base import Adapter
+    from tinyharness.llm.models import ModelDirectory
+
+    models, _ = Adapter.parse_models(
+        None, {"data": [{"id": "g4", "supported_parameters": ["tools", "reasoning"]}, {"id": "plain"}]}
+    )
+    assert [m.reasoning for m in models] == [True, None]
+    directory = ModelDirectory(tmp_path)
+    directory.store("openrouter", models)
+
+    def sent(model, effort=None, tools=(READ,)):
+        server = Server(OK_REPLY)
+        llm = client("openrouter", server, model=model, tmp_path=tmp_path)
+        llm.effort = effort
+        return server, llm
+
+    for model, effort, tools, expected in [
+        ("g4", None, (READ,), "medium"),  # the default, on an agent's turn
+        ("g4", None, (), None),  # not for the harness's own quick calls
+        ("g4", "high", (READ,), "high"),  # the user's choice wins
+        ("g4", "none", (READ,), None),  # and "none" turns it off
+        ("plain", None, (READ,), None),  # models without the switch are left alone
+    ]:
+        server, llm = sent(model, effort)
+        await run(llm, CONVERSATION, tools=tools)
+        assert server.requests[0].get("reasoning", {}).get("effort") == expected, (model, effort, tools)
+
+
+def test_an_older_model_cache_is_refetched(tmp_path):
+    import json
+
+    from tinyharness.llm.models import ModelDirectory
+
+    (tmp_path / "openrouter.json").write_text(json.dumps({"fetched_at": 9e12, "models": [{"id": "g4"}]}))
+    directory = ModelDirectory(tmp_path)
+    assert directory.info("openrouter", "g4") is not None and not directory.is_fresh("openrouter")
