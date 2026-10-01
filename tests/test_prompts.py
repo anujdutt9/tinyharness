@@ -110,3 +110,12 @@ def test_subagents_get_the_projects_instructions(tmp_path):
     (tmp_path / "AGENTS.md").write_text("Run tests with `make test`. Use pnpm, never npm.")
     prompt = subagent_system_prompt(AgentSpec("worker", "does work"), make_ctx(tmp_path))
     assert "use pnpm, never npm" in prompt.lower() and str(tmp_path) in prompt
+
+
+def test_pages_are_written_the_usual_way(tmp_path):
+    """Seen live: told pages "must work offline" with a "bundled Chart.js", Sonnet ran
+    `find /` for the file for two minutes, then tried to download it. Pages use CDN links
+    as everywhere else, and are checked with Playwright outside the sandbox."""
+    prompt = load_prompt("system", **{v: f"<{v}>" for v in PROMPT_VARIABLES["system"]})
+    assert "offline" not in prompt and "bundled" not in prompt and "Screenshot" not in prompt
+    assert "Playwright" in prompt and "sandbox=false" in prompt

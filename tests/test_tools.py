@@ -415,17 +415,7 @@ async def test_read_caps_a_page_by_bytes(ctx, tmp_path):
     assert len(out.encode()) <= 52_000
 
 
-async def test_a_page_that_links_chart_js_gets_it_embedded_on_write(ctx, tmp_path):
-    """Seen live: a model wrote the <script src="chart.umd.min.js"> tag, skipped the step
-    that inlines it, and every chart in the report was empty."""
-    page = '<html><head><script src="chart.umd.min.js"></script></head><body><canvas id="c"></canvas></body></html>'
-    out = await call(WriteTool(), {"path": "report.html", "content": page}, ctx)
-    html = (tmp_path / "report.html").read_text()
-    assert "Chart.js embedded" in out
-    assert 'src="chart.umd.min.js"' not in html and "Chart" in html and len(html) > 100_000
-
-
-async def test_a_server_in_the_sandbox_points_to_screenshot(ctx, tmp_path):
+async def test_a_server_in_the_sandbox_says_to_render_the_file_instead(ctx, tmp_path):
     from tinyharness.sandbox.policy import SandboxPolicy
     from tinyharness.tools.bash import BashInput, BashTool
 
@@ -437,4 +427,4 @@ async def test_a_server_in_the_sandbox_points_to_screenshot(ctx, tmp_path):
         BashInput(command="curl -I http://localhost:8000/r.html"),
         True,
     )
-    assert "use the Screenshot tool" in text and text.endswith("(exit code 7)")
+    assert "render the file with Playwright" in text and text.endswith("(exit code 7)")

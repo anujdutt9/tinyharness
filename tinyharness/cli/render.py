@@ -54,7 +54,6 @@ from tinyharness.cli.theme import (
     ellipsize,
     file_link,
     split_summary,
-    tool_label,
     tool_line,
     tool_style,
 )
@@ -343,7 +342,7 @@ class Renderer:
     def _row(self, glyph: Text, tool: _RunningTool, right: Text, indent: str = "") -> Text:
         """`✓ Edit    src/app.py ·········· +4 −1`, fitted to the terminal's width: dot
         leaders take the eye from what the call was on to its result, like a notebook index."""
-        name, label = tool.name, tool_label(tool.name)
+        name = label = tool.name
         detail = self._detail(tool)
         width = self.console.width
         right = right[: max(width // 2, 10)]
@@ -370,9 +369,6 @@ class Renderer:
             return _EDIT_STATS.sub("", detail)
         if tool.name == "Write":
             return _WRITE_STATS.sub("", detail)
-        if tool.name == "Screenshot":  # deck.html#8 → deck.html · slide 8
-            page, _, where = detail.partition("#")
-            return f"{page} · slide {where}" if where.isdigit() else f"{page} · #{where}" if where else page
         if tool.name == "Bash" and "\n" in (command := str(tool.args.get("command", "")).strip()):
             # a heredoc or script: its first line, not the body spilling over several rows
             first, *rest = command.splitlines()
@@ -522,8 +518,6 @@ class Renderer:
             return ok, Text(f"{len(text.splitlines())} lines", style="muted"), None
         if name in ("Agent", "Team"):
             return ok, Text(), None
-        if name == "Screenshot":  # the picture went to the model; where it's saved is no news
-            return ok, Text("looked", style="muted"), None
         return ok, Text(ellipsize(_brief(name, text), 50), style="muted"), None
 
     def _bash_outcome(self, tool: _RunningTool, text: str) -> tuple[Text, Text, Text | None]:
@@ -631,7 +625,7 @@ class Renderer:
                 for tool in self._running:
                     if tool.name in names and not tool.started:
                         tool.started = now
-                self.wait(f"Running {len(names)} tools" if parallel else f"Running {tool_label(names[0])}")
+                self.wait(f"Running {len(names)} tools" if parallel else f"Running {names[0]}")
             case ToolResult(name="TodoWrite", is_error=False):
                 self._running = [t for t in self._running if t.name != "TodoWrite"]
             case ToolResult() as result:
@@ -706,7 +700,7 @@ class Renderer:
                 return self._writing_label(update.tool, update.detail)
             case _:
                 name, args = split_summary(update.detail)
-                shown = f"{tool_label(name)}({_one_line(args)})" if args else update.detail
+                shown = f"{name}({_one_line(args)})" if args else update.detail
                 return self._relative(shown)
 
     def _writing_label(self, name: str, target: str) -> str:
@@ -720,7 +714,7 @@ class Renderer:
             case "Bash":
                 return "Writing a command"
             case _:
-                return f"Preparing {tool_label(name)}"
+                return f"Preparing {name}"
 
     def _usage(self) -> Usage:
         return Usage() + self.meter.total if self.meter is not None else Usage()

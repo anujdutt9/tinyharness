@@ -65,7 +65,6 @@ from tinyharness.tools.agent import AgentTool
 from tinyharness.tools.base import Tool, ToolContext, ToolError, file_version
 from tinyharness.tools.bash import BashTool
 from tinyharness.tools.registry import default_registry
-from tinyharness.tools.screenshot import ScreenshotTool
 from tinyharness.tools.skill import SkillTool, skill_request_note, skills_named_in
 from tinyharness.tools.team import TeamTool
 from tinyharness.tools.web import WebSearchTool
@@ -231,7 +230,6 @@ class Session:
         )
         if shutil.which("bash") or shutil.which("sh"):
             self.tools.register(BashTool(self.sandbox, self.sandbox_policy))
-        self.tools.register(ScreenshotTool(self.sandbox, self.sandbox_policy))
         for tool in self.options.tools:  # before the Agent tool, so subagents can use them too
             self.tools.register(tool)
         if self.config.skill_tool and len(self.skills):

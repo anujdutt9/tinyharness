@@ -29,7 +29,7 @@ Streaming, parallel dispatch of read-only tools, argument validation, Ctrl-C to 
 
 ## Tools
 
-`Read` `Write` `Edit` `Glob` `Grep` `Bash` `Pdf` `Screenshot` `TodoWrite` (off unless `todo_list = true`) `WebSearch` `WebFetch` `Open` `Agent` `Team`; each one is a class plus a pydantic input model. `Read` shows the model images too, and image paths in your message (pasted screenshots) are attached to it. `Screenshot` renders a local page in a sandboxed headless browser (Playwright's chrome-headless-shell) so the model can look at its work
+`Read` `Write` `Edit` `Glob` `Grep` `Bash` `Pdf` `TodoWrite` (off unless `todo_list = true`) `WebSearch` `WebFetch` `Open` `Agent` `Team`; each one is a class plus a pydantic input model. `Read` shows the model images too, and image paths in your message (pasted screenshots) are attached to it. To look at a page it made, the model renders it with Playwright through Bash and Reads the PNG
 
 ## Permissions
 

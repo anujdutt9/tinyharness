@@ -84,8 +84,7 @@ class BashTool(Tool[BashInput]):
             + (" (except localhost)" if policy.allow_localhost else "")
             + ". So package managers can't download (npm/npx, pip, brew), and other apps can't be "
             "reached: no `open`, `osascript` or browser apps like Google Chrome.app (they fail or "
-            "hang until the timeout); don't try them in the sandbox. To look at a page, use the "
-            "Screenshot tool. API keys aren't available in the sandbox (key variables are stripped "
+            "hang until the timeout); don't try them in the sandbox. API keys aren't available in the sandbox (key variables are stripped "
             "and key files can't be read), so a program that calls an API fails as if no key were "
             "set. That doesn't mean the user has none: to run it for real, use sandbox=false. "
             "If a command genuinely needs the network or to write elsewhere (e.g. "
@@ -173,12 +172,12 @@ class BashTool(Tool[BashInput]):
             # let `open` run things outside it); Chrome dies with "Abort trap: 6".
             text += (
                 "\n(note: macOS apps, including browsers, can't run in the sandbox. To look "
-                "at a page, use the Screenshot tool; otherwise run this command with sandbox=false)"
+                "at a page, render it with Playwright and sandbox=false)"
             )
         elif sandboxed and code and _SERVER.search(args.command):
             text += (
                 "\n(note: servers can't run in the sandbox: it has no network, not even localhost. "
-                "To look at an HTML page, use the Screenshot tool on the file; no server is needed)"
+                "To look at an HTML page, render the file with Playwright and sandbox=false; no server is needed)"
             )
         elif sandboxed and "Operation not permitted" in text:
             text += (

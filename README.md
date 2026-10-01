@@ -98,7 +98,7 @@ hooks, skills, and subagents on different models.
 | | |
 |---|---|
 | **Agent loop** | Streaming, parallel read-only tools, argument validation and repair, recovery from cut-off and empty replies, retries with backoff |
-| **Tools** | `Read` `Write` `Edit` `Glob` `Grep` `Bash` `Pdf` `Screenshot` `WebSearch` `WebFetch` `Open` `Agent` `Team` `TodoWrite`, each a class with a pydantic input model |
+| **Tools** | `Read` `Write` `Edit` `Glob` `Grep` `Bash` `Pdf` `WebSearch` `WebFetch` `Open` `Agent` `Team` `TodoWrite`, each a class with a pydantic input model |
 | **Permissions** | Reads never ask, edits ask with a diff; modes `default`, `acceptEdits`, `plan`, `auto` (an LLM classifier) and `bypassPermissions`; persistent allow/deny rules |
 | **Sandbox** | Seatbelt on macOS: commands write only inside the project, can't read credential files, have no network |
 | **Context** | Cap oversized messages, stub old tool output, then summarize, without rebuilding the prompt cache every turn |

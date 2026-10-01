@@ -890,29 +890,6 @@ def test_text_call_parsing_stays_fast_on_hostile_input():
     assert time.monotonic() - start < 1
 
 
-async def test_a_changed_page_counts_as_checked_only_once_it_is_looked_at(tmp_path):
-    from tinyharness.sandbox.policy import SandboxPolicy
-    from tinyharness.tools.bash import BashTool
-    from tinyharness.tools.write import WriteTool
-
-    tools = [
-        WriteTool(),
-        BashTool(None, SandboxPolicy(write_roots=(tmp_path,))),
-        sleep_tool("Screenshot", True),
-    ]
-    turns = [
-        [("Write", '{"path": "r.html", "content": "<p>hi</p>"}')],
-        [("Bash", '{"command": "python3 r.html"}')],
-        "Done.",
-    ]
-    llm = ScriptedLLM([*turns, "Looked."])
-    _, history = await run(tmp_path, llm, tools)
-    notes = [
-        m.content for m in history.messages if m.role == "user" and "Screenshot of it" in (m.content or "")
-    ]
-    assert len(notes) == 1  # running it as a script didn't count
-
-
 @pytest.mark.parametrize(
     "text",
     [

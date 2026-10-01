@@ -52,12 +52,10 @@ First release.
   it. Sent as each provider takes them: inside tool results for Anthropic, in a message
   right after them for the others. Shrunk to fit (see below). SDK: `session.run(prompt, images)`,
   `tools.read.load_image`, and `ToolOutput` for tools that return pictures.
-- `Screenshot`: the model renders a local page (an HTML file, a deck slide via
-  `deck.html#3`, a localhost dev server) and sees the picture, to check visual work by
-  looking. It runs Playwright's chrome-headless-shell inside the sandbox, so it doesn't
-  ask; install it once with `npx playwright install chromium-headless-shell`. (Google
-  Chrome.app can't start in the sandbox; a Bash attempt now says so instead of just
-  "Abort trap: 6".)
+- Checking a page by looking: the model renders it with Playwright through Bash (outside
+  the sandbox, since pages load scripts and fonts from the network) and Reads the PNG,
+  as in other harnesses. Pages use CDN links as usual. (Google Chrome.app can't start in
+  the sandbox; a Bash attempt now says so instead of just "Abort trap: 6".)
 - A running subagent shows its last few tool calls under it (outcome, first line of the
   result, time) with a count of earlier ones, so you can tell progress from going in
   circles; `ctrl+o` while one runs shows all its calls so far. Pasting a file path at
@@ -91,8 +89,6 @@ First release.
 - New files go in the working directory unless you say where, not next to an input file
   outside it (a PDF in ~/Downloads): only there can later edits and commands reach them
   without asking.
-- A `Screenshot` call shows as `Preview  deck.html · slide 8 … looked`: what the agent is
-  doing (looking at its work) rather than how, and not where the picture was saved.
 - A multi-line Bash command (a heredoc, a script) takes one row:
   `Bash  cat > /tmp/q.sql << 'EOF' (+12 lines)`, not its body spilled over several.
 - Fixed a hang when two tool calls in a row needed approval (e.g. Read and Grep on a file
@@ -117,9 +113,8 @@ First release.
   that calls an API failing with "no API key" doesn't mean you have none: it asks to run
   it outside the sandbox instead of reporting that no key is set.
 - Images are shrunk to at most 2000 px a side (and 5 MB) before the model sees them: pasted
-  screenshots, images the agent reads, and Screenshot's pictures (whose viewport is now at
-  most 2000 px). A Retina screenshot used to go in at full size, and once a request had
-  several images, Claude rejected it and every request after it. If a provider still
+  screenshots and images the agent reads. A Retina screenshot used to go in at full size,
+  and once a request had several images, Claude rejected it and every request after it. If a provider still
   rejects an image, the images in the conversation are shrunk further (or dropped, with a
   note) and the request is retried once. Adds Pillow as a dependency.
 - `/clear` starts a new conversation, as in Claude Code: the old one stays saved as it was
@@ -158,11 +153,6 @@ First release.
   harness's markers mean (`<session-resumed>`, `[stale: …]`, …); no commits or pushes
   unless asked. Still about 1k tokens.
 
-- HTML pages the agent makes work offline: tinyharness ships Chart.js 4.5.1 (MIT) and a
-  small `inline_scripts.py` that inlines a page's local `<script src>` files (a Chart.js
-  CDN link becomes the bundled copy), and the system prompt says to use them. Screenshot
-  says when a page links remote scripts or styles, which its browser (no network) can't
-  load: reports used to come out with blank charts the agent couldn't see were missing.
 - `ctrl+o` is a toggle: it expands the last tool call's output (or running subagents'
   calls, newest kept) above the input box, fitted to the screen, and collapses it again,
   leaving nothing in the scrollback. It used to print a new panel on each press, with
@@ -211,13 +201,11 @@ First release.
   renames; and give each subagent one job with a clear done condition.
 
 ### Reports and pages
-- A page written with `<script src="chart.umd.min.js">` gets the bundled Chart.js
-  embedded by Write itself, in one step. The agent used to have to run an inliner
-  afterwards; a model that skipped it produced a report with every chart empty.
-- A changed HTML page counts as checked only once it's been looked at with Screenshot
-  (running it as a script doesn't count), and the reminder says what to look for.
+- Pages are written as models write them elsewhere, CDN links included: no offline
+  rule, bundled Chart.js or Screenshot tool. Those sent models hunting for a library file
+  (`find /` for two minutes) or downloading one, and Write rewrote the page behind them.
 - A web server or localhost request that fails in the sandbox explains that the sandbox
-  has no network and points to Screenshot for looking at a page.
+  has no network and says to render the file with Playwright instead.
 - Agents and teammates are told to compute derived numbers (percentages, totals, ratios)
   with a query or code, never by hand: a teammate reported the right count with a wrong
   percentage, and the report charted it.

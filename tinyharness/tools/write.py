@@ -5,7 +5,6 @@ from typing import Any, ClassVar
 
 from pydantic import Field
 
-from tinyharness.assets.inline_scripts import inline, wants_chart_js
 from tinyharness.tools.base import (
     LARGE_CHANGE,
     Tool,
@@ -57,16 +56,10 @@ class WriteTool(Tool[WriteInput]):
             raise ToolError(f"refusing to overwrite {path}: Read it first in this session before Write")
         if path.exists():
             check_not_stale(ctx, path)  # overwriting it would lose a change this agent never saw
-        content, note = args.content, ""
-        if path.suffix.lower() in (".html", ".htm") and wants_chart_js(content):
-            # One step, done here: a page that links Chart.js gets the bundled copy inlined, so it
-            # works offline and in Screenshot. (Asking the model to run an inliner afterwards
-            # failed: smaller models wrote the link and skipped the second step, leaving empty charts.)
-            content, done, _ = inline(content, path.parent)
-            note = " (Chart.js embedded in the page, so it works offline)" if done else ""
+        content = args.content
         try:
             write_text(path, content, make_parents=True)  # all or nothing; see workspace/files.py
         except OSError as e:
             raise ToolError(f"write failed: {e.strerror or e}") from e
         mark_seen(ctx, path)
-        return f"wrote {path} ({len(content):,} bytes){note}"
+        return f"wrote {path} ({len(content):,} bytes)"

@@ -490,7 +490,7 @@ def test_an_app_that_crashes_in_the_sandbox_says_to_run_it_outside():
         args=BashInput(command=chrome),
         sandboxed=True,
     )
-    assert "run this command with sandbox=false" in output and output.endswith("(exit code 134)")
+    assert "with Playwright and sandbox=false" in output and output.endswith("(exit code 134)")
 
 
 def test_cost_explains_where_the_tokens_went():
@@ -655,24 +655,6 @@ def test_ctrl_o_shows_a_running_subagents_calls_so_far(repl, tmp_path):
     assert "general-purpose · Verify deck · 2 tools so far" in text
     assert "Bash  node measure.mjs" in text and "⎿ TypeError: x is undefined" in text
     assert "Edit  measure.mjs" in text
-
-
-def test_a_screenshot_shows_as_a_preview_of_the_page(renderer):
-    """The model calls Screenshot; the user sees the agent looking at its work, not where
-    the picture was saved."""
-    replay(
-        renderer,
-        (
-            "Screenshot(/repo/out/deck.html#8)",
-            "Screenshot",
-            {"target": "/repo/out/deck.html#8"},
-            "screenshot of /repo/out/deck.html#8, saved as /tmp/scratch/screenshot-1a2b3c.png",
-            False,
-        ),
-    )
-    [row] = shown(renderer)
-    assert row.startswith("✓ Preview") and "out/deck.html · slide 8" in row
-    assert row.endswith("looked") and "screenshot-" not in row
 
 
 async def test_back_to_back_questions_both_get_the_keyboard(repl):
