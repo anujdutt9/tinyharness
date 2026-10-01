@@ -334,3 +334,15 @@ def test_only_commands_that_certainly_read_skip_the_write_lock(command, reads):
     from tinyharness.tools.bash import only_reads
 
     assert only_reads(command) is reads
+
+
+def test_commands_never_get_forced_color(monkeypatch):
+    """Seen live: FORCE_COLOR inherited from the terminal made Node print a NO_COLOR
+    warning on every command, and color codes are noise in what the model reads."""
+    from tinyharness.tools.bash import command_env
+
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("CLICOLOR_FORCE", "1")
+    env = command_env({"HTTPS_PROXY": "http://127.0.0.1:1"})
+    assert "FORCE_COLOR" not in env and "CLICOLOR_FORCE" not in env
+    assert env["NO_COLOR"] == "1" and env["HTTPS_PROXY"] == "http://127.0.0.1:1"

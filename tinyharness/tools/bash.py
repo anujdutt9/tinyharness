@@ -42,6 +42,19 @@ NONINTERACTIVE_ENV = {
     "GIT_TERMINAL_PROMPT": "0",
 }
 
+# Inherited settings that force color: output goes to the model, where color codes are
+# noise (and Node warns on every command when FORCE_COLOR and NO_COLOR are both set).
+_FORCES_COLOR = ("FORCE_COLOR", "CLICOLOR_FORCE", "PY_COLORS")
+
+
+def command_env(extra: dict[str, str]) -> dict[str, str]:
+    """The environment a command runs with: no credentials, nothing interactive, no color."""
+    env = {**sanitized_env(), **NONINTERACTIVE_ENV, **extra}
+    for name in _FORCES_COLOR:
+        env.pop(name, None)
+    return env
+
+
 # Commands that only read, so subagents running side by side needn't take turns on them
 # (Tool.writes). Deliberately short: anything else counts as writing.
 _READERS = frozenset(
@@ -149,7 +162,7 @@ class BashTool(Tool[BashInput]):
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=ctx.workspace.root,
-            env={**sanitized_env(), **NONINTERACTIVE_ENV, **(policy.env if sandboxed else {})},
+            env=command_env(policy.env if sandboxed else {}),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
