@@ -467,6 +467,8 @@ def _teammate_prompt(board: Board, task: TaskState) -> str:
         "write files, give them names unique to your task (e.g. "
         f"starting with '{task.id}') so teammates' files don't overwrite yours. If a file, table "
         "or value you need is missing or empty, say so in your report: never make up data.",
+        "Compute every derived number (percentage, share, total, average, ratio) with a query or "
+        "code, never in your head: the lead will chart your numbers as given.",
         "End with a concise report of what you did or found, with the actual numbers: it is "
         "all the team lead sees.",
     ]

@@ -181,6 +181,9 @@ First release.
   (running it as a script doesn't count), and the reminder says what to look for.
 - A web server or localhost request that fails in the sandbox explains that the sandbox
   has no network and points to Screenshot for looking at a page.
+- Agents and teammates are told to compute derived numbers (percentages, totals, ratios)
+  with a query or code, never by hand: a teammate reported the right count with a wrong
+  percentage, and the report charted it.
 - The system prompt gives the typical Team case: a full analysis of a database, dataset
   or codebase across several areas, one teammate per area.
 
