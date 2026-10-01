@@ -27,7 +27,7 @@ import inspect
 import logging
 import re
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -320,29 +320,46 @@ def _load_file(name: str, path: Path) -> ModuleType:
     return module
 
 
+Setup = Callable[[Extension], None]
+
+
 def load_extensions(
-    names: list[str], session: Session, settings: dict[str, Any], *, project: bool
+    names: list[str],
+    session: Session,
+    settings: dict[str, Any],
+    *,
+    project: bool,
+    given: Sequence[ModuleType | Setup] = (),
 ) -> tuple[list[Extension], list[LoadError]]:
-    """Set up each named extension, in order. One that fails is reported and skipped."""
+    """Set up each named extension, in order, then the ones `given` in code (SDK:
+    `SessionOptions(extensions=[...])`, a module or a setup function). One that fails is
+    reported and skipped."""
     loaded: list[Extension] = []
     errors: list[LoadError] = []
+    sources: list[tuple[str, ModuleType | Setup | None]] = []
     for name in dict.fromkeys(names):
         try:
-            module = find_module(name, session.workspace.root, project=project)
-            if module is None:
+            sources.append((name, find_module(name, session.workspace.root, project=project)))
+        except Exception as e:
+            errors.append(LoadError(name, f"{type(e).__name__}: {e}"))
+    for item in given:  # named after the module, or the function (`def hello(th)` is "hello")
+        sources.append((item.__name__.rpartition(".")[2], item))
+    for name, source in sources:
+        try:
+            if source is None:
                 errors.append(LoadError(name, "not found"))
                 continue
-            setup = getattr(module, "setup", None)
+            setup = source if not isinstance(source, ModuleType) else getattr(source, "setup", None)
             if not callable(setup):
                 errors.append(LoadError(name, "has no setup(th) function"))
                 continue
             config = settings.get(name)
             ext = Extension(
                 name=name,
-                description=(inspect.getdoc(module) or "").split("\n\n")[0].strip(),
+                description=(inspect.getdoc(source) or "").split("\n\n")[0].strip(),
                 config=dict(config) if isinstance(config, dict) else {},
                 session=session,
-                needs=list(getattr(module, "NEEDS", []) or []),
+                needs=list(getattr(source, "NEEDS", []) or []),
             )
             setup(ext)
             loaded.append(ext)

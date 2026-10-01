@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from tinyharness.agent.history import Message
 from tinyharness.config import Config
-from tinyharness.llm.client import StreamChunk
 from tinyharness.llm.providers import load_catalog
+from tinyharness.testing import ScriptedLLM as ScriptedLLM  # tests import it from here
 from tinyharness.tools.base import Tool, ToolContext
 from tinyharness.workspace import Workspace
 
@@ -68,44 +66,6 @@ def ctx(tmp_path: Path) -> ToolContext:
 async def call(tool: Tool[Any], args: dict[str, Any], ctx: ToolContext) -> str:
     """Validate raw arguments the way the agent loop does, then run the tool."""
     return await tool.run(tool.parse(args), ctx)
-
-
-class ScriptedLLM:
-    """A fake LLM that replays a fixed list of turns.
-
-    Each turn is either a string (plain text reply), a list of
-    (tool_name, arguments_json) tool calls, or a list of raw StreamChunks.
-    """
-
-    def __init__(self, turns: list[Any]) -> None:
-        self.turns = list(turns)
-        self.requests: list[list[Message]] = []
-        self.model = "fake"
-
-    async def stream(
-        self, messages: list[Message], tools: Any = None, **_: Any
-    ) -> AsyncIterator[StreamChunk]:
-        self.requests.append(list(messages))
-        turn = self.turns.pop(0) if self.turns else "done"
-        if isinstance(turn, str):
-            yield StreamChunk(text=turn, finish_reason="stop")
-            return
-        if turn and isinstance(turn[0], StreamChunk):
-            for chunk in turn:
-                yield chunk
-            return
-        for i, (name, arguments) in enumerate(turn):
-            yield StreamChunk(
-                tool_call_delta={
-                    "index": i,
-                    "id": f"call_{i}",
-                    "function": {"name": name, "arguments": arguments},
-                }
-            )
-        yield StreamChunk(finish_reason="tool_calls")
-
-    async def one_shot(self, prompt: str, **_: Any) -> str:
-        return "summary of prior conversation"
 
 
 def png(width: int, height: int, *, noise: bool = False) -> bytes:

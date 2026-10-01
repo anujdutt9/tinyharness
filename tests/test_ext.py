@@ -273,3 +273,25 @@ async def test_the_agent_tool_runs_its_subagent_through_run_agent(tmp_path, monk
         assert "found it" in str(out) and calls == [("explore", "find x")]
     finally:
         session.close()
+
+
+async def test_an_extension_given_in_code_runs_in_a_scripted_session(tmp_path):
+    """SDK users pass extensions as setup functions; tinyharness.testing runs them against
+    a scripted model with no key or network, as the extension-api docs show."""
+    from tinyharness.testing import scripted_session
+
+    def greeter(th):
+        """Greets."""
+
+        @th.tool(read_only=True)
+        async def hello(name: str) -> str:
+            """Greet someone."""
+            return f"Hello, {name}."
+
+    session = scripted_session(tmp_path / "w", [[("hello", '{"name": "Ada"}')], "done"], extensions=[greeter])
+    try:
+        assert [e.name for e in session.extensions] == ["greeter"]
+        results = [e.output async for e in session.run("greet Ada") if isinstance(e, ToolResult)]
+        assert results == ["Hello, Ada."]
+    finally:
+        session.close()

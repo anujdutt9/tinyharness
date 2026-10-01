@@ -137,6 +137,8 @@ class SessionOptions:
     on_event: Callable[[Event], None] | None = None  # progress of subagents/teammates as it happens
     hooks: list[Hook] = field(default_factory=list)
     tools: list[Tool[Any]] = field(default_factory=list)  # your own tools; a built-in's name replaces it
+    # Extensions given in code: modules with setup(th), or setup functions (tinyharness/ext.py).
+    extensions: list[Any] = field(default_factory=list)
     allowed_tools: list[str] | None = None
     agents: list[AgentSpec] = field(default_factory=list)  # more subagents; same name replaces one
     extra_system: str = ""
@@ -482,7 +484,11 @@ class Session:
         ext_hooks = {id(h) for ext in self.extensions for h in ext.hooks}
         self.hooks.hooks = [h for h in self.hooks.hooks if id(h) not in ext_hooks]
         self.extensions, self.extension_errors = load_extensions(
-            names, self, self.config.extensions.settings(), project=self.project_trusted
+            names,
+            self,
+            self.config.extensions.settings(),
+            project=self.project_trusted,
+            given=self.options.extensions,
         )
         self.tools = default_registry()
         if shutil.which("bash") or shutil.which("sh"):

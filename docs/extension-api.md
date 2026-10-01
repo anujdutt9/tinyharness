@@ -273,17 +273,24 @@ extension, so it's present exactly when the feature is (how to brief a teammate 
 
 ## Testing an extension
 
+`tinyharness.testing` runs a real session against a scripted model: no API key, no
+network, and the tools really run.
+
 ```python
-from tinyharness.testing import load_extension, ScriptedLLM
+from tinyharness.events import ToolResult
+from tinyharness.testing import scripted_session
+
+import hello  # your extension module
+
 
 async def test_hello(tmp_path):
-    session = load_extension("hello", working_dir=tmp_path,
-                             llm=ScriptedLLM([[("hello", '{"name": "Ada"}')], "done"]))
-    events = await session.run_all("greet Ada")
-    assert "Hello, Ada!" in events.tool_results()
+    session = scripted_session(tmp_path, [[("hello", '{"name": "Ada"}')], "done"], extensions=[hello])
+    results = [e.output async for e in session.run("greet Ada") if isinstance(e, ToolResult)]
+    assert results == ["Hello, Ada."]
 ```
 
-`ScriptedLLM` is the test double already in `tests/conftest.py`, moved into the package.
+The same `extensions=[...]` works in `SessionOptions` for SDK users: a module with
+`setup(th)`, or a setup function itself.
 
 ## How we'll know it worked
 

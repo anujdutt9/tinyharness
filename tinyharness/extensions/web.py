@@ -6,7 +6,8 @@ from tinyharness.tools.web import WebFetchTool, WebSearchTool
 
 def setup(th: Extension) -> None:
     session = th.session
-    th.add_tool(WebSearchTool(lambda: session.llm))
+    if session is not None:  # WebSearch digests results with the session's model
+        th.add_tool(WebSearchTool(lambda: session.llm))
     th.add_tool(WebFetchTool())
     th.prompt_section(
         "Web",
