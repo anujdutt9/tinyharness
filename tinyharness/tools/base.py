@@ -93,6 +93,16 @@ class ToolContext:
     usage: UsageMeter = field(default_factory=UsageMeter)  # tokens and cost, subagents included
     # The user's latest message, so agents started on its behalf know what it's for.
     request: str = ""
+    # Where content from other machines in this conversation came from ("WebFetch
+    # docs.python.org"): once there is any, calls that can send data out need a person's
+    # yes (permissions/gate.py). Shared with subagents; changed in place, never replaced.
+    outside: list[str] = field(default_factory=list)
+
+
+def note_outside(ctx: ToolContext, source: str) -> None:
+    """Record that content from another machine (`source`) is now in the conversation."""
+    if source not in ctx.outside:
+        ctx.outside.append(source)
 
 
 def file_version(path: Path) -> str | None:
@@ -152,6 +162,14 @@ class Tool(ABC, Generic[InputT]):
     def target_host(self, args: InputT) -> str | None:
         """The site a network tool contacts, used for permission decisions."""
         return None
+
+    def outside_source(self, args: InputT) -> str | None:
+        """Where this call's result comes from, if it's another machine (and so could carry
+        instructions the user didn't write); None for local results."""
+        if not self.network:
+            return None
+        host = self.target_host(args)
+        return f"{self.name} {host}" if host else self.name
 
     def risk(self, args: dict[str, Any], path: Path | None) -> str | None:
         """Why this call is destructive enough to always ask in auto mode, or None.

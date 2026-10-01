@@ -545,6 +545,11 @@ def sandbox(repl: Repl, arg: str) -> None:
         "  [muted]Anything else asks first (sandbox=false). Change the hosts with \\[sandbox] "
         "allow_hosts in config.toml.[/]"
     )
+    if session.ctx.outside:
+        repl.console.print(
+            f"  [warn]Outside content in this conversation:[/] {', '.join(session.ctx.outside[:5])} "
+            "[muted]· calls that could send data out ask first, until /clear[/]"
+        )
     if session.proxy is not None and session.proxy.denied:
         repl.console.print(
             f"  [muted]Blocked this session:[/] {', '.join(dict.fromkeys(session.proxy.denied))}"

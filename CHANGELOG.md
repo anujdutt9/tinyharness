@@ -198,6 +198,14 @@ First release.
   built the way a user would, awkward cases included; no unasked-for dependencies or
   renames; and give each subagent one job with a clear done condition.
 
+### Outside content (Rule of Two)
+- Once content from another machine is in the conversation (a fetched page, search
+  results, a command's download through the sandbox proxy), calls that could send data out
+  ask a person, in every mode but bypass: network tools no longer read public pages
+  without asking, auto mode's classifier doesn't decide them, and leaving the sandbox says
+  outside content is present. Sites you approved stay allowed; sandboxed commands are
+  unaffected; `/clear` starts over; `/sandbox` shows the sources. Subagents share it.
+
 ### Extension needs
 - An extension's `NEEDS` (`network:<host>`, `write:<path>`) are enforced. The CLI asks
   once when it loads (remembered with a fingerprint of its code; a change asks again);

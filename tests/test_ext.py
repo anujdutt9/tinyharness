@@ -401,7 +401,7 @@ async def test_th_run_gets_the_extensions_folders_and_hosts_once_approved(
 
     async def record(self, args, ctx):
         seen.append((self.policy.write_roots, self.proxy.allowed if self.proxy else ()))
-        return bash.Execution("ok\n", 0, False, True, [])
+        return bash.Execution("ok\n", 0, False, True, [], [])
 
     monkeypatch.setattr(bash.BashTool, "execute", record)
     session.sandbox = session.sandbox or object()  # the sandbox's presence is what matters here

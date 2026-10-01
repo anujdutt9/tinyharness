@@ -256,6 +256,7 @@ class Session:
             ),
         )
 
+        self.gate.outside = lambda: self.ctx.outside
         self._needs_rules: list[Rule] = []
         self._extension_proxies: dict[str, AllowlistProxy] = {}
         self._apply_needs()
@@ -672,6 +673,7 @@ class Session:
         what the session spent (see UsageMeter.since_clear)."""
         had_conversation = any(m.role != "system" for m in self.history.messages)
         self.history.reset()
+        self.ctx.outside.clear()  # a new conversation has no outside content in it yet
         self.ctx.usage.mark_clear()
         self.resume_report, self._resume_note = None, ""
         if had_conversation:

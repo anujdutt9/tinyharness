@@ -329,6 +329,9 @@ class WebSearchInput(ToolInput):
 
 
 class WebSearchTool(Tool[WebSearchInput]):
+    """Not a network tool for permissions: its query goes to the model's own provider,
+    which already sees the conversation. Its results are outside content all the same."""
+
     name = "WebSearch"
     Input = WebSearchInput
     read_only = True
@@ -341,6 +344,9 @@ class WebSearchTool(Tool[WebSearchInput]):
         "web search isn't available with {provider}. Switch to a provider with built-in search "
         "(/model: Anthropic, OpenAI, Gemini, xAI or OpenRouter), or use WebFetch on a known URL."
     )
+
+    def outside_source(self, args: WebSearchInput) -> str | None:
+        return "WebSearch results"
 
     def __init__(self, llm: Callable[[], LLMClient]) -> None:
         self.llm = llm  # the current client: the model can change during a session

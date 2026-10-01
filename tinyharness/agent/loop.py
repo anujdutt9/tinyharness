@@ -52,7 +52,7 @@ from tinyharness.llm.textcalls import looks_like_a_call, recover_calls, repair_a
 from tinyharness.llm.types import LLMError, RunawayOutputError, StreamChunk
 from tinyharness.llm.usage import Usage
 from tinyharness.security import mask_secrets
-from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolOutput
+from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolOutput, note_outside
 from tinyharness.tools.todo import format_todos
 
 if TYPE_CHECKING:
@@ -366,6 +366,8 @@ async def run_agent_loop(
                 )
                 if after and after.get("reason"):
                     output += f"\n\n[hook] {after['reason']}"
+                if not is_error and (source := item.tool.outside_source(item.args)):
+                    note_outside(deps.ctx, source)
                 output += failures.note(item.tool.name, output, is_error)
                 deps.transcript.write(
                     "tool_result", tool=item.tool.name, result=output[:TRANSCRIPT_RESULT_CHARS]

@@ -27,7 +27,7 @@ from tinyharness.process import kill_group
 from tinyharness.sandbox import Sandbox, SandboxPolicy
 from tinyharness.sandbox.proxy import AllowlistProxy
 from tinyharness.security import sanitized_env
-from tinyharness.tools.base import Tool, ToolContext, ToolInput
+from tinyharness.tools.base import Tool, ToolContext, ToolInput, note_outside
 
 HEAD_BYTES = 15_000  # output kept from the start...
 TAIL_BYTES = 15_000  # ...and from the end
@@ -86,6 +86,7 @@ class Execution:
     timed_out: bool
     sandboxed: bool
     blocked: list[str]  # hosts the sandbox proxy refused while it ran
+    reached: list[str]  # hosts it downloaded from, through the proxy
 
 
 class BashTool(Tool[BashInput]):
@@ -159,17 +160,19 @@ class BashTool(Tool[BashInput]):
 
     async def run(self, args: BashInput, ctx: ToolContext) -> str:
         run = await self.execute(args, ctx)
+        if run.reached:  # what it downloaded is outside content (a README can carry instructions)
+            note_outside(ctx, f"Bash downloads from {', '.join(run.reached[:3])}")
         return self._report(run.output, run.code, run.timed_out, args, run.sandboxed, run.blocked)
 
     async def execute(self, args: BashInput, ctx: ToolContext) -> Execution:
         """Run the command; what it printed and how it ended, before any notes are added."""
         argv = [self.shell, "-c", args.command]
         sandboxed = self.sandbox is not None and args.sandbox
-        policy, denied_before = self.policy, 0
+        policy, denied_before, reached_before = self.policy, 0, 0
         if sandboxed and self.proxy is not None:
             port = await self.proxy.start()
             policy = replace(policy, proxy_port=port, env={**policy.env, **self.proxy.env()})
-            denied_before = len(self.proxy.denied)
+            denied_before, reached_before = len(self.proxy.denied), len(self.proxy.reached)
         if sandboxed:
             assert self.sandbox is not None
             argv = self.sandbox.wrap(argv, policy)
@@ -200,7 +203,9 @@ class BashTool(Tool[BashInput]):
             await kill_group(proc)
             raise
         blocked = list(dict.fromkeys(self.proxy.denied[denied_before:])) if sandboxed and self.proxy else []
-        return Execution(output.text(), None if timed_out else proc.returncode, timed_out, sandboxed, blocked)
+        reached = list(dict.fromkeys(self.proxy.reached[reached_before:])) if sandboxed and self.proxy else []
+        code = None if timed_out else proc.returncode
+        return Execution(output.text(), code, timed_out, sandboxed, blocked, reached)
 
     def _report(
         self,

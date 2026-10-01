@@ -32,7 +32,8 @@ framework underneath, so you can read the whole thing in an afternoon.
   open models get work done too. [How](https://github.com/anujdutt9/tinyharness/blob/main/docs/features.md#reliability).
 - **Safe without the friction.** Commands run in an OS sandbox that reaches only package
   registries, GitHub and CDNs; routine work inside it doesn't ask, anything beyond it
-  does, and API keys never reach the model.
+  does, and API keys never reach the model. Once outside content (a web page, a download)
+  is in the conversation, anything that could send data out asks a person first.
 - **Small and fast.** Six core tools and a short prompt (about 3k tokens before your
   instructions) that stays the same from call to call, so the provider's cache hits.
 - **Extensible.** One Python file with `setup(th)` adds tools, prompt sections, commands

@@ -69,6 +69,7 @@ def host_allowed(host: str, allowed: Iterable[str]) -> bool:
 class AllowlistProxy:
     allowed: tuple[str, ...] = DEFAULT_ALLOWED_HOSTS
     denied: list[str] = field(default_factory=list)  # hosts refused, newest last
+    reached: list[str] = field(default_factory=list)  # hosts connected to, newest last
     _server: asyncio.base_events.Server | None = None
     port: int = 0
 
@@ -165,6 +166,7 @@ class AllowlistProxy:
                 "sandbox=false, or add the host to [sandbox] allow_hosts in config.toml.",
             )
             return None
+        self.reached.append(host)
         try:
             return await asyncio.wait_for(asyncio.open_connection(host, port), timeout=30)
         except (OSError, TimeoutError) as e:

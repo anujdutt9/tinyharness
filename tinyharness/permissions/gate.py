@@ -94,6 +94,9 @@ class PermissionGate:
     rules: PermissionRules = field(default_factory=PermissionRules)
     hooks: HookRunner | None = None
     classifier: AutoModeClassifier | None = None
+    # Where content from other machines in the conversation came from (ToolContext.outside).
+    # While there is any, calls that can send data out ask a person ("Rule of Two").
+    outside: Callable[[], list[str]] = field(default=lambda: [], repr=False)
     callback: PermissionCallback | None = None
     scratch: Scratch | None = None
     protected: tuple[Path, ...] = ()  # changing anything under these always asks (see `_protected`)
@@ -176,7 +179,7 @@ class PermissionGate:
                 summary=summary or tool.name,
                 path=str(path) if path else None,
                 remember_label="",
-                warning=escape,
+                warning=escape + self._outside_warning(),
             )
             return await self._ask(request)
 
@@ -200,6 +203,7 @@ class PermissionGate:
             path=str(path) if path else None,
             remember_label="" if case_by_case else self._remember_label(tool, path, trusted, target_host),
             reason=risk or "",
+            warning=self._outside_warning().removeprefix("; ") if tool.network else "",
         )
         decision = await self._ask(request)
         if decision.allow and decision.remember and request.remember_label:
@@ -209,6 +213,14 @@ class PermissionGate:
             for name in _readers(tool) if path is not None and not site else (tool.name,):
                 self.rules.add_allow(Rule(name, site or glob.escape(str(path))))
         return decision
+
+    def _outside_warning(self) -> str:
+        """Said when a call could send data out while outside content is in the conversation."""
+        sources = self.outside()
+        if not sources:
+            return ""
+        shown = ", ".join(sources[:3]) + (f" and {len(sources) - 3} more" if len(sources) > 3 else "")
+        return f"; content from outside ({shown}) is in this conversation and could be steering this"
 
     def _protected(self, tool: Tool[Any], path: Path | None) -> str | None:
         """Why changing `path` needs the user every time: it's read as code or settings
@@ -242,6 +254,8 @@ class PermissionGate:
         if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO) and tool.contained(args):
             return Decision(True, f"{self.mode.value}: runs in the sandbox", "mode")
         # Reading a public page is routine; a URL with a query string could carry data out.
+        if tool.network and self.outside():
+            return None  # outside content could be steering this: a person decides (see check)
         if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO) and _public_read(tool, args):
             return Decision(True, f"{self.mode.value}: reading a public web page", "mode")
         if self.mode == PermissionMode.AUTO:
