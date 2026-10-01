@@ -937,3 +937,12 @@ async def test_an_unreadable_call_is_answered_instead_of_ending_the_turn(tmp_pat
     events, history = await run(tmp_path, llm, [Echo()])
     assert "couldn't be run" in history.messages[3].content and "Read" in history.messages[3].content
     assert history.messages[-1].content == "Here is what I found." and events[-1] == Done()
+
+
+async def test_calls_that_stay_unreadable_end_the_turn_with_an_error(tmp_path):
+    """Seen live (Gemma 4 via a bad upstream): after two notes the model still wrote
+    `<|tool_call>call:bash:ls -R.`, and that raw text was shown as the turn's answer."""
+    garbled = "<|tool_call>call:bash:ls -R."
+    llm = ScriptedLLM([garbled, garbled, garbled, "never reached"])
+    with pytest.raises(RunawayOutputError, match="tool calls as text that couldn't be run"):
+        await run(tmp_path, llm, [Echo()])

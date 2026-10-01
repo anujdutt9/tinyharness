@@ -272,12 +272,19 @@ async def run_agent_loop(
                 deps.transcript.write("recovered_calls", tools=[c.name for c in calls])
                 # Saved reasoning would be sent back in place of these calls, without them.
                 turn.state = None
-            elif looks_like_a_call(text) and unreadable_calls < MAX_UNREADABLE_CALLS:
+            elif looks_like_a_call(text):
                 # A call it meant to make but wrote in a form that can't be used: tell it,
                 # rather than end the turn with the call as its answer.
-                unreadable_calls += 1
                 if turn.usage is not None:
                     yield _account(turn, deps)
+                if unreadable_calls >= MAX_UNREADABLE_CALLS:
+                    # Seen live (Gemma 4): the raw `<|tool_call>call:bash:ls -R.` was shown
+                    # as the turn's answer once the notes ran out.
+                    deps.transcript.write("stuck", reason="unreadable call", text=text[-300:])
+                    raise _stuck_again(
+                        RunawayOutputError("it kept writing tool calls as text that couldn't be run")
+                    )
+                unreadable_calls += 1
                 note = UNREADABLE_CALL_NOTE.format(tools=", ".join(sorted(available)))
                 deps.transcript.write("stuck", reason="unreadable call", text=text[-300:])
                 history.append(Message(role="assistant", content=text))
