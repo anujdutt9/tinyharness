@@ -203,7 +203,8 @@ First release.
   sandboxed commands run; anything that leaves that boundary (another folder,
   `sandbox=false`, a network tool) asks. The new `ask` mode asks before every edit and
   command, as `default` used to. `acceptEdits` still works and means `default`.
-  Shift+Tab cycles `default` → `auto` → `plan` → `ask`.
+  Shift+Tab cycles `default` → `auto` → `plan` → `ask`. Reading a public web page (a URL
+  without a query string) doesn't ask in `default` either, as in `auto`.
 
 ### Sandbox network
 - Sandboxed commands can reach an allowlist of hosts through a small local proxy

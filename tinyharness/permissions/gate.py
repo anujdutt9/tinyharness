@@ -241,6 +241,9 @@ class PermissionGate:
             return Decision(True, "default: inside the working directory", "mode")
         if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO) and tool.contained(args):
             return Decision(True, f"{self.mode.value}: runs in the sandbox", "mode")
+        # Reading a public page is routine; a URL with a query string could carry data out.
+        if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO) and _public_read(tool, args):
+            return Decision(True, f"{self.mode.value}: reading a public web page", "mode")
         if self.mode == PermissionMode.AUTO:
             return await self._auto(tool, args, path, trusted, history_tail)
         return None
@@ -273,8 +276,6 @@ class PermissionGate:
             return Decision(True, "auto: routine work inside the project", "mode")
         if self._in_scratch(path):
             return Decision(True, "agent scratch directory", "mode")
-        if tool.network and not urlsplit(str(args.get("url", ""))).query:
-            return Decision(True, "auto: reading a public web page", "mode")
         if self.classifier is None:
             return None
         verdict = await self.classifier.classify(tool.name, args, history_tail=history_tail)
@@ -327,3 +328,8 @@ def _readers(tool: Tool[Any]) -> tuple[str, ...]:
 
 def _directory(path: Path) -> Path:
     return path if path.is_dir() else path.parent
+
+
+def _public_read(tool: Tool[Any], args: dict[str, Any]) -> bool:
+    """A read-only network call to a URL without a query string (WebFetch of a page)."""
+    return tool.network and tool.read_only and not urlsplit(str(args.get("url", ""))).query
