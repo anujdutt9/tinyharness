@@ -415,16 +415,12 @@ async def test_read_caps_a_page_by_bytes(ctx, tmp_path):
     assert len(out.encode()) <= 52_000
 
 
-async def test_a_server_in_the_sandbox_says_to_render_the_file_instead(ctx, tmp_path):
+async def test_a_failed_localhost_request_gets_no_server_advice(ctx, tmp_path):
+    """Any failing command mentioning localhost was told "servers can't run in the sandbox",
+    wrong for `psql -h localhost` and wrong whenever the sandbox allows localhost."""
     from tinyharness.sandbox.policy import SandboxPolicy
     from tinyharness.tools.bash import BashInput, BashTool
 
-    tool = BashTool(object(), SandboxPolicy(write_roots=(tmp_path,)))  # a sandbox is present
-    text = tool._report(
-        "Couldn't connect to server",
-        7,
-        False,
-        BashInput(command="curl -I http://localhost:8000/r.html"),
-        True,
-    )
-    assert "render the file with Playwright" in text and text.endswith("(exit code 7)")
+    tool = BashTool(object(), SandboxPolicy(write_roots=(tmp_path,), allow_localhost=True))
+    text = tool._report("psql: connection refused", 2, False, BashInput(command="psql -h localhost"), True)
+    assert text == "psql: connection refused\n(exit code 2)"

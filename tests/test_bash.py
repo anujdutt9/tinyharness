@@ -104,7 +104,7 @@ async def test_long_output_keeps_head_and_tail(tmp_path, monkeypatch):
 async def test_sandbox_denials_come_with_a_hint(tmp_path):
     tool = BashTool(FakeSandbox(), SandboxPolicy(write_roots=(tmp_path,)))
     out = await run(tool, "echo 'x: Operation not permitted'", tmp_path)
-    assert "the sandbox blocks" in out
+    assert "this ran in the sandbox" in out
 
 
 def test_description_matches_the_sandbox(tmp_path):

@@ -14,7 +14,6 @@ ask to skip the sandbox (sandbox=false) for one command, which asks the user eve
 from __future__ import annotations
 
 import asyncio
-import re
 import shlex
 import shutil
 import uuid
@@ -40,11 +39,6 @@ NONINTERACTIVE_ENV = {
     "TERM": "dumb",
     "GIT_TERMINAL_PROMPT": "0",
 }
-
-# Commands that start a web server or talk to one on this machine (blocked by the sandbox).
-_SERVER = re.compile(
-    r"http\.server|\blocalhost\b|127\.0\.0\.1|\b(uvicorn|flask run|npm run (dev|start)|npx serve)\b"
-)
 
 # Commands that only read, so subagents running side by side needn't take turns on them
 # (Tool.writes). Deliberately short: anything else counts as writing.
@@ -82,14 +76,9 @@ class BashTool(Tool[BashInput]):
             "It runs in a sandbox: it can write only inside the working directory, scratch and temp "
             "directories, can't read credential files, and has no network access"
             + (" (except localhost)" if policy.allow_localhost else "")
-            + ". So package managers can't download (npm/npx, pip, brew), and other apps can't be "
-            "reached: no `open`, `osascript` or browser apps like Google Chrome.app (they fail or "
-            "hang until the timeout); don't try them in the sandbox. API keys aren't available in the sandbox (key variables are stripped "
-            "and key files can't be read), so a program that calls an API fails as if no key were "
-            "set. That doesn't mean the user has none: to run it for real, use sandbox=false. "
-            "If a command genuinely needs the network or to write elsewhere (e.g. "
-            "installing a package), set sandbox=false: the user approves each such command. Don't use it to "
-            "work around a denial of something the user didn't ask for."
+            + ". API key variables are stripped, and apps (`open`, browsers like Chrome.app) can't "
+            "start. A command that needs any of these (a download, an API call, a browser, a "
+            "write elsewhere) needs sandbox=false: the user approves each such command."
             if sandbox
             else "It runs without a sandbox, so the user approves every command."
         )
@@ -167,23 +156,10 @@ class BashTool(Tool[BashInput]):
 
     def _report(self, text: str, code: int | None, timed_out: bool, args: BashInput, sandboxed: bool) -> str:
         text = text.rstrip() or "(no output)"
-        if sandboxed and ".app/" in args.command and code:
-            # A macOS app needs LaunchServices to start, which the sandbox blocks (it would
-            # let `open` run things outside it); Chrome dies with "Abort trap: 6".
-            text += (
-                "\n(note: macOS apps, including browsers, can't run in the sandbox. To look "
-                "at a page, render it with Playwright and sandbox=false)"
-            )
-        elif sandboxed and code and _SERVER.search(args.command):
-            text += (
-                "\n(note: servers can't run in the sandbox: it has no network, not even localhost. "
-                "To look at an HTML page, render the file with Playwright and sandbox=false; no server is needed)"
-            )
-        elif sandboxed and "Operation not permitted" in text:
-            text += (
-                "\n(note: the sandbox blocks writes outside the working directory, reads of "
-                "credential files and network access; this may be why)"
-            )
+        # Sandbox failures don't say "sandbox": a blocked write says "Operation not permitted",
+        # and a macOS app (which needs LaunchServices) dies with "Abort trap: 6".
+        if sandboxed and ("Operation not permitted" in text or (code and ".app/" in args.command)):
+            text += "\n(note: this ran in the sandbox, which may be why; see the Bash tool's limits)"
         # The outcome goes last: the CLI reads it from the final line (a failed test run
         # showed as passing when this note came after it).
         if timed_out:

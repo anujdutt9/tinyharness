@@ -109,9 +109,10 @@ First release.
 - A project's tests can read back the fake `auth.json` and `.env` files they make in
   pytest's temp folder when run in the sandbox; those names stay unreadable everywhere
   else. tinyharness's own test suite now passes when the agent runs it.
-- The Bash tool tells the model that API keys aren't available in the sandbox, so a program
-  that calls an API failing with "no API key" doesn't mean you have none: it asks to run
-  it outside the sandbox instead of reporting that no key is set.
+- The Bash tool states the sandbox's limits in three sentences (writes, credentials and
+  API keys, network, apps) and that a command needing any of them runs with
+  sandbox=false. A sandboxed failure that looks like one of them gets one short note; the
+  advice notes for servers (wrong whenever localhost is allowed) and apps are gone.
 - Images are shrunk to at most 2000 px a side (and 5 MB) before the model sees them: pasted
   screenshots and images the agent reads. A Retina screenshot used to go in at full size,
   and once a request had several images, Claude rejected it and every request after it. If a provider still
@@ -203,13 +204,10 @@ First release.
 - Pages are written as models write them elsewhere, CDN links included: no offline
   rule, bundled Chart.js or Screenshot tool. Those sent models hunting for a library file
   (`find /` for two minutes) or downloading one, and Write rewrote the page behind them.
-- A web server or localhost request that fails in the sandbox explains that the sandbox
-  has no network and says to render the file with Playwright instead.
-- Agents and teammates are told to compute derived numbers (percentages, totals, ratios)
-  with a query or code, never by hand: a teammate reported the right count with a wrong
-  percentage, and the report charted it.
-- The system prompt gives the typical Team case: a full analysis of a database, dataset
-  or codebase across several areas, one teammate per area.
+- Prompts carry no one demo's rules: the business-database Team example, "delegate
+  without being asked", "re-check a subagent's numbers" and "never do mental math"
+  (system prompt), and "never make up data" and "compute every number with code"
+  (teammates) were dropped. They pushed models into costly teams and double work.
 
 ### Project instructions
 - AGENTS.md (and AGENT.md, CLAUDE.md) are read from the repository's root down to the

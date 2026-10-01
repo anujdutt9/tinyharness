@@ -465,7 +465,7 @@ def test_a_sandboxed_test_run_that_fails_shows_as_failed(renderer):
         args=BashInput(command="pytest -q"),
         sandboxed=True,
     )
-    assert output.endswith("(exit code 1)") and "(note: the sandbox" in output
+    assert output.endswith("(exit code 1)") and "(note: this ran in the sandbox" in output
     replay(renderer, ("Bash(pytest -q)", "Bash", {"command": "pytest -q"}, output, False))
     renderer.handle(Done())
     row, first, last, footer = shown(renderer)[-4:]
@@ -490,7 +490,7 @@ def test_an_app_that_crashes_in_the_sandbox_says_to_run_it_outside():
         args=BashInput(command=chrome),
         sandboxed=True,
     )
-    assert "with Playwright and sandbox=false" in output and output.endswith("(exit code 134)")
+    assert "this ran in the sandbox" in output and output.endswith("(exit code 134)")
 
 
 def test_cost_explains_where_the_tokens_went():
