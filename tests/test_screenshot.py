@@ -85,3 +85,32 @@ async def test_renders_a_page_inside_the_sandbox_and_shows_it(tmp_path, monkeypa
     )
     assert "screenshot of page.html#top, 400x300" in out.text
     assert out.images[0].media_type == "image/png"
+
+
+@pytest.mark.skipif(not Seatbelt.available(), reason="needs Seatbelt")
+async def test_reports_the_pages_script_errors(tmp_path, monkeypatch):
+    # Seen live: a CDN 404 left `feather` undefined, its call threw, and every chart after
+    # it was missing from a screenshot that otherwise looked fine.
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", _real_browsers())
+    if find_headless_shell() is None:
+        pytest.skip("Playwright's chrome-headless-shell isn't installed")
+    (tmp_path / "page.html").write_text("<h1>hi</h1>\n<script>\nfeather.replace();\n</script>")
+    out = await call(
+        ScreenshotTool(Seatbelt(), SandboxPolicy.for_project(tmp_path)),
+        {"target": "page.html", "width": 400, "height": 300},
+        make_ctx(tmp_path),
+    )
+    assert "line 3: Uncaught ReferenceError: feather is not defined" in out.text
+
+
+def test_script_errors_note_keeps_uncaught_errors_only():
+    from tinyharness.tools.screenshot import _script_errors_note
+
+    log = (
+        '[1001/1:INFO:CONSOLE:7] "hello", source: file:///p.html (7)\n'
+        '[1001/1:INFO:CONSOLE:9] "Uncaught TypeError: x is null", source: file:///p.html (9)\n'
+        '[1001/1:INFO:CONSOLE(9)] "Uncaught TypeError: x is null", source: file:///p.html (9)\n'
+    )
+    note = _script_errors_note(log)
+    assert note.count("line 9: Uncaught TypeError: x is null") == 1 and "hello" not in note
+    assert _script_errors_note('[1:INFO:CONSOLE:7] "hello", source: file:///p.html (7)') == ""

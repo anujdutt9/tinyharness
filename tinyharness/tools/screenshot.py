@@ -100,6 +100,7 @@ class ScreenshotTool(Tool[ScreenshotInput]):
             str(shell),
             f"--window-size={args.width},{args.height}",
             "--hide-scrollbars",
+            "--enable-logging=stderr",  # the page's console, so its script errors reach us
             f"--screenshot={out}",
             url,
         ]
@@ -130,6 +131,8 @@ class ScreenshotTool(Tool[ScreenshotInput]):
         except ValueError as e:
             raise ToolError(f"{e}; use a smaller viewport") from None
         text = f"screenshot of {args.target}, {args.width}x{args.height}, saved as {out}"
+        if note := _script_errors_note(stderr.decode("utf-8", "replace")):
+            text += f"\n{note}"
         if note := _remote_assets_note(url):
             text += f"\n{note}"
         return ToolOutput(text, [image])
@@ -156,6 +159,30 @@ class ScreenshotTool(Tool[ScreenshotInput]):
 _REMOTE_ASSET = re.compile(
     r"<(?:script|link)\b[^>]*\b(?:src|href)\s*=\s*[\"']((?:https?:)?//[^\"']+)", re.IGNORECASE
 )
+
+
+# chrome's log line for a console message: `...:INFO:CONSOLE:346] "Uncaught ...", source: <url> (346)`
+# (older builds write `CONSOLE(346)]`).
+_CONSOLE = re.compile(r':CONSOLE[(:]\d+\)?\] "(.*)", source: \S* \((\d+)\)$', re.MULTILINE)
+MAX_SCRIPT_ERRORS = 5
+
+
+def _script_errors_note(stderr: str) -> str:
+    """The page's uncaught script errors. A picture can't show them: an error stops the rest
+    of its script, so what that script would have drawn is just missing (seen live: a CDN
+    404 left `feather` undefined, and the charts after that line never ran)."""
+    errors = dict.fromkeys(
+        f"line {line}: {message}"
+        for message, line in _CONSOLE.findall(stderr)
+        if message.startswith("Uncaught")
+    )
+    if not errors:
+        return ""
+    shown = list(errors)[:MAX_SCRIPT_ERRORS]
+    return (
+        "(script errors on this page: " + "; ".join(shown) + ". Each one stops the rest of its "
+        "script, so whatever that script draws after it is missing. Fix these first.)"
+    )
 
 
 def _remote_assets_note(url: str) -> str:
