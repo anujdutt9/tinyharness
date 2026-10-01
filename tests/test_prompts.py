@@ -8,7 +8,7 @@ from tinyharness.subagents import builtin_agents
 
 # Every prompt file and the variables its caller provides.
 PROMPT_VARIABLES = {
-    "system": {"working_dir", "scratch_dir", "model_name", "model_id", "provider", "date"},
+    "system": {"model_name", "model_id", "provider"},
     "compaction": set(),
     "classifier": set(),
 }
@@ -26,8 +26,8 @@ def test_placeholders_match_callers(name, variables):
 
 
 def test_missing_variable_is_an_error():
-    with pytest.raises(KeyError, match="scratch_dir"):
-        load_prompt("system", working_dir="/repo")
+    with pytest.raises(KeyError, match="provider"):
+        load_prompt("system", model_name="M", model_id="m")
 
 
 def test_json_braces_are_left_alone():
@@ -46,7 +46,7 @@ def test_system_prompt_includes_agent_md(tmp_path):
     )
     assert f"Working directory: {tmp_path}" in prompt
     assert "Always use tabs." in prompt
-    assert prompt.endswith("Be brief.")
+    assert prompt.index("Be brief.") > prompt.index("Always use tabs.")
 
 
 def test_builtin_agents_load_from_markdown():
@@ -128,3 +128,13 @@ def test_the_system_prompt_carries_no_one_demos_instructions():
     prompt = load_prompt("system", **{v: f"<{v}>" for v in PROMPT_VARIABLES["system"]})
     for phrase in ("without being asked", "customers and", "run the query again", "Mental math"):
         assert phrase not in prompt
+
+
+def test_what_changes_per_session_comes_last(tmp_path):
+    """The scratch folder is new in every session; placed mid-prompt it made everything
+    after it (AGENT.md, skills, extension sections) miss the provider's cache each time."""
+    a = build_system_prompt(tmp_path, tmp_path / "s1", model_name="M", model_id="m", provider="P", extra="X")
+    b = build_system_prompt(tmp_path, tmp_path / "s2", model_name="M", model_id="m", provider="P", extra="X")
+    shared = a[: a.index("# This session")]
+    assert b.startswith(shared) and "X" in shared and a.rstrip().endswith(a.splitlines()[-1])
+    assert a.splitlines()[-1].startswith("Today's date:")

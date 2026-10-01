@@ -109,17 +109,9 @@ def build_system_prompt(
     provider: str,
     extra: str = "",
 ) -> str:
-    parts = [
-        load_prompt(
-            "system",
-            working_dir=working_dir,
-            scratch_dir=scratch_dir,
-            model_name=model_name,
-            model_id=model_id,
-            provider=provider,
-            date=datetime.date.today().isoformat(),
-        )
-    ]
+    # What stays the same comes first and what changes per session (the scratch folder,
+    # the date) last, so a new session reuses the provider's cached prefix of the old one.
+    parts = [load_prompt("system", model_name=model_name, model_id=model_id, provider=provider)]
     parts.append(environment(working_dir))
     if context := load_agent_md(working_dir):
         parts.append(f"# User context (AGENT.md)\n\n{context}")
@@ -127,4 +119,10 @@ def build_system_prompt(
         parts.append(NO_INSTRUCTIONS)
     if extra:
         parts.append(extra)
+    parts.append(
+        "# This session\n"
+        f"Working directory: {working_dir} (files you create go here unless the user says otherwise)\n"
+        f"Scratch directory, deleted when the session ends: {scratch_dir}\n"
+        f"Today's date: {datetime.date.today().isoformat()}"
+    )
     return "\n\n".join(parts)
