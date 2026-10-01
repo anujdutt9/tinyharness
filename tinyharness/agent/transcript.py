@@ -49,14 +49,15 @@ class Transcript:
 
 
 def _redact(value: Any, *, patterns: bool = True) -> Any:
-    """Mask credentials in every string of a log record. Provider reasoning (`state`)
-    gets only exact-value masking: its signed and encrypted blobs are long random text
-    that a key-shaped pattern could match by chance, and altering one would make the
-    provider reject the conversation when it's resumed."""
+    """Mask credentials in every string of a log record. Provider reasoning (`state`) and
+    images get only exact-value masking: signed and encrypted blobs, and base64 image
+    data, are long random text that a key-shaped pattern could match by chance, and
+    altering one would break the conversation (or the picture) when it's resumed."""
     if isinstance(value, str):
         return redact_secrets(value) if patterns else mask_secrets(value)
     if isinstance(value, dict):
-        return {k: _redact(v, patterns=patterns and k != "state") for k, v in value.items()}
+        # Provider reasoning and image data: exact values only (see the docstring).
+        return {k: _redact(v, patterns=patterns and k not in ("state", "images")) for k, v in value.items()}
     if isinstance(value, list | tuple):
         return [_redact(v, patterns=patterns) for v in value]
     return value

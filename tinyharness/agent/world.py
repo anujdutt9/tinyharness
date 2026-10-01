@@ -56,6 +56,33 @@ def file_meta(tool: Tool[Any], args: Any, ctx: ToolContext) -> dict[str, Any]:
     return {"path": str(path), **fp, "content": tool.read_only} if fp else {}
 
 
+def stub_superseded(messages: list[Message], meta: dict[str, Any], root: Path) -> int:
+    """After a call touched a file, replace earlier copies of that file's content in the
+    history with a stub, so the model can't copy from a version that's gone: an Edit or
+    Write changed it, or a newer Read shows it changed. Unchanged copies stay (stubbing them
+    would only cost the prompt cache). (Models editing from an old copy
+    kept failing: the file had changed under the text they were trying to replace.)
+    How many results were stubbed."""
+    path = meta.get("path")
+    if not path:
+        return 0
+    stubbed = 0
+    for m in messages:
+        if (
+            m.role == "tool"
+            and m.meta is not meta
+            and m.meta.get("path") == path
+            and m.meta.get("content")
+            and m.meta.get("sha") != meta.get("sha")  # an identical copy can't mislead
+            and not (m.content or "").startswith(STALE_MARK)
+        ):
+            why = "read again below" if meta.get("content") else "changed since this was read; Read it again"
+            m.content = f"{STALE_MARK} {_short(path, root)}: {why}]"
+            m.images = []
+            stubbed += 1
+    return stubbed
+
+
 def git_state(root: Path) -> dict[str, str] | None:
     """HEAD commit and branch, or None outside a git repository."""
     head = _git(root, "rev-parse", "HEAD")

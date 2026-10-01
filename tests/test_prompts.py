@@ -8,7 +8,7 @@ from tinyharness.subagents import builtin_agents
 
 # Every prompt file and the variables its caller provides.
 PROMPT_VARIABLES = {
-    "system": {"working_dir", "scratch_dir", "model_name", "model_id", "provider"},
+    "system": {"working_dir", "scratch_dir", "model_name", "model_id", "provider", "date", "assets_dir"},
     "compaction": set(),
     "classifier": set(),
 }
@@ -54,7 +54,7 @@ def test_builtin_agents_load_from_markdown():
     assert set(agents) == {"explore", "plan", "general-purpose", "researcher"}
     assert "Write" not in agents["explore"].tools
     assert "Write" not in agents["researcher"].tools and "WebSearch" in agents["researcher"].tools
-    assert agents["general-purpose"].permission_mode == "default"
+    assert all(a.permission_mode is None for a in agents.values())  # they follow the session's mode
     assert "Bash" in agents["general-purpose"].tools  # delegated coding work can run tests
     assert "Bash" not in agents["explore"].tools and "Bash" not in agents["plan"].tools
     assert all(a.description and a.system_prompt for a in agents.values())
@@ -69,3 +69,20 @@ def test_system_prompt_names_the_model(tmp_path):
         provider="Anthropic",
     )
     assert "Claude Opus 5.5 (model id `claude-opus-5-5`, provided by Anthropic)" in prompt
+
+
+def _prompt(work):
+    return build_system_prompt(work, work / "scratch", model_name="M", model_id="m", provider="P")
+
+
+def test_agents_md_is_read_like_agent_md(tmp_path):
+    """AGENTS.md is what most other agents read; a repo set up for them works as is."""
+    (tmp_path / "AGENTS.md").write_text("Run make check before finishing.")
+    assert "Run make check before finishing." in _prompt(tmp_path)
+
+
+def test_the_model_is_told_when_there_is_no_instructions_file(tmp_path):
+    """Otherwise it goes looking (a failed Read of AGENTS.md)."""
+    assert "no instructions file" in _prompt(tmp_path)
+    (tmp_path / "AGENT.md").write_text("Use tabs.")
+    assert "no instructions file" not in _prompt(tmp_path)

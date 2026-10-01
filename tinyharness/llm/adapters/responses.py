@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from tinyharness.agent.history import Image
 from tinyharness.llm.adapters.base import Adapter, StreamParser
 from tinyharness.llm.types import LLMError, Request, StreamChunk
 
@@ -21,12 +22,16 @@ class ResponsesAdapter(Adapter):
 
     def payload(self, request: Request) -> dict[str, Any]:
         items: list[dict[str, Any]] = []
+        pending: list[Image] = []  # from tool results: sent in a user message after them
         for m in request.messages:
             if m.role == "tool":
                 items.append(
                     {"type": "function_call_output", "call_id": m.tool_call_id, "output": m.content or ""}
                 )
-            elif m.role == "assistant" and (output := request.echo(m)) is not None:
+                pending += m.images
+                continue
+            _flush_images(items, pending)
+            if m.role == "assistant" and (output := request.echo(m)) is not None:
                 items.extend(output)  # exactly as received, reasoning included
             elif m.role == "assistant":
                 if m.content:
@@ -40,8 +45,12 @@ class ResponsesAdapter(Adapter):
                     }
                     for c in m.tool_calls
                 )
+            elif m.images:
+                parts = [{"type": "input_text", "text": m.content or ""}, *map(_image_part, m.images)]
+                items.append({"role": "user", "content": parts})
             else:
                 items.append({"role": "user", "content": m.content or ""})
+        _flush_images(items, pending)
 
         payload: dict[str, Any] = {
             "model": request.model,
@@ -135,3 +144,16 @@ class _ResponsesParser(StreamParser):
 
     def state(self) -> Any:
         return self.output or None
+
+
+def _image_part(image: Image) -> dict[str, Any]:
+    return {"type": "input_image", "image_url": image.data_url()}
+
+
+def _flush_images(items: list[dict[str, Any]], pending: list[Image]) -> None:
+    """Images from tool results, in a user message after them."""
+    if pending:
+        names = ", ".join(image.name or "image" for image in pending)
+        text = {"type": "input_text", "text": f"The images from the tool results above: {names}"}
+        items.append({"role": "user", "content": [text, *map(_image_part, pending)]})
+        pending.clear()

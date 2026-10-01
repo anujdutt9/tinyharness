@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from tinyharness.agent.history import Image
 from tinyharness.llm.adapters.base import Adapter, StreamParser
 from tinyharness.llm.types import LLMError, Request, StreamChunk
 
@@ -29,17 +30,25 @@ class ChatAdapter(Adapter):
         messages: list[dict[str, Any]] = (
             [{"role": "system", "content": request.system}] if request.system else []
         )
+        pending: list[Image] = []  # from tool results: tool messages are text-only here
         for m in request.messages:
             if m.role == "tool":
                 messages.append({"role": "tool", "tool_call_id": m.tool_call_id, "content": m.content or ""})
-            elif m.role == "assistant":
+                pending += m.images
+                continue
+            _flush_images(messages, pending)
+            if m.role == "assistant":
                 msg: dict[str, Any] = {"role": "assistant", "content": m.content or ""}
                 if m.tool_calls:
                     msg["tool_calls"] = [c.to_dict() for c in m.tool_calls]
                 msg.update(request.echo(m) or {})
                 messages.append(msg)
+            elif m.images:
+                parts = [{"type": "text", "text": m.content or ""}, *map(_image_part, m.images)]
+                messages.append({"role": "user", "content": parts})
             else:
                 messages.append({"role": "user", "content": m.content or ""})
+        _flush_images(messages, pending)
 
         payload: dict[str, Any] = {
             "model": request.model,
@@ -71,6 +80,20 @@ class ChatAdapter(Adapter):
 
     def ping_payload(self, model: str) -> dict[str, Any]:
         return {"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1}
+
+
+def _image_part(image: Image) -> dict[str, Any]:
+    return {"type": "image_url", "image_url": {"url": image.data_url()}}
+
+
+def _flush_images(messages: list[dict[str, Any]], pending: list[Image]) -> None:
+    """Images from a batch of tool results, in a user message after all of them (nothing
+    may come between the tool messages that answer one assistant turn)."""
+    if pending:
+        names = ", ".join(image.name or "image" for image in pending)
+        text = {"type": "text", "text": f"The images from the tool results above: {names}"}
+        messages.append({"role": "user", "content": [text, *map(_image_part, pending)]})
+        pending.clear()
 
 
 def _set_path(payload: dict[str, Any], dotted: str, value: Any) -> None:

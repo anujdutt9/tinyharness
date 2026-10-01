@@ -309,3 +309,28 @@ async def test_open_hands_documents_to_the_system_opener(tmp_path, monkeypatch):
     out = await call(OpenTool(), {"target": "report.html"}, make_ctx(tmp_path))
     assert out == f"opened {tmp_path.resolve() / 'report.html'}"
     assert seen.read_text().strip() == str(tmp_path.resolve() / "report.html")
+
+
+@pytest.mark.parametrize(
+    ("command", "reads"),
+    [
+        ("ls -la", True),
+        ("cat a.txt | grep x | wc -l", True),
+        ("git log --oneline", True),
+        ("sqlite3 -readonly app.db 'SELECT 1'", True),
+        ("find . -name '*.py'", True),
+        ("sqlite3 app.db 'SELECT 1'", False),
+        ("sqlite3 -readonly app.db '.output x'", False),
+        ("git commit -m x", False),
+        ("cat a > b", False),
+        ("ls; rm x", False),
+        ("grep a f && rm f", False),
+        ("echo $(rm x)", False),
+        ("find . -delete", False),
+        ("python3 script.py", False),
+    ],
+)
+def test_only_commands_that_certainly_read_skip_the_write_lock(command, reads):
+    from tinyharness.tools.bash import only_reads
+
+    assert only_reads(command) is reads

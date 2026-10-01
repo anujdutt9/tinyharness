@@ -44,8 +44,23 @@ def format_todos(todos: list[dict[str, str]]) -> str:
 class TodoWriteTool(Tool[TodoInput]):
     name = "TodoWrite"
     description = (
-        "Plan and track multi-step work. Pass the FULL list every time (it replaces the old one). "
-        "Keep exactly one item in_progress; mark items completed as soon as they are done."
+        "A short plan of the work, shown to the user. Pass the FULL list every time (it "
+        "replaces the old one).\n\n"
+        "Use it when the work has several distinct steps (not several tool calls for one "
+        "step), or the user gives you several things to do or asks for a plan.\n\n"
+        "Skip it when a plan adds nothing:\n"
+        "- a question or explanation: 'what does this function do?'\n"
+        "- a single change: 'add a docstring to parse()', 'rename this variable'\n"
+        "- one command: 'run the tests and tell me what failed'\n"
+        "- one artifact written in one go: 'write a script that renames these files'\n\n"
+        "A good plan:\n"
+        "- has a few coarse steps of about 5-7 words, each one you could check was done; no "
+        "filler steps ('explore the code', 'plan the approach': the list is the plan)\n"
+        "- matches how you'll work: writing a whole file in one call is one step\n\n"
+        "Keeping it current: mark a step in_progress when you start it and completed when it's "
+        "done; at most one in_progress. If one call finishes several steps, mark them all "
+        "completed together. Change the plan when the work changes. Don't repeat the list in "
+        "your reply: the user already sees it."
     )
     Input = TodoInput
     read_only = True

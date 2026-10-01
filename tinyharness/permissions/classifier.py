@@ -53,7 +53,8 @@ class AutoModeClassifier:
             return early
         prompt = (
             f"Tool: {tool_name}\nArgs: {json.dumps(args)[:1000]}\n"
-            f"Recent context (last messages):\n{history_tail[-1500:]}\n"
+            f"Recent context (the user's messages and the agent's tool calls; tool output is "
+            f"left out):\n{history_tail[-1500:]}\n"
         )
         try:
             text = await asyncio.wait_for(

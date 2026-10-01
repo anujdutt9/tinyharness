@@ -83,8 +83,9 @@ SessionOptions(hooks=[Hook(event="PreToolUse", type="python", callable=guard)])
 The `Agent` tool runs a task in a fresh context and returns only the final answer.
 The model uses it on its own when a job is big enough. It comes with four built-in
 agents: `explore`, `plan` and `researcher` (read-only; `researcher` searches the web)
-and `general-purpose`. Several read-only agents started in one reply run in
-parallel; agents that can write take turns. To add your own, put a Markdown file in
+and `general-purpose`. Several agents started in one reply run in parallel, writers
+included: their calls that change things (Bash, Edit, Write) take turns, so two never
+write at once, while their model calls overlap. To add your own, put a Markdown file in
 `agents/`:
 
 ```markdown
@@ -92,19 +93,21 @@ parallel; agents that can write take turns. To add your own, put a Markdown file
 name: reviewer
 description: Reviews a change for bugs and missing tests.
 tools: [Read, Grep, Glob]
-permission_mode: acceptEdits
+permission_mode: acceptEdits   # optional: never more permissive than this
 ---
 You are a meticulous reviewer. Report concrete bugs with file:line references.
 ```
 
-Subagents have their own permission mode (plan mode and bypass carry over from the
-session) and can't start further subagents. Their transcripts go to
+Subagents run in the session's permission mode, and follow it when you switch (even
+mid-run). An agent's `permission_mode` is a limit: it can make the agent stricter than
+the session, never more permissive. A subagent's permission prompts say which agent is
+asking. Subagents can't start further subagents. Their transcripts go to
 `~/.tinyharness/projects/<project>/sidechains/`, and their progress is shown live (SDK: `on_event`).
 
 **Teams.** For a goal that splits into parts, the model can call `Team` with a list of
 tasks, each with an agent type and the tasks it depends on. A task starts when its
-dependencies are done and gets their results; independent read-only tasks run in
-parallel (up to 4 at a time), writers take turns. Teammates share a board
+dependencies are done and gets their results; independent tasks run in parallel (up
+to 4 at a time), and teammates' calls that change things take turns. Teammates share a board
 (`TeamBoard`) and can message each other (`TeamMessage`); if a task fails, the tasks
 that depend on it are skipped. The lead gets one report with every result.
 

@@ -8,11 +8,13 @@ from tinyharness.events import (
     Compacted,
     Done,
     Event,
+    ModelStuck,
     PermissionDecision,
     Reasoning,
     SubagentUpdate,
     TodosUpdated,
     TokenUsage,
+    ToolInputStreaming,
     ToolResult,
     ToolsDispatched,
     ToolUse,
@@ -29,7 +31,7 @@ from tinyharness.session import (
 )
 from tinyharness.skills import Skill, import_skills, load_skills
 from tinyharness.subagents import AgentSpec
-from tinyharness.tools import Tool, ToolContext, ToolError, ToolInput
+from tinyharness.tools import Tool, ToolContext, ToolError, ToolInput, ToolOutput
 
 __version__ = "0.1.5"
 
@@ -44,6 +46,7 @@ __all__ = [
     "FileSessionStore",
     "Hook",
     "MissingAPIKeyError",
+    "ModelStuck",
     "PermissionDecision",
     "PermissionMode",
     "PermissionRequest",
@@ -61,6 +64,8 @@ __all__ = [
     "ToolContext",
     "ToolError",
     "ToolInput",
+    "ToolInputStreaming",
+    "ToolOutput",
     "ToolResult",
     "ToolUse",
     "ToolsDispatched",

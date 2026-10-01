@@ -39,7 +39,7 @@ class Adapter(ABC):
         self.provider = provider
 
     def headers(self, api_key: str) -> dict[str, str]:
-        return {"Authorization": f"Bearer {api_key}"}
+        return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     @abstractmethod
     def payload(self, request: Request) -> dict[str, Any]: ...
@@ -59,7 +59,7 @@ class Adapter(ABC):
         """One page of the model list, plus the query params for the next page (None: last page).
 
         The default reads the OpenAI-style `{"data": [{"id": ...}]}`, picking up a
-        context size under any of the names providers use for it.
+        context size under any of the names providers use for it (vLLM: `max_model_len`).
         """
         models = []
         for item in body.get("data") or []:
@@ -69,7 +69,9 @@ class Adapter(ABC):
                     id=str(item["id"]),
                     label=str(item.get("name") or item.get("display_name") or ""),
                     context=_first_int(
-                        item, top, keys=("context_length", "context_window", "max_context_length")
+                        item,
+                        top,
+                        keys=("context_length", "context_window", "max_context_length", "max_model_len"),
                     ),
                     max_output=_first_int(item, top, keys=("max_output_tokens", "max_completion_tokens")),
                     price=price_from_listing(item["pricing"])

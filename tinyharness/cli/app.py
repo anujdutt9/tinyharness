@@ -79,7 +79,7 @@ def run_import(console: Console, source: str, symlink: bool, force: bool) -> Non
 
 KEYS = (
     "  [key]/[/] [muted]commands[/]  [subtle]·[/]  [key]shift+tab[/] [muted]mode[/]  [subtle]·[/]  "
-    "[key]ctrl+o[/] [muted]last output[/]  [subtle]·[/]  [key]ctrl+c[/] [muted]interrupt[/]  [subtle]·[/]  "
+    "[key]ctrl+o[/] [muted]expand / collapse output[/]  [subtle]·[/]  [key]ctrl+c[/] [muted]interrupt[/]  [subtle]·[/]  "
     "[key]ctrl+d[/] [muted]exit[/]\n"
 )
 

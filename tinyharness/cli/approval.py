@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
+from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import ANSI, FormattedText, merge_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
@@ -26,8 +27,7 @@ from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
 from rich.text import Text
 
-from tinyharness.cli.theme import BRAND, PROMPT, PT_STYLE, SUBTLE, split_summary
-from tinyharness.cli.widgets import at_bottom, prompt_at_bottom
+from tinyharness.cli.theme import BRAND, PROMPT, PT_STYLE, SUBTLE, split_summary, tool_style
 from tinyharness.permissions import Decision, PermissionRequest
 
 Choice = Literal["yes", "remember", "no"]
@@ -60,6 +60,8 @@ def card(request: PermissionRequest, summary: str) -> RenderableType:
     """The tool call being asked about, framed so it stands out from the transcript."""
     name, detail = split_summary(summary)
     title = Text.assemble((name, "bold"), (f"  {detail}" if detail else "", "muted"))
+    if request.agent:  # a subagent is asking, not the agent you're talking to
+        title = Text.assemble((f"{request.agent} subagent", tool_style("Agent")), (" · ", "subtle"), title)
     body: list[RenderableType] = []
     if (diff := preview(request)) is not None:
         body.append(diff)
@@ -114,8 +116,8 @@ async def ask(console: Console, request: PermissionRequest, summary: str) -> Dec
         symbol=PROMPT,
         key_bindings=_choice_keys([choice for choice, _ in options]),
     )
-    app = at_bottom(prompt._create_application())  # where the input box is
-    app.erase_when_done = True  # ChoiceInput has no option to erase itself; its app does
+    app = prompt._create_application()  # ChoiceInput has no option to erase itself; its app does
+    app.erase_when_done = True
     try:
         choice: Choice = await app.run_async()
     except (KeyboardInterrupt, EOFError):
@@ -140,7 +142,7 @@ def _ansi(console: Console, renderable: RenderableType) -> str:
 
 async def _ask_feedback() -> str:
     try:
-        text: Any = await prompt_at_bottom().prompt_async(
+        text: Any = await PromptSession[str]().prompt_async(
             FormattedText([(f"{BRAND} bold", f" {PROMPT} "), ("", "What should it do instead? ")]),
             placeholder=FormattedText([(SUBTLE, "enter to just stop")]),
             style=PT_STYLE,

@@ -112,7 +112,7 @@ async def test_remembering_an_outside_path_covers_that_directory(tmp_path_factor
     g = gate(project, callback=user)
     assert user.answers  # sanity
     await g.check(READ, {}, str(outside / "a.pdf"))
-    assert user.requests[0].remember_label == f"allow Read in {outside}/ for this session"
+    assert user.requests[0].remember_label == f"allow reading in {outside}/ for this session"
     d = await g.check(READ, {}, str(outside / "b.pdf"))
     assert d.allow and d.source == "rule"
     assert g.mode == PermissionMode.DEFAULT  # outside paths never flip the mode
@@ -323,3 +323,115 @@ async def test_risky_changes_in_auto_mode_are_judged_one_at_a_time(tmp_path):
     first, _ = user.requests  # asked both times
     assert first.reason.startswith("it replaces a 100-line file") and first.remember_label == ""
     assert g.mode == PermissionMode.AUTO  # still auto: the answer didn't switch to acceptEdits
+
+
+# ---- subagents follow the session's mode ----
+
+
+@pytest.mark.parametrize(
+    ("session", "limit", "runs_in"),
+    [
+        ("auto", None, "auto"),  # no limit: the session's mode
+        ("auto", "acceptEdits", "acceptEdits"),  # a limit only ever makes it stricter...
+        ("default", "acceptEdits", "default"),  # ...never more permissive than the session
+        ("default", "bypassPermissions", "default"),
+        ("plan", None, "plan"),
+        ("bypassPermissions", "acceptEdits", "acceptEdits"),
+    ],
+)
+def test_a_subagent_runs_in_the_stricter_of_the_session_and_its_limit(tmp_path, session, limit, runs_in):
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.parse(session))
+    child = gate.child("helper", PermissionMode.parse(limit) if limit else None)
+    assert child.mode == PermissionMode.parse(runs_in)
+
+
+def test_switching_mode_reaches_subagents_already_running(tmp_path):
+    """Switching to auto mid-run used to leave running subagents asking as before."""
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.DEFAULT)
+    free, capped = gate.child("general-purpose", None), gate.child("reviewer", PermissionMode.ACCEPT_EDITS)
+    gate.set_mode(PermissionMode.AUTO)
+    assert (gate.mode, free.mode, capped.mode) == (
+        PermissionMode.AUTO,
+        PermissionMode.AUTO,
+        PermissionMode.ACCEPT_EDITS,
+    )
+
+
+async def test_allowing_all_edits_at_a_prompt_reaches_subagents_too(tmp_path):
+    from tinyharness.tools.edit import EditTool
+
+    async def yes_dont_ask_again(request):
+        return Decision(True, "ok", "user", remember=True)
+
+    gate = PermissionGate(
+        workspace=Workspace(tmp_path), mode=PermissionMode.DEFAULT, callback=yes_dont_ask_again
+    )
+    child = gate.child("general-purpose", None)
+    await gate.check(EditTool(), {}, "src/app.py")  # "allow all edits in this project"
+    assert gate.mode == child.mode == PermissionMode.ACCEPT_EDITS
+
+
+async def test_a_subagents_prompt_says_whose_it_is(tmp_path):
+    from tinyharness.tools.edit import EditTool
+
+    asked = []
+
+    async def user(request):
+        asked.append(request)
+        return Decision(True, "ok", "user")
+
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.DEFAULT, callback=user)
+    await gate.child("general-purpose", None).check(EditTool(), {}, "src/app.py")
+    assert asked[0].agent == "general-purpose"
+
+
+def test_mode_changes_are_logged(tmp_path, monkeypatch):
+    import json
+
+    from tinyharness import Session, SessionOptions
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    session = Session(SessionOptions(config_path=tmp_path / "none.toml", working_dir=tmp_path))
+    try:
+        session.set_mode("auto")
+        records = [json.loads(line) for line in session.transcript.path.read_text().splitlines()]
+        assert {"event": "mode", "mode": "auto"}.items() <= records[-1].items()
+    finally:
+        session.close()
+
+
+# ---- reading tools share one answer ----
+
+
+async def test_allowing_reading_in_a_folder_covers_every_reading_tool(tmp_path_factory):
+    """Read, then Grep, then Glob on ~/Downloads used to be three questions."""
+    from tinyharness.tools.glob import GlobTool
+    from tinyharness.tools.grep import GrepTool
+
+    project, outside = tmp_path_factory.mktemp("project"), tmp_path_factory.mktemp("downloads")
+    (outside / "deck.html").write_text("<html>")
+    user = User(REMEMBER)
+    g = gate(project, callback=user)
+    await g.check(READ, {}, str(outside / "deck.html"))
+    assert (await g.check(GrepTool(), {}, str(outside / "deck.html"))).allow
+    assert (await g.check(GlobTool(), {}, str(outside))).allow  # the folder itself
+    assert len(user.requests) == 1
+
+
+async def test_a_yes_to_reading_a_file_covers_grepping_it(tmp_path):
+    from tinyharness.tools.grep import GrepTool
+
+    user = User(YES)
+    g = gate(tmp_path, callback=user)
+    await g.check(READ, {}, "/etc/hosts")
+    assert (await g.check(GrepTool(), {}, "/etc/hosts")).allow
+    assert len(user.requests) == 1
+
+
+async def test_other_tools_still_get_their_own_answer(tmp_path_factory):
+    project, outside = tmp_path_factory.mktemp("project"), tmp_path_factory.mktemp("downloads")
+    user = User(REMEMBER, YES)
+    g = gate(project, callback=user)
+    await g.check(READ, {}, str(outside / "a.txt"))
+    await g.check(WRITE, {}, str(outside / "b.txt"))  # reading approval doesn't cover writing
+    assert len(user.requests) == 2

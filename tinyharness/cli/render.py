@@ -54,6 +54,7 @@ from tinyharness.cli.theme import (
     ellipsize,
     file_link,
     split_summary,
+    tool_label,
     tool_line,
     tool_style,
 )
@@ -62,11 +63,14 @@ from tinyharness.events import (
     Compacted,
     Done,
     Event,
+    MessageDelivered,
+    ModelStuck,
     PermissionDecision,
     Reasoning,
     SubagentUpdate,
     TodosUpdated,
     TokenUsage,
+    ToolInputStreaming,
     ToolResult,
     ToolsDispatched,
     ToolUse,
@@ -75,9 +79,8 @@ from tinyharness.llm.usage import Usage, UsageMeter
 from tinyharness.permissions import Decision, PermissionRequest
 
 WAITING = "Working"
+_WRITING_LABELS = ("Writing", "Editing", "Preparing")  # see Renderer._writing_label
 
-# Decisions worth surfacing even though the user wasn't asked.
-_NOTABLE_AUTO_ALLOW = {"rule", "hook", "classifier"}
 _REJECTED = "The user rejected this tool call."
 
 _COMPACTION_MESSAGES = {
@@ -89,6 +92,7 @@ _COMPACTION_MESSAGES = {
 _EDIT_STATS = re.compile(r", -(\d+)/\+(\d+) lines$")
 _WRITE_STATS = re.compile(r", (\d+) lines$")
 _EXIT_CODE = re.compile(r"\(exit code (\d+)\)\s*$")
+_MATCH_HEADER = re.compile(r"^\d+ (total )?match\(es\)|^\d+ files?\b")
 # Commands that run a test suite, so the turn's footer can say whether the tests passed.
 _TEST_COMMAND = re.compile(
     r"\b(pytest|py\.test|tox|nox|jest|vitest|mocha|rspec|phpunit|ctest)\b"
@@ -98,6 +102,13 @@ _TEST_COMMAND = re.compile(
     r"|\bpython3?\s+-m\s+(pytest|unittest)\b"
 )
 NAME_WIDTH = 6  # tool names are padded to this, so what follows lines up
+RECENT_CALLS = 3  # a running subagent's latest tool calls, shown under it
+PREVIEW_LINES = 3  # of a command's or search's output, under its row
+# Tools whose output is worth a glance: what a command printed, what a search found. A
+# Read, Edit or Write is summed up by its row (`212 lines`, `+4 −1`).
+_PREVIEWED = frozenset({"Bash", "Grep", "Glob"})
+# How a decision the user wasn't asked about is credited, under the call.
+_ALLOWED_BY = {"classifier": "auto mode", "hook": "hook"}
 LIVE_THOUGHT_LINES = 8  # while the model reasons, the latest lines of it (when shown)
 
 
@@ -138,8 +149,9 @@ def format_todos(todos: list[dict[str, str]]) -> Text:
 class _RunningTool:
     summary: str
     args: dict[str, Any] = field(default_factory=dict)
-    note: str = ""  # e.g. "allowed by rule", shown after the result
+    note: str = ""  # who allowed it without asking (e.g. "auto mode · read-only query"), shown under it
     started: float = 0.0  # when it was dispatched (not when it was asked about)
+    id: str = ""  # the call's id, to match its result (a parallel batch finishes in any order)
 
     @property
     def name(self) -> str:
@@ -151,7 +163,9 @@ class _Turn:
     """What happened in one turn, for the footer."""
 
     started: float = 0.0
-    tools: int = 0
+    tools: int = 0  # the main agent's calls
+    agents: int = 0  # subagents and teammates that finished
+    agent_tools: int = 0  # their calls
     files: dict[str, list[int]] = field(default_factory=dict)  # path -> [added, removed]
     tests_passed: bool | None = None  # the last test run's outcome
     usage_before: Usage = field(default_factory=Usage)
@@ -178,10 +192,13 @@ class Renderer:
         self._spinner = Spinner("dots", style=BRAND)
         self._activity: str | None = None
         self._activity_since = 0.0
+        self._last_activity: str | None = None  # survives a brief stop, so its clock does too
+        self._activity_detail = ""  # e.g. how much of a file has been written so far
         self._streaming = ""  # the Markdown block still being written
         self._running: list[_RunningTool] = []
         self._turn = _Turn()
         self._agents: dict[str, SubagentUpdate] = {}  # running subagents, by run id
+        self._agent_since: dict[str, float] = {}  # when each running subagent started (monotonic)
         self._finished_agents: list[SubagentUpdate] = []  # shown under their Agent/Team call
         self._last_was_row = False  # consecutive tool rows print as one block
 
@@ -199,15 +216,30 @@ class Renderer:
             parts.append(self._row(Text(frame, style=BRAND), tool, right))
         agents = list(self._agents.values())
         for i, agent in enumerate(agents):
-            parts.append(self._agent_line(agent, last=i == len(agents) - 1, glyph=Text(frame, style=BRAND)))
+            since = self._agent_since.get(agent.id)
+            parts.append(
+                self._agent_line(
+                    agent,
+                    last=i == len(agents) - 1,
+                    glyph=Text(frame, style=BRAND),
+                    elapsed=now - since if since is not None else None,
+                )
+            )
+            # What it has been doing: its last few calls (fewer each when several run).
+            each = RECENT_CALLS if len(agents) == 1 else 1
+            parts.extend(self._recent_calls(agent, each, frame, last=i == len(agents) - 1))
         if self.show_thinking and (thought := "".join(self._thought).strip()):
             tail = "\n".join(thought.splitlines()[-LIVE_THOUGHT_LINES:])
             parts.append(Padding(Text(tail, style="thinking"), (0, 0, 0, 2)))
         if self._activity:
             elapsed = int(now - self._activity_since)
+            detail = f" · {self._activity_detail}" if self._activity_detail else ""
             self._spinner.update(
                 text=Text.assemble(
-                    (f"{self._activity}…", BRAND), (f" {elapsed}s · ctrl+c to interrupt", "subtle")
+                    (self._activity, BRAND),
+                    (detail, "muted"),
+                    ("…", BRAND),
+                    (f" {elapsed}s · ctrl+c to interrupt", "subtle"),
                 )
             )
             parts.append(self._spinner)
@@ -234,9 +266,14 @@ class Renderer:
             self._live.stop()
             self._live = None
 
-    def wait(self, label: str) -> None:
-        if label != self._activity:
-            self._activity, self._activity_since = label, time.monotonic()
+    def wait(self, label: str, detail: str = "") -> None:
+        """Show `label` on the spinner. Its clock starts when the label changes, not when
+        the same activity comes back after a pause (text streamed between pieces of a
+        tool call used to restart it: 0s, 1s, 0s, 1s)."""
+        if label != self._last_activity:
+            self._activity_since = time.monotonic()
+        self._activity = self._last_activity = label
+        self._activity_detail = detail
 
     def stop_waiting(self) -> None:
         self._activity = None
@@ -272,16 +309,46 @@ class Renderer:
 
     # -- rows -----------------------------------------------------------------
 
+    def _recent_calls(self, agent: SubagentUpdate, count: int, frame: str, *, last: bool) -> list[Text]:
+        """A running subagent's latest tool calls, under its line:
+
+        └ ⠋ general-purpose  Verify deck rendering        opus-4.8 · 21 tools · 6m 28s
+            … 18 earlier
+            ✓ Edit    .deck-verify/measure.mjs                            +3 −1
+            ✗ Bash    node .deck-verify/measure.mjs                exit code 1 · 4s
+            ⠋ Bash    node .deck-verify/measure.mjs                             12s
+        """
+        prefix = "      " if last else "  │   "
+        shown = agent.recent[-count:] if count else ()
+        rows: list[Text] = []
+        if (earlier := agent.tools_used - len(shown)) > 0 and shown:
+            rows.append(Text(f"{prefix}… {earlier} earlier", style="subtle"))
+        for call in shown:
+            if not call.done:
+                glyph = Text(frame, style=BRAND)
+            else:
+                glyph = Text(DONE, style="ok") if call.ok else Text(FAILED, style="err")
+            right = Text()
+            if call.done and call.result:
+                result = " ".join(call.result.split())
+                right.append(ellipsize(result, 40), style="muted" if call.ok else "err")
+            if call.elapsed >= 1:
+                right.append(" · " if right.cell_len else "", style="subtle").append(
+                    _duration(call.elapsed), style="subtle"
+                )
+            rows.append(self._row(glyph, _RunningTool(call.summary), right, indent=prefix))
+        return rows
+
     def _row(self, glyph: Text, tool: _RunningTool, right: Text, indent: str = "") -> Text:
         """`✓ Edit    src/app.py ……………… +4 −1`, fitted to the terminal's width."""
-        name = tool.name
+        name, label = tool.name, tool_label(tool.name)
         detail = self._detail(tool)
         width = self.console.width
         right = right[: max(width // 2, 10)]
-        fixed = len(indent) + 2 + max(len(name), NAME_WIDTH) + 2
+        fixed = len(indent) + 2 + max(len(label), NAME_WIDTH) + 2
         room = width - fixed - (right.cell_len + 2 if right.cell_len else 0) - 1
         line = Text(indent).append_text(glyph).append(" ")
-        line.append(name.ljust(NAME_WIDTH), style=tool_style(name))
+        line.append(label.ljust(NAME_WIDTH), style=tool_style(name))
         path = tool.args.get("path") if name in ("Read", "Edit", "Write", "Pdf", "Open") else None
         style = Style(color=MUTED) + (file_link(self._absolute(str(path))) if path else Style())
         line.append("  ").append(ellipsize(detail, max(room, 8)), style=style)
@@ -296,31 +363,53 @@ class Renderer:
             return _EDIT_STATS.sub("", detail)
         if tool.name == "Write":
             return _WRITE_STATS.sub("", detail)
+        if tool.name == "Screenshot":  # deck.html#8 → deck.html · slide 8
+            page, _, where = detail.partition("#")
+            return f"{page} · slide {where}" if where.isdigit() else f"{page} · #{where}" if where else page
+        if tool.name == "Bash" and "\n" in (command := str(tool.args.get("command", "")).strip()):
+            # a heredoc or script: its first line, not the body spilling over several rows
+            first, *rest = command.splitlines()
+            prefix = "unsandboxed: " if detail.startswith("unsandboxed: ") else ""
+            return f"{prefix}{self._relative(first)} (+{len(rest)} lines)"
+        if "\n" in detail.strip():  # a subagent's call comes as its summary alone: same idea
+            first, *rest = [line for line in detail.strip().splitlines() if line.strip()]
+            return f"{first.strip()} (+{len(rest)} lines)"
         return detail
 
     def _absolute(self, path: str) -> str:
         return path if path.startswith(("/", "~")) or not self.root else f"{self.root}{path}"
 
-    def _agent_line(self, update: SubagentUpdate, *, last: bool, glyph: Text) -> Text:
-        """A subagent under its call: `└ ✓ reviewer  check the retry logic   haiku · 3 tools · 3s`."""
+    def _agent_line(
+        self, update: SubagentUpdate, *, last: bool, glyph: Text, elapsed: float | None = None
+    ) -> Text:
+        """A subagent under its call: `└ ✓ reviewer  check the retry logic   haiku · 3 tools · 3s`.
+        `elapsed` is live for a running one; updates only come when it does something."""
         right = Text()
         if update.model:
             right.append(_short_model(update.model), style="subtle").append(" · ", style="subtle")
         width = self.console.width
         if update.status in ("started", "working"):
-            doing = self._relative(update.detail) if update.status == "working" else "starting"
+            doing = _one_line(self._doing(update)) if update.status == "working" else "starting"
             right.append(ellipsize(doing, max(width // 4, 12)), style="muted").append(" · ", style="subtle")
         tools = update.tools_used
-        right.append(f"{tools} tool{'s' if tools != 1 else ''} · {_duration(update.elapsed)}", style="subtle")
+        took = update.elapsed if elapsed is None else elapsed
+        right.append(f"{tools} tool{'s' if tools != 1 else ''} · {_duration(took)}", style="subtle")
         line = Text(f"  {'└' if last else '├'} ", style="subtle").append_text(glyph).append(" ")
         line.append(update.agent, style=tool_style("Agent")).append("  ")
         right = right[-max(width - line.cell_len - 12, 10) :]  # keep the end: tools and time
         room = width - line.cell_len - right.cell_len - 3
-        line.append(ellipsize(update.label, max(room, 8)), style="muted")
+        line.append(ellipsize(" ".join(update.label.split()), max(room, 8)), style="muted")
         return line.append(" " * max(width - line.cell_len - right.cell_len - 1, 2)).append_text(right)
 
+    def _running_for(self, result: ToolResult) -> _RunningTool | None:
+        """The row a result belongs to: by call id (a parallel batch finishes in any
+        order, and three WebSearches share a name), else the first by that name."""
+        if result.id:
+            return next((t for t in self._running if t.id == result.id), None)
+        return next((t for t in self._running if t.name == result.name), None)
+
     def _finish_tool(self, result: ToolResult) -> None:
-        tool = next((t for t in self._running if t.name == result.name), None)
+        tool = self._running_for(result)
         if tool is None:  # rejected before it was announced (unknown tool, bad arguments)
             tool = _RunningTool(result.name)
         else:
@@ -336,15 +425,48 @@ class Renderer:
             right.append(" · " if right.cell_len else "", style="subtle").append(
                 _duration(elapsed), style="subtle"
             )
-        if tool.note:
-            right.append(f" · {tool.note}", style="subtle")
         lines: list[RenderableType] = [self._row(glyph, tool, right)]
-        if under:
-            lines.append(Text("  ").append(f"{ELBOW} ", style="subtle").append_text(under))
+        preview = self._preview(tool, self._relative(result.output), result.is_error)
+        if preview:
+            under = None  # the preview already shows the line that would go here
+        body = preview or ([under] if under else [])
+        if tool.note:
+            credit = Text(tool.note, style="subtle")
+            credit.stylize("italic")
+            body.append(credit)
+        for i, line in enumerate(body):
+            lines.append(Text("  ").append(f"{ELBOW} " if i == 0 else "  ", style="subtle").append_text(line))
         failed = [child for child in children if child.status != "done"]  # only these get a line
         for i, child in enumerate(failed):
             lines.append(self._agent_line(child, last=i == len(failed) - 1, glyph=Text(FAILED, style="err")))
         self._rows(Group(*lines))
+
+    def _preview(self, tool: _RunningTool, output: str, is_error: bool) -> list[Text]:
+        """The first few lines of a command's or search's output (the last few, when a
+        command failed: that's where the error is), then how many more there are."""
+        if tool.name not in _PREVIEWED or output == _REJECTED or output.startswith("denied by"):
+            return []
+        lines = [line.rstrip() for line in output.strip().splitlines()]
+        if tool.name == "Bash":  # the harness's own notes; the row says exit code / timeout
+            lines = [line for line in lines if not (line.startswith("(") and line.endswith(")"))]
+        elif lines and _MATCH_HEADER.match(lines[0]):  # "3 match(es):" is on the row already
+            lines = lines[1:]
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if not lines or lines == ["(no output)"]:
+            return []
+        failed = is_error or bool(_EXIT_CODE.search(output)) or "(timed out after" in output
+        shown = lines[-PREVIEW_LINES:] if failed else lines[:PREVIEW_LINES]
+        room = max(self.console.width - 6, 20)
+        style = "err" if failed else "muted"
+        out = [Text(_cut(line.expandtabs(4), room), style=style) for line in shown]
+        if (more := len(lines) - len(shown)) > 0:
+            where = "above" if failed else "more"
+            out.insert(
+                0 if failed else len(out),
+                Text(f"… {more} {where} line{'s' if more != 1 else ''}", style="subtle"),
+            )
+        return out
 
     def _children(self, tool: _RunningTool) -> list[SubagentUpdate]:
         """The finished subagents that belong to this Agent/Team call."""
@@ -352,7 +474,8 @@ class Renderer:
             children, self._finished_agents = self._finished_agents, []
             return children
         label = " ".join(str(tool.args.get("description") or tool.args.get("prompt") or "").split())[:80]
-        agent = tool.args.get("subagent_type")
+        # The agent it ran: as asked for, or (left out) the default one its summary names.
+        agent = tool.args.get("subagent_type") or split_summary(tool.summary)[1].partition(":")[0].strip()
         mine = [a for a in self._finished_agents if a.agent == agent and a.label == label]
         self._finished_agents = [a for a in self._finished_agents if a not in mine]
         return mine
@@ -364,6 +487,10 @@ class Renderer:
             return Text(DENIED, style="warn"), Text("rejected", style="warn"), None
         if is_error and text.startswith("denied by"):
             return Text(DENIED, style="warn"), Text(ellipsize(text, 60), style="warn"), None
+        if is_error and name in ("Read", "Pdf") and "file not found" in text.splitlines()[0]:
+            # Looking for a file that isn't there is routine (the model checks for a README,
+            # an AGENTS.md): the model gets the error; the user just sees it wasn't there.
+            return Text(FAILED, style="subtle"), Text("not found", style="muted"), None
         if is_error:
             first = text.splitlines()[0] if text else "error"
             return (
@@ -386,6 +513,8 @@ class Renderer:
             return ok, Text(f"{len(text.splitlines())} lines", style="muted"), None
         if name in ("Agent", "Team"):
             return ok, Text(), None
+        if name == "Screenshot":  # the picture went to the model; where it's saved is no news
+            return ok, Text("looked", style="muted"), None
         return ok, Text(ellipsize(_brief(name, text), 50), style="muted"), None
 
     def _bash_outcome(self, tool: _RunningTool, text: str) -> tuple[Text, Text, Text | None]:
@@ -403,7 +532,9 @@ class Renderer:
             return Text(FAILED, style="err"), Text(f"exit {m.group(1)}", style="err"), under
         if is_test:
             self._turn.tests_passed = True
-        return Text(DONE, style="ok"), Text(ellipsize(last or "no output", 50), style="muted"), None
+        if last:  # the output shows under the row
+            return Text(DONE, style="ok"), Text(), None
+        return Text(DONE, style="ok"), Text("no output", style="muted"), None
 
     def _count_edit(self, tool: _RunningTool, added: int, removed: int) -> None:
         path = str(tool.args.get("path") or self._detail(tool))
@@ -429,6 +560,7 @@ class Renderer:
             self._flush_text(everything=True)
             self._running.clear()
             self._agents.clear()
+            self._agent_since.clear()
             self.stop_waiting()
             self._stop_live()
 
@@ -440,20 +572,46 @@ class Renderer:
                 self._thought.append(text)
                 if self._activity == WAITING:
                     self.wait("Thinking")
+            case ModelStuck(reason=reason):
+                self._finish_thought()
+                self._streaming = ""  # the stuck reply's unprinted text: discarded, as it was
+                self._block(
+                    Text(
+                        f"↻ The model got stuck: {reason}. Stopped it and asked it to carry on.", style="warn"
+                    )
+                )
+                self.wait(WAITING)
+            case MessageDelivered(text=text):
+                self._flush_text(everything=True)
+                shown = ellipsize(" ".join(text.split()), max(self.console.width - 30, 20))
+                self._print(Text(f"  ↳ delivered to the agent: {shown}", style="subtle"))
+                self._last_was_row = False
             case AssistantText(text=text):
                 self._finish_thought()
-                self.stop_waiting()
+                if text.strip():  # blank lines between tool-call pieces aren't an answer
+                    self.stop_waiting()
                 self._streaming += text
                 self._flush_text(everything=False)
-            case ToolUse(summary=summary, args=args):
+            case ToolInputStreaming(name=name, chars=chars, target=target):
+                # Reasoning is over: the model is writing a tool call (a whole file, maybe),
+                # which shows nothing until it's complete. Say so, not "Thinking".
                 self._finish_thought()
                 self._flush_text(everything=True)
-                self._running.append(_RunningTool(summary, args))
+                self.wait(
+                    self._writing_label(name, target), f"{tokens(chars)} chars" if chars >= 1000 else ""
+                )
+            case ToolUse(summary=summary, args=args):
+                self._finish_thought()
+                if self._activity and self._activity.startswith(_WRITING_LABELS):
+                    self.wait(WAITING)  # the call is complete: its row takes over
+                self._flush_text(everything=True)
+                self._running.append(_RunningTool(summary, args, id=event.id))
                 self._turn.tools += 1
             case PermissionDecision(allowed=True, source=source, reason=reason) if (
-                source in _NOTABLE_AUTO_ALLOW and self._running
+                source in _ALLOWED_BY and self._running
             ):
-                self._running[-1].note = f"allowed by {source}" + (f": {reason}" if source != "rule" else "")
+                label = _ALLOWED_BY[source]
+                self._running[-1].note = f"{label} · {reason}" if reason else label
             case PermissionDecision():
                 pass  # denials are shown with their result
             case ToolsDispatched(names=names, parallel=parallel):
@@ -461,11 +619,11 @@ class Renderer:
                 for tool in self._running:
                     if tool.name in names and not tool.started:
                         tool.started = now
-                self.wait(f"Running {len(names)} tools" if parallel else f"Running {names[0]}")
+                self.wait(f"Running {len(names)} tools" if parallel else f"Running {tool_label(names[0])}")
             case ToolResult(name="TodoWrite", is_error=False):
                 self._running = [t for t in self._running if t.name != "TodoWrite"]
             case ToolResult() as result:
-                running = next((t for t in self._running if t.name == result.name), None)
+                running = self._running_for(result)
                 self.last_output = (running.summary if running else result.name, result.output)
                 self._finish_tool(result)
                 if not self._running:
@@ -480,9 +638,13 @@ class Renderer:
                 self.wait(WAITING)
             case SubagentUpdate(id=run_id, status="started" | "working"):
                 self._agents[run_id] = event
+                self._agent_since.setdefault(run_id, time.monotonic() - event.elapsed)
             case SubagentUpdate(id=run_id):
                 self._agents.pop(run_id, None)
+                self._agent_since.pop(run_id, None)
                 self._finished_agents.append(event)
+                self._turn.agents += 1
+                self._turn.agent_tools += event.tools_used
             case TokenUsage():
                 pass  # counted by the session's meter, which includes subagents
             case Compacted(kind=kind, count=n):
@@ -522,6 +684,32 @@ class Renderer:
                 line.append(" · ctrl+t to show", style="subtle")
             self._block(line)
 
+    def _doing(self, update: SubagentUpdate) -> str:
+        match update.phase:
+            case "thinking":
+                return "Thinking"
+            case "waiting":
+                return WAITING
+            case "writing":
+                return self._writing_label(update.tool, update.detail)
+            case _:
+                name, args = split_summary(update.detail)
+                shown = f"{tool_label(name)}({_one_line(args)})" if args else update.detail
+                return self._relative(shown)
+
+    def _writing_label(self, name: str, target: str) -> str:
+        """`Writing adobe-deck.html`, `Editing src/app.py`, `Writing a command`, `Preparing WebFetch`."""
+        shown = ellipsize(self._relative(target), 60) if target else ""
+        match name:
+            case "Write":
+                return f"Writing {shown}" if shown else "Writing a file"
+            case "Edit":
+                return f"Editing {shown}" if shown else "Editing a file"
+            case "Bash":
+                return "Writing a command"
+            case _:
+                return f"Preparing {tool_label(name)}"
+
     def _usage(self) -> Usage:
         return Usage() + self.meter.total if self.meter is not None else Usage()
 
@@ -536,11 +724,16 @@ class Renderer:
             self._block(self.footer())
 
     def footer(self) -> Text:
-        """`✻ 9s · 4 tools · 2 files +14 −3 · tests ✓ · 83k context · 2.1k out · $0.03`"""
+        """`✻ 9s · 4 tools · 2 files +14 −3 · tests ✓ · 83k context · 2.1k out · $0.03`, or
+        `128 tools (111 by 4 agents)` when agents did some of the work."""
         turn = self._turn
         line = Text("✻ ", style="brand").append(_duration(time.monotonic() - turn.started), style="muted")
         dot = (" · ", "subtle")
-        line.append(*dot).append(f"{turn.tools} tool{'s' if turn.tools != 1 else ''}", style="muted")
+        total = turn.tools + turn.agent_tools
+        line.append(*dot).append(f"{total} tool{'s' if total != 1 else ''}", style="muted")
+        if turn.agent_tools:
+            n = turn.agents
+            line.append(f" ({turn.agent_tools} by {n} agent{'s' if n != 1 else ''})", style="subtle")
         if turn.files:
             added = sum(a for a, _ in turn.files.values())
             removed = sum(r for _, r in turn.files.values())
@@ -588,6 +781,20 @@ class Renderer:
         self._last_was_row = False
         self._start_live()
         return decision
+
+
+def _one_line(text: str) -> str:
+    """A status that must fit one row: a multi-line command or heredoc shows its first line
+    and an ellipsis, not its body breaking the layout."""
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    if len(lines) <= 1:
+        return " ".join(text.split())
+    return f"{lines[0]} …"
+
+
+def _cut(line: str, room: int) -> str:
+    """Output cut at the end (a path is better cut in the middle; a line of output isn't)."""
+    return line if len(line) <= room else line[: room - 1] + "…"
 
 
 def _brief(name: str, text: str) -> str:

@@ -131,6 +131,7 @@ TOOL_KIND = {
     "Glob": "read",
     "Grep": "read",
     "Pdf": "read",
+    "Screenshot": "read",
     "Edit": "edit",
     "Write": "edit",
     "Bash": "run",
@@ -272,6 +273,15 @@ def split_summary(summary: str) -> tuple[str, str]:
     if not paren:
         return summary, ""
     return name, rest[:-1] if rest.endswith(")") else rest
+
+
+# What a tool's row is called when its name says how, not what: the model calls
+# Screenshot, the user sees the agent previewing its work.
+TOOL_LABEL = {"Screenshot": "Preview"}
+
+
+def tool_label(name: str) -> str:
+    return TOOL_LABEL.get(name, name)
 
 
 def tool_style(name: str) -> str:

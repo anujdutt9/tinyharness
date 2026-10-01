@@ -9,7 +9,7 @@ import json
 import httpx
 import pytest
 
-from tinyharness.agent.history import Message, ToolCall
+from tinyharness.agent.history import Image, Message, ToolCall
 from tinyharness.llm.client import LLMClient, ToolCallAccumulator
 from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.providers import load_catalog
@@ -542,11 +542,12 @@ async def test_openai_style_model_lists_read_any_context_field(tmp_path):
             {"id": "router/model", "name": "Model", "context_length": 200000},  # OpenRouter, xAI
             {"id": "groq-model", "context_window": 131072},  # Groq, DeepSeek
             {"id": "mistral-model", "max_context_length": 262144},  # Mistral
+            {"id": "planner", "object": "model", "max_model_len": 32768},  # vLLM
             {"id": "gpt-x"},  # OpenAI doesn't say
         ]
     }
     models = await client("openrouter", Server(json.dumps(body)), tmp_path=tmp_path).list_models(refresh=True)
-    assert [m.context for m in models] == [200000, 131072, 262144, None]
+    assert [m.context for m in models] == [200000, 131072, 262144, 32768, None]
 
 
 # ---- checking a model before switching ----
@@ -725,3 +726,165 @@ async def test_background_work_does_not_retry_a_network_failure():
     with pytest.raises(ProviderConnectionError):
         await llm.one_shot_small("summarize")
     assert used == ["claude-haiku-4-5"]
+
+
+async def test_unreadable_stream_events_are_skipped_but_reported(caplog):
+    stream = sse(chat_chunk({"content": "Hello"})) + "data: {not json\n\n" + sse(chat_chunk(finish="stop"))
+    text, _, _ = await run(client("openrouter", Server(stream)), CONVERSATION)
+    assert text == "Hello"
+    assert "1 stream event(s) from https://openrouter.ai" in caplog.text
+    assert "may be missing some text" in caplog.text
+
+
+# ---- images ----
+
+SHOT = Image("image/png", "iVBORw0KGgo=", "slide-1.png")
+CHART = Image("image/png", "iVBORw0KGgp=", "chart.png")
+
+
+def with_images() -> list[Message]:
+    """The user attaches a screenshot; the model reads two images in one batch."""
+    return [
+        Message(role="system", content="be brief"),
+        Message(role="user", content="what's wrong with slide 1?", images=[SHOT]),
+        Message(
+            role="assistant",
+            tool_calls=[
+                ToolCall("c1", "Read", '{"path": "chart.png"}'),
+                ToolCall("c2", "Read", '{"path": "a.py"}'),
+            ],
+        ),
+        Message(role="tool", tool_call_id="c1", content="chart.png: image/png image", images=[CHART]),
+        Message(role="tool", tool_call_id="c2", content="print(1)"),
+    ]
+
+
+async def sent(provider: str) -> dict:
+    server = Server(ANY_REPLY[provider])
+    await run(client(provider, server), with_images())
+    return server.requests[0]
+
+
+ANY_REPLY = {
+    "anthropic": sse({"type": "message_stop"}, named=True),
+    "openrouter": sse(chat_chunk(finish="stop")),
+    "openai": sse({"type": "response.completed", "response": {"output": []}}),
+    "gemini": sse({"event_type": "interaction.completed", "interaction": {}}, named=True),
+}
+
+
+async def test_anthropic_gets_images_in_the_user_message_and_the_tool_result():
+    body = await sent("anthropic")
+    first, _, results = body["messages"]
+    assert first["content"][1] == {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": SHOT.data},
+    }
+    chart = results["content"][0]
+    assert chart["type"] == "tool_result" and chart["content"][1]["source"]["data"] == CHART.data
+
+
+async def test_chat_sends_tool_images_after_every_tool_message():
+    """Tool messages take only text, and nothing may come between the ones that answer a
+    single assistant turn: the images follow in a user message."""
+    messages = (await sent("openrouter"))["messages"]
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "tool", "tool", "user"]
+    assert messages[1]["content"][1] == {"type": "image_url", "image_url": {"url": SHOT.data_url()}}
+    follow_up = messages[-1]["content"]
+    assert follow_up[0]["text"] == "The images from the tool results above: chart.png"
+    assert follow_up[1]["image_url"]["url"] == "data:image/png;base64," + CHART.data
+
+
+async def test_responses_sends_input_images():
+    items = (await sent("openai"))["input"]
+    assert items[0]["content"][1] == {"type": "input_image", "image_url": SHOT.data_url()}
+    kinds = [i.get("type") or i.get("role") for i in items]
+    assert kinds[-3:] == ["function_call_output", "function_call_output", "user"]
+    assert items[-1]["content"][1]["image_url"] == CHART.data_url()
+
+
+async def test_gemini_sends_image_parts():
+    steps = (await sent("gemini"))["input"]
+    assert steps[0]["content"][1] == {"type": "image", "data": SHOT.data, "mime_type": "image/png"}
+    assert [s["type"] for s in steps[-3:]] == ["function_result", "function_result", "user_input"]
+    assert steps[-1]["content"][1]["data"] == CHART.data
+
+
+# ---- retries ----
+
+OK_REPLY = sse({"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]}) + "data: [DONE]\n\n"
+
+
+class Flaky(Server):
+    """Answers with `failures` (status, headers) first, then OK_REPLY."""
+
+    def __init__(self, *failures: tuple[int, dict[str, str]]) -> None:
+        super().__init__()
+        self.failures = list(failures)
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(json.loads(request.content or b"{}"))
+        if self.failures:
+            status, headers = self.failures.pop(0)
+            return httpx.Response(status, headers=headers, text='{"error": "busy"}')
+        return httpx.Response(200, text=OK_REPLY)
+
+
+async def test_rate_limits_and_overload_are_retried(monkeypatch):
+    waits = []
+
+    async def sleep(seconds):
+        waits.append(seconds)
+
+    monkeypatch.setattr("tinyharness.llm.client.asyncio.sleep", sleep)
+    monkeypatch.setattr("tinyharness.llm.client.RETRY_MAX_SECONDS", 60.0)
+    server = Flaky((429, {"Retry-After": "2"}), (503, {}))
+    text, _, _ = await run(client("deepseek", server), CONVERSATION)
+    assert text == "hi" and len(server.requests) == 3
+    assert waits[0] == 2.0  # the server's Retry-After wins over backoff
+
+
+async def test_retries_give_up_with_the_last_error():
+    server = Flaky(*[(503, {})] * 5)
+    with pytest.raises(LLMError, match="503"):
+        await run(client("deepseek", server, retries=2), CONVERSATION)
+    assert len(server.requests) == 3
+
+
+async def test_a_client_error_is_not_retried():
+    server = Flaky((400, {}))
+    with pytest.raises(LLMError, match="400"):
+        await run(client("deepseek", server), CONVERSATION)
+    assert len(server.requests) == 1
+
+
+def test_retry_delay_honors_retry_after_and_caps_backoff(monkeypatch):
+    from tinyharness.llm.client import retry_delay
+
+    monkeypatch.setattr("tinyharness.llm.client.RETRY_MAX_SECONDS", 60.0)
+    assert retry_delay("7", 0) == 7.0
+    assert retry_delay("600", 0) == 60.0
+    assert retry_delay("Wed, 21 Oct 2026 07:28:00 GMT", 0) <= 60.0
+    assert 0 <= retry_delay(None, 10) <= 60.0
+
+
+# ---- a self-hosted server that needs no key ----
+
+
+async def test_a_keyless_provider_sends_no_authorization_header():
+    from tinyharness.llm.providers import Provider
+
+    local = Provider(name="local", base_url="http://127.0.0.1:8000/v1", models=["planner"])
+    assert not local.needs_key and local.has_key and local.default_model == "planner"
+    server = Server(OK_REPLY)
+    llm = LLMClient(local, "", "planner", transport=httpx.MockTransport(server))
+    text, _, _ = await run(llm, CONVERSATION)
+    assert text == "hi" and "authorization" not in server.headers[0]
+
+
+def test_a_silent_connection_times_out_long_before_the_request_timeout():
+    from tinyharness.llm.client import STALL_SECONDS
+
+    llm = client("deepseek", Server(), timeout=1800.0)
+    timeouts = llm._timeouts()
+    assert timeouts.read == STALL_SECONDS < 1800.0 and timeouts.connect == 1800.0

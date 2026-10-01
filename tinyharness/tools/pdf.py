@@ -5,7 +5,7 @@ import io
 from pydantic import Field
 from pypdf import PdfReader
 
-from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
+from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput, mark_seen
 from tinyharness.tools.read import resolve_readable
 from tinyharness.workspace.files import read_bytes
 
@@ -47,7 +47,7 @@ class PdfTool(Tool[PdfInput]):
         if start >= end:
             raise ToolError(f"empty page range {start}..{end} (PDF has {n} pages)")
 
-        ctx.read_paths.add(str(path))
+        mark_seen(ctx, path)
         out = [f"[PDF: {path.name}, {n} pages, extracting {start}..{end}]"]
         used = 0
         for i in range(start, end):

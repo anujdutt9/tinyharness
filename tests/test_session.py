@@ -170,3 +170,37 @@ async def test_switching_models_keeps_the_context_reading(session, monkeypatch):
     assert repl.context_used == pytest.approx(
         count_message_tokens(session.history.to_dicts()) / session.context_window
     )
+
+
+def test_no_todo_list_by_default(session):
+    """Current models track multi-step work without one; its upkeep costs steps and tokens."""
+    assert "TodoWrite" not in session.tools.names()
+    assert "TodoWrite" not in session._system_prompt()
+
+
+@pytest.mark.parametrize("how", ["option", "env"])
+def test_the_todo_list_can_be_turned_on(tmp_path, monkeypatch, how):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    if how == "env":
+        monkeypatch.setenv("TINYHARNESS_TODO_LIST", "1")
+    options = SessionOptions(
+        config_path=tmp_path / "none.toml",
+        working_dir=tmp_path / "work",
+        todo_list=True if how == "option" else None,
+    )
+    s = Session(options)
+    try:
+        assert "TodoWrite" in s.tools.names()
+        assert "# Planning" in s._system_prompt()
+    finally:
+        s.close()
+
+
+async def test_a_session_closes_at_the_end_of_an_async_with(tmp_path, monkeypatch):
+    from tinyharness import Session, SessionOptions
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    async with Session(SessionOptions(config_path=tmp_path / "none.toml", working_dir=tmp_path)) as s:
+        scratch = s.scratch.dir
+        assert scratch.exists()
+    assert not scratch.exists()

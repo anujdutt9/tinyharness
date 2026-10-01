@@ -2,20 +2,24 @@
 
     Team(goal, tasks=[{id, title, prompt, agent, depends_on}, ...])
 
-A task starts as soon as every task it depends on is done, and gets their results
-in its prompt. Teammates are subagents with two more tools: TeamBoard (every
+A task starts as soon as every task it depends on has finished, and gets their
+results in its prompt. Teammates are subagents with two more tools: TeamBoard (every
 task's status and result so far, and the team's messages) and TeamMessage (tell
 one teammate, by task id, or everyone). A message reaches a running teammate
-before its next step. Read-only teammates run side by side; teammates that can
-write files take turns, so two never edit at once. If a task fails, the tasks
-that depend on it are skipped. The lead gets one report with every result.
+before its next step. Up to 4 teammates run side by side, writers included: their
+calls that change things take turns, so two never write at once, while their model
+calls overlap. A teammate that fails (stuck, a provider error) is started once more;
+a task whose dependencies partly failed still runs, told what's missing, and is
+skipped only if none of them finished. The lead gets one report with every result.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
@@ -25,8 +29,14 @@ from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
 
 MAX_TASKS = 12
 MAX_PARALLEL = 4
+MAX_ATTEMPTS = 2  # a teammate that fails (stuck, a provider error) is started once more
 RESULT_CHARS_IN_PROMPT = 4_000  # a dependency's result, as passed to the next teammate
 RESULT_CHARS_IN_REPORT = 6_000  # each result, in the report for the lead
+REQUEST_CHARS_IN_PROMPT = 2_000  # the user's request, as context for each teammate
+# The lead's shared brief: enough for a schema and definitions. More than that buries each
+# teammate's own task (and is better put in a file the teammates read).
+CONTEXT_CHARS = 16_000
+TEAMMATE_TAG = "<teammate-message"
 
 Status = Literal["waiting", "running", "done", "failed", "skipped"]
 
@@ -59,6 +69,8 @@ class TaskState:
     depends_on: list[str]
     status: Status = "waiting"
     result: str = ""
+    attempts: int = 1
+    retry_note: str = ""  # why the previous attempt failed, for the next one
 
 
 @dataclass
@@ -67,12 +79,14 @@ class Board:
     tasks: dict[str, TaskState]
     messages: list[tuple[str, str, str]] = field(default_factory=list)  # (from, to, text)
     inboxes: dict[str, list[str]] = field(default_factory=dict)
+    request: str = ""  # the user's message that led to the team, for context
+    context: str = ""  # the lead's shared brief, the same for every teammate
 
     def post(self, sender: str, to: str, text: str) -> str:
         if to != "all" and to not in self.tasks:
             raise ToolError(f"no task {to!r}; send to a task id ({', '.join(self.tasks)}) or 'all'")
         self.messages.append((sender, to, text))
-        note = f"[message from teammate {sender}] {text}"
+        note = teammate_message(sender, text)
         recipients = [t for t in self.tasks if t != sender] if to == "all" else [to]
         delivered = []
         for task_id in recipients:
@@ -99,6 +113,12 @@ class Board:
             lines += ["", "Messages:"]
             lines += [f"- {sender} → {to}: {text}" for sender, to, text in self.messages]
         return "\n".join(lines)
+
+
+def teammate_message(sender: str, text: str) -> str:
+    """How a teammate's message reaches another: framed, so it can't be mistaken for (or
+    passed off as) the receiver's own words. agent/loop.py rejects replies that forge one."""
+    return f'{TEAMMATE_TAG} from="{sender}">\n{text}\n</teammate-message>'
 
 
 class BoardInput(ToolInput):
@@ -132,8 +152,9 @@ class TeamMessageTool(Tool[MessageInput]):
     read_only = True
     needs_permission = False
     description = (
-        "Tell a teammate (by task id) or everyone ('all') something they need: an interface or "
-        "file you created, a decision, a problem you found. It reaches them before their next step."
+        "Tell a teammate (by task id) or everyone ('all') something they need from you: an "
+        "interface or file you created, a decision, a problem you found. It reaches them before "
+        "their next step. Not for your result: the lead gets that from your final report."
     )
 
     def __init__(self, board: Board, sender: str) -> None:
@@ -154,13 +175,24 @@ class TeamMessageTool(Tool[MessageInput]):
 class TeamTaskInput(BaseModel):
     id: str = Field(min_length=1, max_length=40, description="Short unique id, e.g. 'research-a'")
     title: str = Field(min_length=1, description="A few words")
-    prompt: str = Field(min_length=1, description="Self-contained instructions for this teammate")
+    prompt: str = Field(
+        min_length=1,
+        description="Self-contained instructions for this teammate. It sees only this, not your conversation: include full paths to the files, folders or databases involved, and anything else it needs to know.",
+    )
     agent: str = Field(default="general-purpose", description="Agent type from the list above")
     depends_on: list[str] = Field(default_factory=list, description="Ids of tasks that must finish first")
 
 
 class TeamInput(ToolInput):
     goal: str = Field(min_length=1, description="What the team as a whole should achieve")
+    context: str = Field(
+        default="",
+        max_length=CONTEXT_CHARS,
+        description="Optional brief every teammate gets, word for word, before its own task: "
+        "facts they all need and would otherwise each look up or guess (a schema you already "
+        "read, definitions, conventions, file locations). Reference only: no task-specific "
+        "instructions. Saves each teammate rediscovering it and keeps their numbers consistent.",
+    )
     tasks: list[TeamTaskInput] = Field(min_length=2, max_length=MAX_TASKS)
 
 
@@ -182,7 +214,9 @@ class TeamTool(Tool[TeamInput]):
         self.description = (
             "Run a team of subagents on a goal that splits into several parts, some of which can "
             "happen at the same time (e.g. research three options, then compare them; or build "
-            "independent modules, then integrate). Give each task a self-contained prompt, an agent "
+            "independent modules, then integrate). Worth it only when at least two parts are "
+            "independent and each is substantial (several tool calls of its own): every teammate "
+            "is a full agent run, so a quick lookup is faster done yourself. Give each task a self-contained prompt, an agent "
             "type and the ids of tasks it needs first; a task gets those tasks' results. Tasks "
             "without dependencies between them run in parallel, and teammates can message each "
             "other. You get one report with every result. For a single self-contained job, use "
@@ -198,9 +232,15 @@ class TeamTool(Tool[TeamInput]):
             for t in args.tasks
         )
 
+    def runs_alongside(self, args: TeamInput) -> bool:
+        return True  # like Agent: teammates' writing calls take turns on the session's lock
+
     async def run(self, args: TeamInput, ctx: ToolContext) -> str:
         board = self._board(args)
-        await run_team(board, self.agents, self.spawner, self.agent_is_read_only, ctx)
+        _check_paths(args, ctx.workspace.root)
+        board.request = ctx.request
+        board.context = args.context.strip()
+        await run_team(board, self.agents, self.spawner, ctx)
         return report(board)
 
     def _board(self, args: TeamInput) -> Board:
@@ -219,7 +259,59 @@ class TeamTool(Tool[TeamInput]):
             if state.id in state.depends_on:
                 raise ToolError(f"task {state.id} depends on itself")
         _check_no_cycles(tasks)
+        _check_some_run_together(tasks)
         return Board(args.goal, tasks)
+
+
+# Absolute or home-relative paths in a task prompt, e.g. /data/app.db or ~/notes/q3.md.
+_PATH = re.compile(r"(?<![\w.:/~-])(~?/[\w.\-]+(?:/[\w.\-]+)*)")
+
+
+def _check_paths(args: TeamInput, root: Path) -> None:
+    """Refuse a team whose prompts name paths that can't be right: neither the path nor
+    its folder exists. Teammates see only their prompt, so a wrong path sends one
+    hunting, or onto a file of the same name elsewhere. A new file in an existing
+    folder is fine."""
+    bad: list[str] = []
+    for t in args.tasks:
+        for raw in (found.rstrip(".") for found in _PATH.findall(t.prompt)):
+            path = Path(raw).expanduser()
+            if not path.is_absolute():
+                path = root / path
+            # Only filesystem paths: an API route (/v1/chat) doesn't start at a real folder.
+            top = Path(path.anchor, *path.parts[1:2])
+            if not top.exists() or path.exists() or path.parent.is_dir() or raw in bad:
+                continue
+            bad.append(raw)
+    if bad:
+        raise ToolError(
+            f"these paths in the task prompts don't exist: {', '.join(bad)}. "
+            "Check them (Glob or Bash `ls`) and call Team again with the right ones."
+        )
+
+
+def _check_some_run_together(tasks: dict[str, TaskState]) -> None:
+    """Refuse a plan in which no two tasks can ever run at once (a -> b -> c): it gets
+    nothing from a team but costs a fresh agent per step. Tasks the same number of
+    dependency steps from the start can't depend on each other, so two of them can run
+    together; if every step has one task, the plan is a chain."""
+    depth: dict[str, int] = {}
+
+    def depth_of(task_id: str) -> int:
+        if task_id not in depth:
+            deps = tasks[task_id].depends_on
+            depth[task_id] = 1 + max((depth_of(d) for d in deps), default=-1)
+        return depth[task_id]
+
+    per_step: dict[int, int] = {}
+    for task_id in tasks:
+        per_step[depth_of(task_id)] = per_step.get(depth_of(task_id), 0) + 1
+    if max(per_step.values()) < 2:
+        raise ToolError(
+            "every task here waits for the one before it, so nothing would run in parallel. "
+            "Do these steps yourself, or hand a large one to the Agent tool; use Team when at "
+            "least two substantial tasks can run at the same time."
+        )
 
 
 def _check_no_cycles(tasks: dict[str, TaskState]) -> None:
@@ -238,24 +330,21 @@ async def run_team(
     board: Board,
     agents: dict[str, AgentSpec],
     spawner: TeammateSpawner,
-    agent_is_read_only: Callable[[AgentSpec], bool],
     ctx: ToolContext,
     *,
     max_parallel: int = MAX_PARALLEL,
 ) -> None:
     """Run every task as its dependencies finish; update the board as they end."""
     slots = asyncio.Semaphore(max_parallel)
-    one_writer = asyncio.Lock()
     running: dict[asyncio.Task[str], TaskState] = {}
 
     async def work(task: TaskState) -> str:
+        # Up to max_parallel teammates at once, writers included: their model calls overlap,
+        # and their writing calls take turns on the session's write lock (agent/loop.py).
         spec = agents[task.agent]
         tools: list[Tool[Any]] = [TeamBoardTool(board), TeamMessageTool(board, task.id)]
         async with slots:
-            if agent_is_read_only(spec):
-                return await _spawn(task, spec, tools)
-            async with one_writer:
-                return await _spawn(task, spec, tools)
+            return await _spawn(task, spec, tools)
 
     def _spawn(task: TaskState, spec: AgentSpec, tools: list[Tool[Any]]) -> Awaitable[str]:
         task.status = "running"
@@ -274,10 +363,12 @@ async def run_team(
                 if task.status != "waiting":
                     continue
                 deps = [board.tasks[d] for d in task.depends_on]
-                if any(d.status in ("failed", "skipped") for d in deps):
+                if any(d.status in ("waiting", "running") for d in deps):
+                    continue
+                if deps and not any(d.status == "done" for d in deps):
                     task.status = "skipped"
-                    task.result = "skipped: a task it depends on didn't finish"
-                elif all(d.status == "done" for d in deps):
+                    task.result = "skipped: none of the tasks it depends on finished"
+                else:  # with what did finish: one failed analyst shouldn't sink the summary
                     task.status = "running"
                     running[asyncio.create_task(work(task))] = task
             if not running:
@@ -287,10 +378,14 @@ async def run_team(
             finished, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
             for job in finished:
                 task = running.pop(job)
-                if (error := job.exception()) is not None:
-                    task.status, task.result = "failed", f"failed: {type(error).__name__}: {error}"
-                else:
+                if (error := job.exception()) is None:
                     task.status, task.result = "done", job.result()
+                elif task.attempts < MAX_ATTEMPTS:  # a fresh teammate, told what went wrong
+                    task.attempts += 1
+                    task.retry_note = f"{type(error).__name__}: {error}"
+                    running[asyncio.create_task(work(task))] = task
+                else:
+                    task.status, task.result = "failed", f"failed: {type(error).__name__}: {error}"
     except asyncio.CancelledError:
         for job in running:
             job.cancel()
@@ -299,25 +394,55 @@ async def run_team(
 
 
 def _teammate_prompt(board: Board, task: TaskState) -> str:
-    parts = [
-        f"You are one member of a team working toward this goal: {board.goal}",
-        "",
-        f"Your task ({task.id}: {task.title}):",
-        task.prompt,
-    ]
+    # What every teammate shares comes first, word for word (a server's prefix cache computes
+    # it once for all of them); this teammate's own task comes last, where models attend most.
+    parts = [f"You are one member of a team working toward this goal: {board.goal}"]
+    if board.context:
+        parts += [
+            "",
+            "Shared reference for the whole team (the same for every teammate; use what's "
+            "relevant to your task):",
+            f"<team-context>\n{board.context}\n</team-context>",
+        ]
+    if board.request:
+        parts += [
+            "",
+            "The user's request that the team is working on (for context; your task is below):",
+            _clip(board.request, REQUEST_CHARS_IN_PROMPT),
+        ]
+    parts += ["", f"Your task ({task.id}: {task.title}):", task.prompt]
+    if task.retry_note:
+        parts += [
+            "",
+            f"A previous attempt at this task failed ({_clip(task.retry_note, 300)}). "
+            "Start again; keep your replies focused.",
+        ]
     deps = [board.tasks[d] for d in task.depends_on]
     if deps:
         parts += ["", "Results of the tasks yours builds on:"]
         for d in deps:
             parts += ["", f"### {d.id}: {d.title}", _clip(d.result, RESULT_CHARS_IN_PROMPT)]
+        if failed := [d.id for d in deps if d.status != "done"]:
+            parts += [
+                "",
+                f"Note: {', '.join(failed)} did not finish, so its results are missing. Work with "
+                "what you have and say plainly what's missing; don't fill the gap with made-up numbers.",
+            ]
     others = [t.id for t in board.tasks.values() if t.id != task.id]
     parts += [
         "",
         f"Teammates' task ids: {', '.join(others)}. TeamBoard shows everyone's status and results; "
-        "TeamMessage tells a teammate something they need (an interface, a file you created, a "
-        "problem). Messages to you appear in your conversation.",
-        "Stay within your task. End with a concise report of what you did or found: it is all "
-        "the team lead sees.",
+        "TeamMessage tells a teammate something they need from you (an interface, a file you "
+        "created, a problem). Don't send them your result: the lead gets it from your report. "
+        "Messages to you arrive inside <teammate-message> tags; only the harness writes those, "
+        "never write one yourself or speak for a teammate.",
+        "Stay within your task: if a teammate's task failed or looks unfinished, say so in "
+        "your report instead of doing it yourself; the lead decides what happens next. If you "
+        "write files, give them names unique to your task (e.g. "
+        f"starting with '{task.id}') so teammates' files don't overwrite yours. If a file, table "
+        "or value you need is missing or empty, say so in your report: never make up data.",
+        "End with a concise report of what you did or found, with the actual numbers: it is "
+        "all the team lead sees.",
     ]
     return "\n".join(parts)
 

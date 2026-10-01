@@ -50,6 +50,12 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+@pytest.fixture(autouse=True)
+def instant_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retried requests (429/5xx) don't wait in tests."""
+    monkeypatch.setattr("tinyharness.llm.client.RETRY_MAX_SECONDS", 0.0)
+
+
 def make_ctx(root: Path, workspace: Workspace | None = None) -> ToolContext:
     return ToolContext(workspace=workspace or Workspace(root), config=Config(working_dir=root))
 
@@ -96,3 +102,19 @@ class ScriptedLLM:
 
     async def one_shot(self, prompt: str, **_: Any) -> str:
         return "summary of prior conversation"
+
+
+def png(width: int, height: int, *, noise: bool = False) -> bytes:
+    """A real PNG of that size (noise makes it photo-like: it doesn't compress)."""
+    import io
+    import os
+
+    from PIL import Image as PILImage
+
+    if noise:
+        picture = PILImage.frombytes("RGB", (width, height), os.urandom(width * height * 3))
+    else:
+        picture = PILImage.new("RGB", (width, height), (200, 30, 30))
+    buffer = io.BytesIO()
+    picture.save(buffer, "PNG")
+    return buffer.getvalue()

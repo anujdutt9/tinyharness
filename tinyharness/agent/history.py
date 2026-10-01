@@ -35,6 +35,20 @@ class ToolCall:
         }
 
 
+@dataclass(frozen=True)
+class Image:
+    """An image for the model to look at: a screenshot the user attached, or a picture a
+    tool read. `data` is base64; `name` says where it came from (shown to models that
+    can't view images)."""
+
+    media_type: str  # "image/png", "image/jpeg", "image/gif", "image/webp"
+    data: str
+    name: str = ""
+
+    def data_url(self) -> str:
+        return f"data:{self.media_type};base64,{self.data}"
+
+
 @dataclass
 class ReasoningState:
     owner: str  # "provider:model" that produced it
@@ -50,6 +64,7 @@ class Message:
     state: ReasoningState | None = None  # assistant only; see the module docstring
     id: str = field(default_factory=new_id)  # stable identity in the session log
     meta: dict[str, Any] = field(default_factory=dict)  # harness-only (e.g. the file a result came from)
+    images: list[Image] = field(default_factory=list)  # user and tool messages: pictures to look at
 
     def to_dict(self) -> dict[str, Any]:
         """A plain dict (for token counting and transcripts); not any provider's format."""
@@ -74,6 +89,7 @@ class Message:
             "tool_call_id": self.tool_call_id,
             "state": {"owner": self.state.owner, "data": self.state.data} if self.state else None,
             "meta": self.meta,
+            "images": [{"media_type": i.media_type, "data": i.data, "name": i.name} for i in self.images],
         }
 
     @classmethod
@@ -89,6 +105,7 @@ class Message:
             state=ReasoningState(state["owner"], state["data"]) if state else None,
             id=r["id"],
             meta=r.get("meta") or {},
+            images=[Image(i["media_type"], i["data"], i.get("name", "")) for i in r.get("images") or []],
         )
 
 
@@ -99,8 +116,18 @@ class History:
     def append(self, msg: Message) -> None:
         self.messages.append(msg)
 
-    def add_tool_result(self, call_id: str, content: str, meta: dict[str, Any] | None = None) -> None:
-        self.append(Message(role="tool", tool_call_id=call_id, content=content, meta=meta or {}))
+    def add_tool_result(
+        self,
+        call_id: str,
+        content: str,
+        meta: dict[str, Any] | None = None,
+        images: list[Image] | None = None,
+    ) -> None:
+        self.append(
+            Message(
+                role="tool", tool_call_id=call_id, content=content, meta=meta or {}, images=list(images or [])
+            )
+        )
 
     def reset(self) -> None:
         self.messages.clear()

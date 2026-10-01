@@ -20,6 +20,18 @@ class ContextOverflowError(LLMError):
     """The request didn't fit in the model's context window."""
 
 
+class RunawayOutputError(LLMError):
+    """The model's reply stopped going anywhere while it still streamed (see agent/runaway.py)."""
+
+
+class RepeatedFailureError(LLMError):
+    """The agent kept making a tool call that failed the same way (see agent/loop.py)."""
+
+
+class ImageTooLargeError(LLMError):
+    """The provider rejected an image in the request as too large (pixels or bytes)."""
+
+
 class ProviderConnectionError(LLMError):
     """The provider couldn't be reached, or the connection failed mid-reply."""
 

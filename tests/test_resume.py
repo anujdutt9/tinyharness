@@ -47,13 +47,13 @@ def contents(session: Session) -> list[tuple[str, str | None]]:
 
 async def test_a_resumed_conversation_is_the_same_conversation(work):
     (work / "notes.txt").write_text("x" * 10_000)  # longer than the audit log keeps
-    first = Session(options(work))
+    first = Session(options(work, todo_list=True))
     await turn(first, "read notes", [("Read", '{"path": "notes.txt"}')], "It's all x.")
     await turn(first, "and now?", [("TodoWrite", json.dumps({"todos": [TODO]}))], "Planned.")
     before, todos = contents(first), first.ctx.todos
     first.close()
 
-    resumed = Session(options(work, resume="latest"))
+    resumed = Session(options(work, resume="latest", todo_list=True))
     try:
         assert resumed.id == first.id
         assert contents(resumed) == before
@@ -336,3 +336,58 @@ def test_your_project_config_stays_put(work):
 def test_long_project_paths_get_short_unique_names(tmp_path):
     a, b = tmp_path / ("x" * 150) / "one", tmp_path / ("x" * 150) / "two"
     assert state_dir(a) != state_dir(b) and len(state_dir(a).name) <= 111
+
+
+# ---- /clear starts a new conversation ----
+
+
+async def test_clear_keeps_the_old_conversation_resumable(work):
+    """As in Claude Code: /clear moves on to a new conversation; the old one isn't lost."""
+    first = Session(options(work))
+    await turn(first, "build the deck", "Built it.")
+    old_id, before = first.id, contents(first)
+    first.clear()
+    assert first.id != old_id and contents(first) == []
+    await turn(first, "something else", "Sure.")
+    first.close()
+
+    latest = Session(options(work, resume="latest"))
+    try:
+        assert [c for _, c in contents(latest)] == ["something else", "Sure."]
+    finally:
+        latest.close()
+    old = Session(options(work, resume=old_id))
+    try:
+        assert contents(old) == before
+    finally:
+        old.close()
+
+
+async def test_continue_skips_a_conversation_emptied_by_clear(work):
+    """Logs from before: /clear emptied the conversation in place, and -c then found
+    "nothing to resume" instead of the conversation before it."""
+    kept = Session(options(work))
+    await turn(kept, "keep me", "Kept.")
+    kept_id = kept.id
+    kept.close()
+    emptied = Session(options(work))
+    await turn(emptied, "clear me", "Ok.")
+    emptied.history.reset()  # what /clear used to do
+    emptied._sync()
+    emptied.close()
+
+    resumed = Session(options(work, resume="latest"))
+    try:
+        assert resumed.id == kept_id
+    finally:
+        resumed.close()
+
+
+def test_clearing_an_empty_conversation_makes_no_new_one(work):
+    session = Session(options(work))
+    try:
+        before = session.id
+        session.clear()
+        assert session.id == before
+    finally:
+        session.close()

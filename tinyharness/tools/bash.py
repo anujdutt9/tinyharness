@@ -14,6 +14,7 @@ ask to skip the sandbox (sandbox=false) for one command, which asks the user eve
 from __future__ import annotations
 
 import asyncio
+import shlex
 import shutil
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,17 @@ from tinyharness.tools.base import Tool, ToolContext, ToolInput
 
 HEAD_BYTES = 15_000  # output kept from the start...
 TAIL_BYTES = 15_000  # ...and from the end
+
+# Commands that only read, so subagents running side by side needn't take turns on them
+# (Tool.writes). Deliberately short: anything else counts as writing.
+_READERS = frozenset(
+    {"ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "cut", "tr", "nl", "stat",
+     "du", "df", "pwd", "which", "echo", "printf", "basename", "dirname", "realpath", "jq",
+     "column", "diff", "cmp", "tree"}
+)  # fmt: skip
+_GIT_READS = frozenset({"status", "log", "diff", "show", "ls-files", "rev-parse", "blame"})
+_FIND_WRITES = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls"})
+_SQLITE_WRITES = (".output", ".once", ".save", ".backup", ".import", ".shell", ".system", ".log", ".excel")
 
 
 class BashInput(ToolInput):
@@ -53,8 +65,14 @@ class BashTool(Tool[BashInput]):
             "It runs in a sandbox: it can write only inside the working directory, scratch and temp "
             "directories, can't read credential files, and has no network access"
             + (" (except localhost)" if policy.allow_localhost else "")
-            + ". If a command genuinely needs the network or to write elsewhere (e.g. installing a "
-            "package), set sandbox=false: the user approves each such command. Don't use it to "
+            + ". So package managers can't download (npm/npx, pip, brew), and other apps can't be "
+            "reached: no `open`, `osascript` or browser apps like Google Chrome.app (they fail or "
+            "hang until the timeout); don't try them in the sandbox. To look at a page, use the "
+            "Screenshot tool. API keys aren't available in the sandbox (key variables are stripped "
+            "and key files can't be read), so a program that calls an API fails as if no key were "
+            "set. That doesn't mean the user has none: to run it for real, use sandbox=false. "
+            "If a command genuinely needs the network or to write elsewhere (e.g. "
+            "installing a package), set sandbox=false: the user approves each such command. Don't use it to "
             "work around a denial of something the user didn't ask for."
             if sandbox
             else "It runs without a sandbox, so the user approves every command."
@@ -70,6 +88,9 @@ class BashTool(Tool[BashInput]):
     def describe(self, args: BashInput) -> str:
         command = args.command if len(args.command) <= 80 else args.command[:79] + "…"
         return f"Bash({'unsandboxed: ' if self._unsandboxed(args) else ''}{command})"
+
+    def writes(self, args: BashInput) -> bool:
+        return not only_reads(args.command)
 
     def contained(self, args: dict[str, Any]) -> bool:
         return self.sandbox is not None and not self._unsandboxed(args)
@@ -121,11 +142,18 @@ class BashTool(Tool[BashInput]):
         except BaseException:  # Ctrl-C: don't leave the command running
             await kill_group(proc)
             raise
-        return self._report(output.text(), proc.returncode, timed_out, args.timeout, sandboxed)
+        return self._report(output.text(), proc.returncode, timed_out, args, sandboxed)
 
-    def _report(self, text: str, code: int | None, timed_out: bool, timeout: int, sandboxed: bool) -> str:
+    def _report(self, text: str, code: int | None, timed_out: bool, args: BashInput, sandboxed: bool) -> str:
         text = text.rstrip() or "(no output)"
-        if sandboxed and "Operation not permitted" in text:
+        if sandboxed and ".app/" in args.command and code:
+            # A macOS app needs LaunchServices to start, which the sandbox blocks (it would
+            # let `open` run things outside it); Chrome dies with "Abort trap: 6".
+            text += (
+                "\n(note: macOS apps, including browsers, can't run in the sandbox. To look "
+                "at a page, use the Screenshot tool; otherwise run this command with sandbox=false)"
+            )
+        elif sandboxed and "Operation not permitted" in text:
             text += (
                 "\n(note: the sandbox blocks writes outside the working directory, reads of "
                 "credential files and network access; this may be why)"
@@ -133,10 +161,35 @@ class BashTool(Tool[BashInput]):
         # The outcome goes last: the CLI reads it from the final line (a failed test run
         # showed as passing when this note came after it).
         if timed_out:
-            text += f"\n(timed out after {timeout}s; the command was killed)"
+            text += f"\n(timed out after {args.timeout}s; the command was killed)"
         elif code:
             text += f"\n(exit code {code})"
         return text
+
+
+def only_reads(command: str) -> bool:
+    """Whether a command certainly changes nothing: known readers, joined only by pipes,
+    with no redirection, substitution or chaining. Unsure means no."""
+    if any(c in command for c in "><;&`$(){}\n"):
+        return False
+    for segment in command.split("|"):
+        try:
+            words = shlex.split(segment)
+        except ValueError:
+            return False
+        if not words:
+            return False
+        name, rest = words[0], words[1:]
+        if name in _READERS:
+            continue
+        if name == "find" and not _FIND_WRITES.intersection(rest):
+            continue
+        if name == "git" and rest[:1] and rest[0] in _GIT_READS:
+            continue
+        if name == "sqlite3" and "-readonly" in rest and not any(w in segment for w in _SQLITE_WRITES):
+            continue
+        return False
+    return True
 
 
 def default_shell() -> str:

@@ -18,7 +18,7 @@ import logging
 import shutil
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable, Iterable
+from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,7 @@ from typing import Any
 from tinyharness import trust
 from tinyharness.agent import world
 from tinyharness.agent.compaction import SUMMARY_MARK, Compactor
-from tinyharness.agent.history import History, Message
+from tinyharness.agent.history import History, Image, Message
 from tinyharness.agent.loop import LoopDeps, run_agent_loop
 from tinyharness.agent.prompts import build_system_prompt, load_agent_md
 from tinyharness.agent.sessionlog import (
@@ -65,6 +65,7 @@ from tinyharness.tools.agent import AgentTool
 from tinyharness.tools.base import Tool, ToolContext, ToolError
 from tinyharness.tools.bash import BashTool
 from tinyharness.tools.registry import default_registry
+from tinyharness.tools.screenshot import ScreenshotTool
 from tinyharness.tools.skill import SkillTool
 from tinyharness.tools.team import TeamTool
 from tinyharness.tools.web import WebSearchTool
@@ -126,6 +127,7 @@ class SessionOptions:
     effort: Effort | None = None
     api_key: str | None = None
     use_last_model: bool = False  # start with the model last picked in the CLI (`/model`)
+    todo_list: bool | None = None  # offer the TodoWrite checklist; None: the config's `todo_list`
     resume: str | None = None  # continue a saved conversation: its id, or "latest"
     # Load the project's own hooks and plugins (code that runs outside the sandbox)?
     # None: only if you've trusted this folder (the CLI asks); see tinyharness/trust.py.
@@ -161,6 +163,8 @@ class SessionOptions:
             cfg.effort = self.effort
         if self.api_key:
             cfg.api_key = self.api_key
+        if self.todo_list is not None:
+            cfg.todo_list = self.todo_list
         return cfg
 
 
@@ -212,6 +216,8 @@ class Session:
                 self.workspace.add_read_root(skill.directory)
 
         self.tools = default_registry()
+        if not self.config.todo_list:
+            self.tools.remove("TodoWrite")
         self.tools.register(WebSearchTool(lambda: self.llm))
         self.sandbox: Sandbox | None = detect_sandbox() if self.config.sandbox.enabled else None
         self.sandbox_policy = SandboxPolicy.for_project(
@@ -223,6 +229,7 @@ class Session:
         )
         if shutil.which("bash") or shutil.which("sh"):
             self.tools.register(BashTool(self.sandbox, self.sandbox_policy))
+        self.tools.register(ScreenshotTool(self.sandbox, self.sandbox_policy))
         for tool in self.options.tools:  # before the Agent tool, so subagents can use them too
             self.tools.register(tool)
         if self.options.expose_skill_tool and len(self.skills):
@@ -253,6 +260,8 @@ class Session:
         self._connect_llm()
         self._started = False
         self._steering: list[str] = []  # messages for the agent while a turn runs (see steer)
+        # Subagents run side by side; their calls that change things take turns on this.
+        self._agent_writes = asyncio.Lock()
         self.resume_report: world.ResumeReport | None = None  # what changed while away, when resumed
         self._resume_note = ""
         if saved is not None:
@@ -337,7 +346,7 @@ class Session:
         """(Re)build everything that depends on the provider/model."""
         cfg = self.config
         api_key = cfg.resolve_api_key()
-        if not api_key:
+        if not api_key and cfg.provider_info.needs_key:
             raise MissingAPIKeyError(cfg.provider_info)
         self.llm = LLMClient(
             cfg.provider_info,
@@ -346,6 +355,7 @@ class Session:
             models=self.models,
             effort=cfg.effort,
             timeout=cfg.request_timeout,
+            retries=cfg.request_retries,
         )
         self.llm.show_reasoning = cfg.show_thinking
         self.gate.classifier = AutoModeClassifier(self.llm, model=cfg.small_model)
@@ -363,10 +373,9 @@ class Session:
         extra_tools: Iterable[Tool[Any]] = (),
         inbox: Callable[[], list[str]] | None = None,
     ) -> str:
-        # Same rules as the parent, but the subagent's own permission mode, except that
-        # plan mode and bypass carry over: the user chose them for everything.
-        inherited = self.gate.mode in (PermissionMode.PLAN, PermissionMode.BYPASS)
-        gate = replace(self.gate, mode=self.gate.mode if inherited else spec.permission_mode)
+        # The session's rules and mode, live (switching mode reaches running subagents);
+        # the agent's own permission_mode can only make it stricter.
+        gate = self.gate.child(spec.name, spec.permission_mode)
         try:
             llm, model = self.llm_for(spec.model)
         except (MissingAPIKeyError, ValueError) as e:
@@ -382,6 +391,8 @@ class Session:
             label=label,
             extra_tools=extra_tools,
             inbox=inbox,
+            write_lock=self._agent_writes,
+            **({"max_steps": spec.max_steps} if spec.max_steps else {}),
         )
 
     def llm_for(self, spec: str | None) -> tuple[LLMClient, str | None]:
@@ -409,6 +420,7 @@ class Session:
             models=self.models,
             effort=self.config.effort,
             timeout=self.config.request_timeout,
+            retries=self.config.request_retries,
             transport=self.llm.transport,
         )
         return client, None
@@ -461,6 +473,7 @@ class Session:
             model_id=self.config.model,
             provider=self.config.provider_info.label,
             extra=self.options.extra_system,
+            todo_list=self.config.todo_list,
         )
 
     def _require_key(self, provider: str) -> None:
@@ -483,7 +496,9 @@ class Session:
         return self.gate.mode
 
     def set_mode(self, mode: PermissionMode | str) -> None:
-        self.gate.mode = PermissionMode.parse(mode)
+        """For the session and its subagents, including ones already running."""
+        self.gate.set_mode(PermissionMode.parse(mode))
+        self.transcript.write("mode", mode=self.gate.mode.value)
 
     def set_show_thinking(self, show: bool) -> None:
         """Ask for the model's reasoning where a provider only sends it when asked (OpenAI's
@@ -534,15 +549,36 @@ class Session:
         return True
 
     def clear(self) -> None:
-        """Forget the conversation (permissions and scratch space are kept). Token and cost
-        totals are kept too: they're what the session spent (see UsageMeter.since_clear)."""
+        """Start a new conversation, as Claude Code's /clear does: the old one stays saved
+        as it was (`tinyharness -r` picks it), and this one gets its own id and log.
+        Permissions and scratch space are kept, and so are the token and cost totals: they're
+        what the session spent (see UsageMeter.since_clear)."""
+        had_conversation = any(m.role != "system" for m in self.history.messages)
         self.history.reset()
         self.ctx.usage.mark_clear()
+        self.resume_report, self._resume_note = None, ""
+        if had_conversation:
+            previous = self.id
+            self.transcript.close()
+            self.id = _new_id()
+            self.transcript = self.store.writer(self.id)
+            self.log = SessionLog(self.transcript)
+            self.transcript.write(
+                "session_start",
+                model=self.config.model,
+                mode=self.mode,
+                working_dir=str(self.workspace.root),
+                cleared=previous,
+            )
+            self._log_model()
+            self._log_world()
         self._sync()
 
     # ------------------------------------------------------------------ running
 
-    async def run(self, prompt: str) -> AsyncGenerator[Event, None]:
+    async def run(self, prompt: str, images: Sequence[Image] = ()) -> AsyncGenerator[Event, None]:
+        """Send a message and stream what happens. `images` are pictures for the model to
+        look at with it (screenshots, say): see `tinyharness.tools.read.load_image`."""
         if not self._started:
             await self.hooks.fire(
                 "SessionStart", {"session_id": self.id, "resumed": self.resume_report is not None}
@@ -550,6 +586,7 @@ class Session:
             self._started = True
         if not self.history.messages:
             self.history.append(Message(role="system", content=self._system_prompt()))
+        self.ctx.request = prompt
         if self._resume_note:  # tell the model once what changed while the session was away
             prompt = f"<session-resumed>\n{self._resume_note}\n</session-resumed>\n\n{prompt}"
             self._resume_note = ""
@@ -567,7 +604,7 @@ class Session:
             inbox=self.take_steering,
         )
         try:
-            async for event in run_agent_loop(prompt, self.history, deps):
+            async for event in run_agent_loop(prompt, self.history, deps, images):
                 if isinstance(event, (ToolUse, ToolResult, Compacted, Done)):
                     self._sync()  # saved as it goes, so a crash loses at most one step
                 yield event
@@ -581,6 +618,11 @@ class Session:
         """Say something to the agent while a turn is running: it arrives as a user message
         before the agent's next step. If the turn ends first, `take_steering()` returns it."""
         self._steering.append(text)
+
+    @property
+    def pending_steering(self) -> tuple[str, ...]:
+        """Messages from `steer` waiting for the agent's next step."""
+        return tuple(self._steering)
 
     def take_steering(self) -> list[str]:
         """Messages from `steer` not delivered yet (and forget them)."""
@@ -598,6 +640,19 @@ class Session:
     def close(self) -> None:
         self.transcript.close()
         self.scratch.cleanup()
+
+    # `with Session(...) as session:` / `async with ...`: closed however the block ends.
+    def __enter__(self) -> Session:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    async def __aenter__(self) -> Session:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.close()
 
 
 def list_sessions(options: SessionOptions | None = None, limit: int = 20) -> list[SessionInfo]:

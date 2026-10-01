@@ -142,6 +142,8 @@ def clear(repl: Repl, arg: str) -> None:
     repl.context_used = 0.0
     repl.console.clear()
     _ok(repl, f"Cleared {n} message{'s' if n != 1 else ''}. Fresh start.")
+    if n:
+        repl.console.print("  [muted]The previous conversation is saved: tinyharness -r picks it.[/]")
     meter = repl.session.ctx.usage
     if meter.calls:  # the status bar's totals stay: they're the session's, not the conversation's
         spent = f"{tokens(meter.total.output)} out" + (
@@ -385,7 +387,14 @@ def whoami(repl: Repl, arg: str) -> None:
         ("model", cfg.model),
         ("context", f"{session.context_window:,} tokens"),
         ("effort", cfg.effort or "model default"),
-        ("key from", "api_key (config)" if cfg.api_key else f"${cfg.api_key_env}"),
+        (
+            "key from",
+            "api_key (config)"
+            if cfg.api_key
+            else f"${cfg.api_key_env}"
+            if cfg.api_key_env
+            else "(none needed)",
+        ),
         ("key", redact(cfg.resolve_api_key())),
     ]:
         table.add_row(f"  {label}", escape(str(value)))
@@ -453,6 +462,15 @@ async def theme(repl: Repl, arg: str) -> None:
     if THEME_SOURCE in ("TINYHARNESS_THEME", "config"):
         where = "TINYHARNESS_THEME" if THEME_SOURCE == "TINYHARNESS_THEME" else "theme in your config file"
         repl.console.print(f"  [warn]{where} is set to {THEME_SETTING}, which takes priority.[/]")
+
+
+@command(
+    "/output",
+    "print the last tool call's full output, or a running subagent's calls (ctrl+o shows it above the input)",
+    group="Session",
+)
+def output(repl: Repl, arg: str) -> None:
+    repl.show_last_output()
 
 
 @command("/thinking", "show or hide the model's reasoning (also ctrl+t)", group="Model", usage="[on|off]")

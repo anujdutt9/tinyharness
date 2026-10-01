@@ -12,6 +12,7 @@ Each backend (sandbox/seatbelt.py, ...) translates this one policy for its platf
 
 from __future__ import annotations
 
+import re
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -61,7 +62,7 @@ class SandboxPolicy:
             write_roots=tuple(dict.fromkeys(roots)),
             protected=tuple(p / rel for p in projects for rel in PROTECTED_IN_PROJECT),
             deny_read=secret_path_regexes(),
-            allow_read=public_path_regexes(),
+            allow_read=(*public_path_regexes(), *_test_fixtures()),
             allow_localhost=allow_localhost,
             cache_dir=cache_dir,
             env=env,
@@ -82,6 +83,13 @@ def _temp_dirs() -> list[Path]:
     if Path("/tmp").is_dir():
         dirs.append(_real(Path("/tmp")))
     return list(dict.fromkeys(dirs))
+
+
+def _test_fixtures() -> tuple[str, ...]:
+    """pytest's temp root, where tests make their own fake auth.json and .env files: the
+    project's tests have to read them back. Real secrets don't live there, and none can
+    be copied there, since reading the original is still denied."""
+    return tuple(f"^{re.escape(str(d))}/pytest-of-[^/]+/" for d in _temp_dirs())
 
 
 def _cache_env(cache: Path) -> dict[str, str]:

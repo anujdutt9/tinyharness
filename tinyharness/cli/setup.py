@@ -32,7 +32,7 @@ async def run_setup(console: Console, config: Config) -> str | None:
 
     width = max(len(p.label) for p in config.providers.values())
     options = [
-        (name, f"{p.label:<{width}}  " + ("✔ key set" if p.api_key else "add a key"))
+        (name, f"{p.label:<{width}}  " + ("✔ ready" if p.has_key else "add a key"))
         for name, p in config.providers.items()
     ]
     picked = await pick("Which provider?", options, config.provider, mark_current=False)
@@ -57,6 +57,9 @@ async def add_key(
     Returns the check (which may be inconclusive, e.g. offline), or None if the user
     backed out or the provider rejected every key tried."""
     pasted = False
+    if not info.needs_key:  # a local server: just check it answers
+        with console.status(f"[muted]Checking {info.label}…[/]", spinner="dots"):
+            return await LLMClient(info, "", info.default_model).ping()
     for _ in range(MAX_KEY_ATTEMPTS):
         if not key:
             if info.key_url:

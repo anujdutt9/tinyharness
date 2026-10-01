@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import glob
 import re
+import weakref
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -49,6 +50,7 @@ class PermissionRequest:
     remember_label: str  # what "don't ask again" would cover, in plain words; "" = not offered
     reason: str = ""  # why auto mode is asking, when it is
     warning: str = ""  # something the user must know before answering (e.g. no sandbox)
+    agent: str = ""  # the subagent asking, if it isn't the main agent
 
 
 @dataclass
@@ -67,7 +69,25 @@ class Decision:
 PermissionCallback = Callable[[PermissionRequest], Awaitable[Decision]]
 
 
-@dataclass
+# Least to most permissive: a subagent runs in the less permissive of the session's mode
+# and its own `permission_mode` (see PermissionGate.child).
+_PERMISSIVENESS = (
+    PermissionMode.PLAN,
+    PermissionMode.DEFAULT,
+    PermissionMode.ACCEPT_EDITS,
+    PermissionMode.AUTO,
+    PermissionMode.BYPASS,
+)
+
+
+def stricter(mode: PermissionMode, limit: PermissionMode | None) -> PermissionMode:
+    """`mode`, held to `limit` if that's less permissive."""
+    if limit is None:
+        return mode
+    return min(mode, limit, key=_PERMISSIVENESS.index)
+
+
+@dataclass(eq=False)  # compared by identity: gates are tracked in a WeakSet
 class PermissionGate:
     workspace: Workspace
     mode: PermissionMode = PermissionMode.DEFAULT
@@ -77,6 +97,25 @@ class PermissionGate:
     callback: PermissionCallback | None = None
     scratch: Scratch | None = None
     protected: tuple[Path, ...] = ()  # changing anything under these always asks (see `_protected`)
+    agent: str = ""  # a subagent's gate: whose (shown when it asks)
+    limit: PermissionMode | None = None  # a subagent's own permission_mode: never more permissive
+    _children: weakref.WeakSet[PermissionGate] = field(default_factory=weakref.WeakSet, repr=False)
+
+    def set_mode(self, mode: PermissionMode) -> None:
+        """Change mode, for this gate and every subagent gate made from it: the mode you
+        pick applies to all the work, including subagents already running."""
+        self.mode = stricter(mode, self.limit)
+        for child in list(self._children):
+            child.set_mode(mode)
+
+    def child(self, agent: str, limit: PermissionMode | None) -> PermissionGate:
+        """A subagent's gate: the same rules and prompts, the session's mode (held to the
+        agent's own `limit`), and it follows later mode changes (see `set_mode`)."""
+        gate = replace(
+            self, mode=stricter(self.mode, limit), agent=agent, limit=limit, _children=weakref.WeakSet()
+        )
+        self._children.add(gate)
+        return gate
 
     async def check(
         self,
@@ -131,6 +170,7 @@ class PermissionGate:
             if self.mode == PermissionMode.PLAN:
                 return Decision(False, "plan mode blocks mutating tools", "mode")
             request = PermissionRequest(
+                agent=self.agent,
                 tool=tool.name,
                 args=args,
                 summary=summary or tool.name,
@@ -153,6 +193,7 @@ class PermissionGate:
         # there would stop it judging the next one (and used to switch to acceptEdits).
         case_by_case = risk is not None and path is not None
         request = PermissionRequest(
+            agent=self.agent,
             tool=tool.name,
             args=args,
             summary=summary or tool.name,
@@ -165,7 +206,8 @@ class PermissionGate:
             self._remember(tool, path, trusted, site)
         elif decision.allow and tool.read_only and (site or path is not None):
             # A plain "yes" to reading something covers reading it again this session.
-            self.rules.add_allow(Rule(tool.name, site or glob.escape(str(path))))
+            for name in _readers(tool) if path is not None and not site else (tool.name,):
+                self.rules.add_allow(Rule(name, site or glob.escape(str(path))))
         return decision
 
     def _protected(self, tool: Tool[Any], path: Path | None) -> str | None:
@@ -251,6 +293,8 @@ class PermissionGate:
             return f"don't ask again for {tool.name} this session"
         if trusted:
             return "allow all edits in this project for this session"
+        if tool.name in READING_TOOLS:
+            return f"allow reading in {_directory(path)}/ for this session"
         return f"allow {tool.name} in {_directory(path)}/ for this session"
 
     def _remember(self, tool: Tool[Any], path: Path | None, trusted: bool, site: str | None = None) -> None:
@@ -259,12 +303,24 @@ class PermissionGate:
         elif path is None:
             self.rules.add_allow(Rule(tool.name))
         elif trusted:
-            self.mode = PermissionMode.ACCEPT_EDITS
+            self.set_mode(PermissionMode.ACCEPT_EDITS)
         else:
-            self.rules.add_allow(Rule(tool.name, f"{glob.escape(str(_directory(path)))}/*"))
+            folder = glob.escape(str(_directory(path)))
+            for name in _readers(tool):
+                self.rules.add_allow(Rule(name, f"{folder}/*"))
+                if name in READING_TOOLS:
+                    self.rules.add_allow(Rule(name, folder))  # Grep or Glob on the folder itself
 
 
 _GIT_INTERNALS = re.compile(r"(^|/)\.git(/|$)")
+# Tools that only look at files: an answer about one covers them all, so reading a folder
+# outside the project is one question, not one per tool (Read, then Grep, then Glob).
+READING_TOOLS = ("Read", "Grep", "Glob", "Pdf")
+
+
+def _readers(tool: Tool[Any]) -> tuple[str, ...]:
+    """The tools an approval for `tool` covers: every reading tool, if it is one."""
+    return READING_TOOLS if tool.name in READING_TOOLS else (tool.name,)
 
 
 def _directory(path: Path) -> Path:

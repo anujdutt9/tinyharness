@@ -14,13 +14,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import json
 import logging
+import re
+import shlex
 import signal
 import subprocess
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
 from functools import cache
 from pathlib import Path
+from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import get_app
@@ -38,30 +42,43 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import DynamicStyle, Style, merge_styles
 from prompt_toolkit.utils import get_cwidth
 from rich.console import Console
+from rich.markup import escape
 from rich.padding import Padding
 from rich.panel import Panel
 from rich.text import Text
 
+from tinyharness.agent.history import Image
 from tinyharness.cli.commands import COMMANDS
-from tinyharness.cli.render import Renderer, dollars, tokens
-from tinyharness.cli.theme import MODE_LABEL, MODE_STYLE, PROMPT, PT_STYLE, SUBTLE, percent
-from tinyharness.cli.widgets import bottom_spacer, pick
-from tinyharness.events import Event
+from tinyharness.cli.render import Renderer, dollars, tokens, without_links
+from tinyharness.cli.theme import (
+    MODE_LABEL,
+    MODE_STYLE,
+    PROMPT,
+    PT_STYLE,
+    SUBTLE,
+    ellipsize,
+    percent,
+    tool_style,
+)
+from tinyharness.cli.widgets import pick
+from tinyharness.events import Event, SubagentUpdate
 from tinyharness.llm.client import LLMError, ProviderConnectionError
 from tinyharness.llm.tokens import count_message_tokens
 from tinyharness.paths import auth_path, home_dir, pretty_path
 from tinyharness.permissions import PermissionMode
 from tinyharness.security import find_api_key
 from tinyharness.session import MissingAPIKeyError, Session
+from tinyharness.tools.read import load_image
 
 log = logging.getLogger(__name__)
 
 EXIT_CONFIRM_SECONDS = 2.0
 _CONFIRM_AUTO = "\x00confirm-auto-mode"  # returned by the prompt when Shift+Tab reaches auto mode
-_SHOW_OUTPUT = "\x00show-last-output"  # returned by the prompt on Ctrl-O
 _PAUSE = "\x00pause"  # returned by the prompt when a question (approval) needs the keyboard
 # Commands that don't touch the conversation, so they can run while the agent works.
-_SAFE_WHILE_RUNNING = {"/help", "/mode", "/context", "/theme", "/thinking", "/cwd", "/tools", "/skills"}
+_SAFE_WHILE_RUNNING = {
+    "/help", "/mode", "/context", "/theme", "/thinking", "/cwd", "/tools", "/skills", "/output",
+}  # fmt: skip
 
 _MODE_ICON = {
     PermissionMode.DEFAULT: "○",
@@ -80,7 +97,7 @@ class SlashCompleter(Completer):
 
     def get_completions(self, document: Document, complete_event: CompleteEvent) -> Iterable[Completion]:
         text = document.text_before_cursor
-        if not text.startswith("/") or " " in text:
+        if not is_command(text) or " " in text:
             return
         entries = [(cmd.name, cmd.help) for cmd in dict.fromkeys(COMMANDS.values())]
         entries += [(f"/{s.name}", f"skill · {s.description}") for s in self.session.skills.list()]
@@ -127,17 +144,27 @@ def _short(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+_COMMAND = re.compile(r"/[\w.:-]*(\s|$)")
+
+
+def is_command(line: str) -> bool:
+    """`/model`, `/key anthropic`: a slash and a name. A path pasted at the start of a
+    message (`/Users/me/shot.png what's wrong here?`) has more slashes, and is a message."""
+    return bool(_COMMAND.match(line))
+
+
 class _CompactPrompt(PromptSession[str]):
-    """The input box, which stays up while the agent works, on the bottom rows of the
-    terminal from the first line on.
+    """The input box, which stays up while the agent works.
 
     Above it, `live` (the running tools, agents and spinner) is redrawn in place;
-    finished output scrolls above everything (via patch_stdout). prompt_toolkit gives
-    the prompt every row below the cursor (it asks the terminal where that is, again
-    after a clear or a resize). A spacer at the top takes the rows nothing else needs,
-    so the box sits at the bottom; the input's height is capped at the text it holds so
-    the frame hugs it. A terminal that can't report the cursor gets the box right under
-    the output instead. Nothing is full-screen: scrollback, selection and copy work."""
+    finished output scrolls above everything (via patch_stdout). prompt_toolkit also
+    stretches the input to the bottom of the terminal when there is a bottom toolbar:
+    its height is capped at the text it holds so the frame hugs the input.
+
+    The box follows the output rather than being pinned to the terminal's last rows:
+    pinning needs the terminal's cursor position before every redraw, and waiting for it
+    shows as a flash each time output is printed. Once the screen fills, the box is at
+    the bottom anyway."""
 
     live: Callable[[], str] | None = None
 
@@ -148,9 +175,7 @@ class _CompactPrompt(PromptSession[str]):
             Window(FormattedTextControl(lambda: ANSI(text())), dont_extend_height=True, wrap_lines=False),
             filter=Condition(lambda: bool(text())),
         )
-        return Layout(
-            HSplit([bottom_spacer(), above, layout.container]), focused_element=layout.current_window
-        )
+        return Layout(HSplit([above, layout.container]), focused_element=layout.current_window)
 
     def _get_default_buffer_control_height(self) -> Dimension:
         width = max(get_app().output.get_size().columns - 6, 10)  # frame + prompt
@@ -179,6 +204,7 @@ class Repl:
         self.context_used = 0.0  # fraction of the context window, refreshed after each turn
         self._exit_armed_until = 0.0  # a second Ctrl-C before this time exits
         self._draft = ""  # pre-filled into the next prompt (a message that wasn't sent)
+        self.expanded = False  # ctrl+o: the last output / running subagents, above the input box
         # Started with --mode auto counts as agreeing to it; otherwise it's asked once.
         self.auto_confirmed = session.mode == PermissionMode.AUTO
         self.auto_declined = False  # said no once: Shift+Tab skips auto mode (/mode auto still asks)
@@ -186,6 +212,8 @@ class Repl:
         self._prompt: _CompactPrompt | None = None
         self._turn: asyncio.Task[None] | None = None  # the agent's turn, running under the input box
         self._ui = asyncio.Lock()  # who has the keyboard: the input box, or a question (approval)
+        self._questions = 0  # questions waiting for the keyboard, or holding it
+        self._sending_now = False  # Esc stopped the turn to send the waiting messages
 
     # -- input ----------------------------------------------------------------
 
@@ -262,6 +290,15 @@ class Repl:
                 buffer.apply_completion(buffer.complete_state.current_completion)
             buffer.validate_and_handle()
 
+        @keys.add(
+            "escape", filter=Condition(lambda: self.turn_running and bool(self.session.pending_steering))
+        )
+        def _send_now(event: KeyPressEvent) -> None:
+            """Stop the agent's current step; the waiting messages go to it at once."""
+            self._sending_now = True
+            if self._turn is not None:
+                self._turn.cancel()
+
         @keys.add("escape", "enter")
         @keys.add("c-j")
         def _newline(event: KeyPressEvent) -> None:
@@ -279,7 +316,7 @@ class Repl:
                 )
                 if completion:
                     buffer.apply_completion(completion)
-            elif buffer.text.startswith("/"):
+            elif is_command(buffer.text):
                 buffer.start_completion(select_first=False)
 
         @keys.add("c-t")
@@ -288,11 +325,11 @@ class Repl:
             self.show_thinking(not self.renderer.show_thinking)
 
         @keys.add("c-o")
-        def _show_output(event: KeyPressEvent) -> None:
-            """Show the last tool call's full output (the transcript shows one line of it)."""
-            if self.renderer.last_output is not None:
-                self._draft = event.current_buffer.text
-                event.app.exit(result=_SHOW_OUTPUT)
+        def _toggle_output(event: KeyPressEvent) -> None:
+            """Expand a running subagent's calls, or the last tool call's output, above the
+            input box; press again to close it (it leaves nothing in the scrollback)."""
+            self.expanded = not self.expanded and self._has_expansion()
+            event.app.invalidate()
 
         @keys.add("s-tab")
         def _cycle_mode(event: KeyPressEvent) -> None:
@@ -306,7 +343,7 @@ class Repl:
 
         history_file = home_dir() / "repl_history"
         history_file.parent.mkdir(parents=True, exist_ok=True)
-        typing_command = Condition(lambda: prompt.default_buffer.text.startswith("/"))
+        typing_command = Condition(lambda: is_command(prompt.default_buffer.text))
         prompt = _CompactPrompt(
             message=FormattedText([("class:prompt", f"{PROMPT} ")]),
             multiline=True,
@@ -327,9 +364,72 @@ class Repl:
         return prompt
 
     def _live(self) -> str:
-        if not self.turn_running:
+        size = get_app().output.get_size()
+        parts = (
+            [self.renderer.live_ansi(size.columns), self._pending(size.columns)] if self.turn_running else []
+        )
+        if self.expanded:
+            used = sum(part.count("\n") + 1 for part in parts if part)
+            # Leave room for the input box and toolbar below (about 8 rows).
+            parts.append(self._expansion_ansi(size.columns, max(size.rows - used - 8, 6)))
+        return "\n".join(part for part in parts if part)
+
+    def _has_expansion(self) -> bool:
+        return bool(self._running_agents()) or self.renderer.last_output is not None
+
+    def _running_agents(self) -> list[SubagentUpdate]:
+        return [agent for agent in self.renderer._agents.values() if agent.log]
+
+    def _expansion_ansi(self, width: int, max_lines: int) -> str:
+        """Ctrl+O's view, fitted to `max_lines`: running subagents' latest calls (newest
+        kept), else the last tool call's output (its start kept). /output prints it all."""
+        if agents := self._running_agents():
+            title = " · ".join(f"{a.agent}: {' '.join(a.label.split())}" for a in agents)
+            body = Text("\n").join(self._subagent_calls(a, width - 4) for a in agents)
+            keep_end = True
+        elif self.renderer.last_output is not None:
+            summary, output = self.renderer.last_output
+            title = " ".join(self.renderer._relative(summary).split())
+            body = Text(output.rstrip() or "(no output)")
+            keep_end = False
+        else:
+            self.expanded = False
             return ""
-        return self.renderer.live_ansi(get_app().output.get_size().columns)
+        lines: list[Text] = list(body.split("\n"))
+        room = max(max_lines - 2, 3)  # the panel's border takes two rows
+        if len(lines) > room:
+            hidden = len(lines) - room + 1
+            note = Text(
+                f"… {hidden} {'earlier' if keep_end else 'more'} lines (/output prints it all)",
+                style="subtle",
+            )
+            lines = [note, *lines[-(room - 1) :]] if keep_end else [*lines[: room - 1], note]
+        panel = Panel(
+            Text("\n").join(lines),
+            title=Text(ellipsize(title, width - 30), style="bold"),
+            title_align="left",
+            subtitle=Text("ctrl+o to close", style="subtle"),
+            subtitle_align="right",
+            border_style="subtle",
+            padding=(0, 1),
+        )
+        with self.console.capture() as captured:
+            self.console.print(panel, width=width, highlight=False)
+        return without_links(captured.get().rstrip("\n"))
+
+    def _pending(self, width: int) -> str:
+        """Messages waiting for the agent's next step, and how to send them now (as Codex
+        shows them): `• Sent after the agent's current step (esc: stop it and send now)`."""
+        pending = self.session.pending_steering
+        if not pending:
+            return ""
+        text = Text("• ", style="subtle").append("Sent after the agent's current step ", style="muted")
+        text.append("(esc: stop it and send now)", style="subtle")
+        for message in pending:
+            text.append("\n  ↳ ", style="subtle").append(ellipsize(" ".join(message.split()), width - 6))
+        with self.console.capture() as captured:
+            self.console.print(text, width=width, highlight=False)
+        return captured.get().rstrip("\n")
 
     def _placeholder(self) -> str:
         if self.turn_running:
@@ -343,13 +443,33 @@ class Repl:
     @contextlib.asynccontextmanager
     async def exclusive(self) -> AsyncIterator[None]:
         """Take the keyboard from the input box (for a permission prompt), keeping what was
-        typed so far; the input box comes back afterwards."""
+        typed so far; the input box comes back afterwards.
+
+        A question can arrive while the input box is between runs: just closed for the
+        previous question, its next run about to start. Closing it then does nothing, so
+        the count below also stops the loop from opening it, and a run that starts anyway
+        closes itself at once (`_make_way`). Otherwise the question waits for a keyboard
+        the new input box holds, and both wait forever."""
+        self._questions += 1
+        try:
+            self._close_input()
+            async with self._ui:
+                yield
+        finally:
+            self._questions -= 1
+
+    def _close_input(self) -> None:
+        """Close the input box if it's up, keeping what was typed."""
         app = self._prompt.app if self._prompt is not None else None
-        if app is not None and app.is_running:
-            self._draft = app.current_buffer.text
-            app.exit(result=_PAUSE)
-        async with self._ui:
-            yield
+        if app is None or app.future is None or app.future.done():
+            return  # between runs: the next one sees the waiting question (_make_way)
+        self._draft = app.current_buffer.text
+        app.exit(result=_PAUSE)
+
+    def _make_way(self) -> None:
+        """At the start of each input box run: step aside if a question is waiting."""
+        if self._questions:
+            self._close_input()
 
     def _echo(self, line: str, *, queued: bool = False) -> None:
         """Print the submitted message back into the transcript (the input box is erased)."""
@@ -357,7 +477,7 @@ class Repl:
         text = Text().append(f"{PROMPT} ", style="brand").append(first, style="bold")
         for more in rest:
             text.append(f"\n  {more}", style="bold")
-        if queued and not line.startswith("/"):
+        if queued and not is_command(line):
             text.append("  · for the agent's next step", style="subtle")
         self.console.print(text, highlight=False)
 
@@ -370,18 +490,21 @@ class Repl:
         with patch_stdout(raw=True):  # output scrolls above the input box
             while self.running:
                 async with self._ui:
+                    if self._questions:
+                        continue  # a question is waiting: it gets the keyboard first
                     try:
                         # show_frame must be passed here: prompt_async() resets it (prompt_toolkit 3.0.52).
                         draft, self._draft = self._draft, ""
-                        line = (await prompt.prompt_async(show_frame=True, default=draft)).strip()
+                        line = await prompt.prompt_async(
+                            show_frame=True, default=draft, pre_run=self._make_way
+                        )
+                        line = line.strip()
                     except (EOFError, KeyboardInterrupt):
                         break  # Ctrl-D, or Ctrl-C twice
                     if line == _PAUSE:
                         continue  # a question needs the keyboard; it's released on the way round
                     if line == _CONFIRM_AUTO:
                         await self.shift_tab_to_auto()
-                    elif line == _SHOW_OUTPUT:
-                        self.show_last_output()
                     elif line:
                         self._echo(line, queued=self.turn_running)
                         await self.handle(line)
@@ -395,9 +518,15 @@ class Repl:
         if self.turn_running:
             await self._while_running(line)
             return
-        if not line.startswith("/"):
+        if not is_command(line):
             if await self._safe_to_send(line):
-                await self._run(self.session.run(line))
+                images, problems = attachments(line, self.session.workspace.root)
+                for image in images:
+                    size = len(image.data) * 3 // 4 // 1024
+                    self.console.print(Text(f"  ⎿ attached {image.name} · {size:,} KB", style="subtle"))
+                for problem in problems:
+                    self.console.print(Text(f"  ⎿ not attached: {problem}", style="warn"))
+                await self._run(self.session.run(line, images))
             return
 
         name, _, arg = line.partition(" ")
@@ -412,7 +541,7 @@ class Repl:
                 await self._run(self.session.run_skill(name[1:], arg))
         else:
             self.console.print(
-                f"\n  Unknown command [bold]{name}[/]. Type [key]/[/] to see what's available."
+                f"\n  Unknown command [bold]{escape(name)}[/]. Type [key]/[/] to see what's available."
             )
 
     def show_thinking(self, show: bool) -> None:
@@ -429,6 +558,12 @@ class Repl:
             renderer.last_thought_shown = True
 
     def show_last_output(self) -> None:
+        """/output: a running subagent's calls so far, if one is running; else the last tool
+        call's full output, printed in full (ctrl+o shows the same, fitted to the screen)."""
+        if running := [agent for agent in self.renderer._agents.values() if agent.log]:
+            for agent in running:
+                self._show_subagent(agent)
+            return
         if self.renderer.last_output is None:
             return
         summary, output = self.renderer.last_output
@@ -443,6 +578,40 @@ class Repl:
             ),
             highlight=False,
         )
+
+    def _show_subagent(self, agent: SubagentUpdate) -> None:
+        """What a running subagent has done so far, printed in full (/output)."""
+        body = self._subagent_calls(agent, self.console.width)
+        title = f"{agent.agent} · {agent.label} · {agent.tools_used} tools so far"
+        self.console.print()
+        self.console.print(
+            Panel(
+                body or Text("(no tool calls yet)", style="muted"),
+                title=Text(title, style="bold"),
+                title_align="left",
+                border_style="subtle",
+                padding=(0, 1),
+            ),
+            highlight=False,
+        )
+
+    def _subagent_calls(self, agent: SubagentUpdate, width: int) -> Text:
+        """Each call a subagent made and the start of its result, from its log (written as
+        it goes)."""
+        body = Text()
+        for line in _read_lines(Path(agent.log)):
+            if line.get("event") == "tool_use":
+                tool = str(line.get("tool", "?"))
+                body.append("\n" if body else "").append(tool, style=tool_style(tool))
+                body.append(
+                    f"  {ellipsize(_main_arg(line.get('args')), width - len(tool) - 8)}", style="muted"
+                )
+            elif line.get("event") == "tool_result":
+                text = str(line.get("error") or line.get("result") or "")
+                style = "err" if line.get("error") else "subtle"
+                for out in [out for out in text.splitlines() if out.strip()][:3]:
+                    body.append(f"\n  ⎿ {ellipsize(out.strip(), width - 10)}", style=style)
+        return body
 
     def next_mode(self) -> PermissionMode:
         """Where Shift+Tab goes: the next mode, skipping auto once the user has said no to it."""
@@ -506,7 +675,7 @@ class Repl:
         """Input while the agent works: a message goes to it; commands that don't touch the
         conversation run; the rest wait."""
         name = line.partition(" ")[0]
-        if not line.startswith("/"):
+        if not is_command(line):
             if await self._safe_to_send(line):
                 self.session.steer(line)
             return
@@ -531,10 +700,14 @@ class Repl:
         try:
             await self.renderer.render(events)
         except asyncio.CancelledError:
-            self.console.print("\n[warn]■ Interrupted.[/] [muted]What should it do instead?[/]")
+            if self._sending_now:  # Esc: the waiting messages go to the agent right away
+                self.console.print("\n[warn]■ Stopped.[/] [muted]Sending your message now.[/]")
+            else:
+                self.console.print("\n[warn]■ Interrupted.[/] [muted]What should it do instead?[/]")
         except Exception as e:
             report_error(self.console, e)
         finally:
+            self._sending_now = False
             self._measure_context()
             self.console.print()
         # Messages that arrived after the agent's last step: they start the next turn.
@@ -591,3 +764,60 @@ def report_error(console: Console, error: Exception) -> None:
     )
     if log.isEnabledFor(logging.DEBUG):
         console.print_exception()
+
+
+def _read_lines(path: Path) -> list[dict[str, Any]]:
+    """A JSONL log's records; a line still being written (or unreadable) is skipped."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    records = []
+    for line in text.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _main_arg(args: object) -> str:
+    """The argument that says what a call was about: its path, command, URL, query..."""
+    if not isinstance(args, dict):
+        return ""
+    for key in ("path", "command", "url", "query", "pattern", "target", "prompt"):
+        if args.get(key):
+            return " ".join(str(args[key]).split())
+    return " ".join(json.dumps(args).split())
+
+
+_IMAGE_NAMES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+
+def attachments(line: str, cwd: Path) -> tuple[list[Image], list[str]]:
+    """Image files named in a message, to show the model: (images, why others couldn't be).
+    Words are split as a shell would, so a pasted `Screenshot\\ 2026-09-30\\ at\\ 3.11.03 PM.png`
+    or a quoted drag-and-drop path is one path. Only names ending like an image are
+    looked at; the file's bytes decide."""
+    try:
+        words = shlex.split(line)
+    except ValueError:  # an unmatched quote: fall back to spaces
+        words = line.split()
+    images: list[Image] = []
+    problems: list[str] = []
+    seen: set[Path] = set()
+    for word in words:
+        if not word.lower().endswith(_IMAGE_NAMES):
+            continue
+        path = Path(word).expanduser()
+        path = path if path.is_absolute() else cwd / path
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        try:
+            images.append(load_image(path))
+        except (OSError, ValueError) as e:
+            problems.append(str(e))
+    return images, problems

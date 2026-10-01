@@ -7,6 +7,7 @@ import time
 
 import pytest
 from rich.console import Console
+from rich.text import Text
 
 from conftest import ScriptedLLM
 from tinyharness import Session, SessionOptions
@@ -17,6 +18,7 @@ from tinyharness.config import note_launch
 from tinyharness.events import (
     AssistantText,
     Done,
+    PermissionDecision,
     Reasoning,
     SubagentUpdate,
     TokenUsage,
@@ -141,21 +143,38 @@ def test_each_call_is_one_row_with_its_result_on_the_right(renderer):
         renderer,
         ("Read(/repo/src/app.py)", "Read", {"path": "/repo/src/app.py"}, "a\nb\nc", False),
         ("Edit(/repo/src/app.py, -1/+4 lines)", "Edit", {"path": "/repo/src/app.py"}, "edited", False),
-        ("Grep(x)", "Grep", {}, "7 total match(es) across 3 file(s):\na", False),
+        ("Grep(x)", "Grep", {}, "7 total match(es) across 3 file(s):\na.py:1: x", False),
     )
-    read, edit, grep = shown(renderer)
+    read, edit, grep, match = shown(renderer)
     assert read.startswith("✓ Read    src/app.py") and read.endswith("3 lines")
     assert edit.startswith("✓ Edit    src/app.py") and edit.endswith("+4 −1")
     assert grep.endswith("7 matches in 3 files")
     assert len({len(read), len(edit), len(grep)}) == 1  # right-aligned to the terminal's width
+    assert match.strip() == "⎿ a.py:1: x"  # what a search found shows under it
+
+
+def test_command_output_is_previewed_under_the_row(renderer):
+    output = "\n".join(f"row {i}" for i in range(1, 9))
+    replay(renderer, ("Bash(ls)", "Bash", {"command": "ls"}, output, False))
+    row, *preview = shown(renderer)
+    assert row.rstrip() == "✓ Bash    ls"  # nothing crammed on the right
+    assert [line.strip() for line in preview] == ["⎿ row 1", "row 2", "row 3", "… 5 more lines"]
+
+
+def test_who_allowed_a_call_without_asking_is_credited_under_it(renderer):
+    renderer.handle(ToolUse("Bash", {"command": "ls"}, "Bash(ls)", id="c1"))
+    renderer.handle(PermissionDecision("Bash", True, "classifier", "read-only listing"))
+    renderer.handle(ToolResult("Bash", "(no output)", False, id="c1"))
+    row, credit = shown(renderer)
+    assert row.endswith("no output") and credit.strip() == "⎿ auto mode · read-only listing"
 
 
 def test_failed_commands_show_why_underneath(renderer):
     output = "> build\nsrc/app.ts(12,5): error TS2322: bad type\n(exit code 2)"
     replay(renderer, ("Bash(npm run build)", "Bash", {"command": "npm run build"}, output, False))
-    row, why = shown(renderer)
+    row, *why = shown(renderer)
     assert row.startswith("✗ Bash    npm run build") and row.endswith("exit 2")
-    assert why.strip() == "⎿ src/app.ts(12,5): error TS2322: bad type"
+    assert [line.strip() for line in why] == ["⎿ > build", "src/app.ts(12,5): error TS2322: bad type"]
 
 
 def test_rejected_and_denied_calls(renderer):
@@ -270,7 +289,8 @@ def test_the_status_bar_says_what_matters(repl):
     repl.context_used = 0.38
     bar = text(repl._status(200))
     assert "⎇ main" in bar and "38% context" in bar and "300 out" in bar and "$0.42" in bar
-    assert ("sandbox" in bar) == (repl.session.sandbox is not None)
+    # "no sandbox" when there's none (as when tinyharness itself runs in one: they don't nest)
+    assert ("no sandbox" in bar) == (repl.session.sandbox is None)
 
 
 def test_the_status_bar_drops_the_least_important_parts_first(repl):
@@ -436,22 +456,41 @@ def test_showing_reasoning_asks_the_provider_for_it(tmp_path, monkeypatch):
 def test_a_sandboxed_test_run_that_fails_shows_as_failed(renderer):
     """The sandbox note used to come after `(exit code 1)`, hiding it: 8 failed tests showed ✓."""
     from tinyharness.sandbox import SandboxPolicy
-    from tinyharness.tools.bash import BashTool
+    from tinyharness.tools.bash import BashInput, BashTool
 
     output = BashTool(None, SandboxPolicy(write_roots=()))._report(
         "E   PermissionError: Operation not permitted\n8 failed, 462 passed in 10.29s",
         code=1,
         timed_out=False,
-        timeout=120,
+        args=BashInput(command="pytest -q"),
         sandboxed=True,
     )
     assert output.endswith("(exit code 1)") and "(note: the sandbox" in output
     replay(renderer, ("Bash(pytest -q)", "Bash", {"command": "pytest -q"}, output, False))
     renderer.handle(Done())
-    row, under, footer = shown(renderer)[-3:]
+    row, first, last, footer = shown(renderer)[-4:]
     assert row.startswith("✗ Bash") and "exit 1" in row
-    assert under.strip() == "⎿ 8 failed, 462 passed in 10.29s"  # the note isn't taken for the error
+    assert first.strip() == "⎿ E   PermissionError: Operation not permitted"
+    assert last.strip() == "8 failed, 462 passed in 10.29s"  # the note isn't taken for the error
     assert "tests ✗" in footer
+
+
+def test_an_app_that_crashes_in_the_sandbox_says_to_run_it_outside():
+    """Chrome.app aborts under Seatbelt (it needs LaunchServices); the model used to guess."""
+    from tinyharness.sandbox import SandboxPolicy
+    from tinyharness.tools.bash import BashInput, BashTool
+
+    chrome = (
+        '"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless --screenshot=a.png x.html'
+    )
+    output = BashTool(None, SandboxPolicy(write_roots=()))._report(
+        "/bin/bash: line 1: 48216 Abort trap: 6  ...",
+        code=134,
+        timed_out=False,
+        args=BashInput(command=chrome),
+        sandboxed=True,
+    )
+    assert "run this command with sandbox=false" in output and output.endswith("(exit code 134)")
 
 
 def test_cost_explains_where_the_tokens_went():
@@ -523,3 +562,312 @@ def test_clear_before_any_calls_says_nothing_about_spend(repl):
     repl.console = Console(width=120, record=True, theme=THEME)
     clear(repl, "")
     assert "Session so far" not in repl.console.export_text()
+
+
+def test_writing_a_file_is_not_called_thinking(renderer):
+    """After the model reasons it may spend minutes writing a file as a tool call; the
+    spinner said "Thinking" all along, and the thought's time included the writing."""
+    from tinyharness.events import Reasoning, ToolInputStreaming
+
+    renderer.wait("Working")
+    renderer.handle(Reasoning("Planning the deck."))
+    assert renderer._activity == "Thinking"
+    renderer.handle(ToolInputStreaming("Write", 0))
+    assert renderer._activity == "Writing a file"
+    assert any(line.startswith("∴ Thought for") for line in shown(renderer))  # ended when writing began
+    renderer.handle(ToolInputStreaming("Write", 18_400, "/repo/out/deck.html"))
+    assert (renderer._activity, renderer._activity_detail) == ("Writing out/deck.html", "18.4k chars")
+    spinner = Text.from_ansi(renderer.live_ansi(100)).plain  # colored or not, depending on the terminal
+    assert "Writing out/deck.html · 18.4k chars…" in spinner and "Thinking" not in spinner
+    renderer.handle(ToolUse("Write", {"path": "/repo/out/deck.html"}, "Write(/repo/out/deck.html, 1 lines)"))
+    assert renderer._activity == "Working"
+
+
+def test_other_tools_being_written_get_their_own_label(renderer):
+    from tinyharness.events import ToolInputStreaming
+
+    for event, label in [
+        (ToolInputStreaming("Edit", 10, "/repo/src/app.py"), "Editing src/app.py"),
+        (ToolInputStreaming("Bash", 10, "pytest -q"), "Writing a command"),
+        (ToolInputStreaming("WebFetch", 10, "https://x.example"), "Preparing WebFetch"),
+    ]:
+        renderer.handle(event)
+        assert renderer._activity == label
+
+
+def test_parallel_results_land_on_their_own_rows_with_their_own_times(renderer):
+    """Three searches share a name; the one that finishes first isn't always the first."""
+    for i in range(3):
+        renderer.handle(ToolUse("WebSearch", {"query": f"q{i}"}, f"WebSearch(query {i})", id=f"c{i}"))
+    renderer.handle(ToolsDispatched(["WebSearch"] * 3, True))
+    for tool in renderer._running:
+        tool.started -= 10  # dispatched 10s ago
+    renderer._running[2].started += 7  # ...but the third only 3s ago
+    renderer.handle(ToolResult("WebSearch", "Search results for 'query 2'", id="c2"))
+    renderer.handle(ToolResult("WebSearch", "Search results for 'query 0'", id="c0"))
+    renderer.handle(ToolResult("WebSearch", "Search results for 'query 1'", id="c1"))
+    rows = [line for line in shown(renderer) if line.startswith("✓ WebSearch")]
+    assert [row.split()[2] for row in rows] == ["query", "query", "query"]
+    for row, n, seconds in zip(rows, (2, 0, 1), ("3s", "10s", "10s"), strict=True):
+        assert f"query {n}" in row.split("  ")[1] and f"'query {n}'" in row and row.endswith(seconds)
+
+
+def test_a_subagent_folds_into_its_row_when_the_agent_was_left_to_default(renderer):
+    args = {"description": "check the retry logic", "prompt": "..."}  # no subagent_type
+    renderer.handle(ToolUse("Agent", args, "Agent(general-purpose: check the retry logic)"))
+    renderer.handle(ToolsDispatched(["Agent"], False))
+    renderer.handle(
+        SubagentUpdate("a1", "general-purpose", "check the retry logic", "done", "", 3, 3.2, "haiku")
+    )
+    renderer.handle(ToolResult("Agent", "Looks right."))
+    [row] = shown(renderer)  # folded, not a dangling line of its own
+    assert row.startswith("✓ Agent   general-purpose: check the retry logic")
+
+
+def test_ctrl_o_shows_a_running_subagents_calls_so_far(repl, tmp_path):
+    import json
+
+    from tinyharness.cli.theme import THEME
+    from tinyharness.events import SubagentUpdate
+
+    log = tmp_path / "sidechain.jsonl"
+    log.write_text(
+        "\n".join(
+            json.dumps(r)
+            for r in [
+                {"event": "tool_use", "tool": "Bash", "args": {"command": "node measure.mjs"}},
+                {
+                    "event": "tool_result",
+                    "tool": "Bash",
+                    "result": "TypeError: x is undefined\n(exit code 1)",
+                },
+                {"event": "tool_use", "tool": "Edit", "args": {"path": "measure.mjs"}},
+            ]
+        )
+        + '\n{"event": "tool_res'  # a line still being written
+    )
+    repl.console = Console(width=100, record=True, theme=THEME)
+    repl.renderer.handle(
+        SubagentUpdate("a1", "general-purpose", "Verify deck", "working", "", 2, 30.0, log=str(log))
+    )
+    repl.show_last_output()
+    text = repl.console.export_text()
+    assert "general-purpose · Verify deck · 2 tools so far" in text
+    assert "Bash  node measure.mjs" in text and "⎿ TypeError: x is undefined" in text
+    assert "Edit  measure.mjs" in text
+
+
+def test_a_screenshot_shows_as_a_preview_of_the_page(renderer):
+    """The model calls Screenshot; the user sees the agent looking at its work, not where
+    the picture was saved."""
+    replay(
+        renderer,
+        (
+            "Screenshot(/repo/out/deck.html#8)",
+            "Screenshot",
+            {"target": "/repo/out/deck.html#8"},
+            "screenshot of /repo/out/deck.html#8, saved as /tmp/scratch/screenshot-1a2b3c.png",
+            False,
+        ),
+    )
+    [row] = shown(renderer)
+    assert row.startswith("✓ Preview") and "out/deck.html · slide 8" in row
+    assert row.endswith("looked") and "screenshot-" not in row
+
+
+async def test_back_to_back_questions_both_get_the_keyboard(repl):
+    """Two approvals in a row (a batch of Read + Grep outside the project): the second used
+    to arrive while the input box was coming back, found it not yet running, and waited
+    forever for a keyboard the new input box held."""
+    import asyncio
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    answered = []
+
+    async def questions() -> None:
+        await asyncio.sleep(0.3)  # the input box is up
+        for name in ("Read", "Grep"):
+            async with repl.exclusive():
+                answered.append(name)
+
+    with create_pipe_input() as keys, create_app_session(input=keys, output=DummyOutput()):
+        loop = asyncio.create_task(repl.loop())
+        try:
+            await asyncio.wait_for(questions(), 3)
+        finally:
+            repl.running = False
+            keys.send_text("\x04")  # Ctrl-D ends the input loop
+            await asyncio.wait_for(loop, 3)
+    assert answered == ["Read", "Grep"]
+
+
+async def test_a_half_typed_message_survives_back_to_back_questions(repl):
+    import asyncio
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    with create_pipe_input() as keys, create_app_session(input=keys, output=DummyOutput()):
+        loop = asyncio.create_task(repl.loop())
+        try:
+            await asyncio.sleep(0.3)
+            keys.send_text("half-typed")
+            await asyncio.sleep(0.2)
+            for _ in range(2):
+                async with repl.exclusive():
+                    pass
+            await asyncio.sleep(0.3)  # the input box is back
+            assert repl._prompt.app.current_buffer.text == "half-typed"
+        finally:
+            repl.running = False
+            keys.send_text("\x15\x04")  # clear the line, then Ctrl-D
+            await asyncio.wait_for(loop, 3)
+
+
+def test_reading_a_missing_file_is_a_quiet_not_found(renderer):
+    """The model checking whether a file exists isn't an error worth red text."""
+    replay(
+        renderer,
+        (
+            "Read(/repo/AGENTS.md)",
+            "Read",
+            {"path": "/repo/AGENTS.md"},
+            "file not found: /repo/AGENTS.md",
+            True,
+        ),
+    )
+    [row] = shown(renderer)
+    assert row.startswith("✗ Read") and row.endswith("not found")
+    assert "error" not in row
+
+
+def test_the_footer_counts_the_agents_work_too(renderer):
+    """A team review showed "17 tools" after 128: the agents' 111 were left out."""
+    from tinyharness.events import SubagentUpdate
+
+    replay(renderer, ("Read(/repo/a.py)", "Read", {"path": "/repo/a.py"}, "x", False))
+    for run_id, tools in (("a", 60), ("b", 51)):
+        renderer.handle(SubagentUpdate(run_id, "reviewer", "review", "done", "", tools, 30.0))
+    assert "112 tools (111 by 2 agents)" in renderer.footer().plain
+
+
+def test_a_delivered_message_says_so(renderer):
+    from tinyharness.events import MessageDelivered
+
+    renderer.handle(MessageDelivered("/data/nova_ai.db  Here is the sqlite database file"))
+    assert shown(renderer) == [
+        "  ↳ delivered to the agent: /data/nova_ai.db Here is the sqlite database file"
+    ]
+
+
+def test_waiting_messages_show_above_the_input_with_how_to_send_them_now(repl):
+    repl.session.steer("use the db in demo_data/")
+    pending = repl._pending(100)
+    assert "Sent after the agent's current step (esc: stop it and send now)" in pending
+    assert "↳ use the db in demo_data/" in pending
+    repl.session.take_steering()
+    assert repl._pending(100) == ""
+
+
+async def test_esc_stops_the_turn_and_sends_the_waiting_message_now(repl):
+    """Codex-style: a message typed mid-step waits for the next step, unless Esc says now."""
+    import asyncio
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from tinyharness.llm.types import StreamChunk
+
+    prompts = []
+
+    async def stream(messages, tools=None, **kw):
+        prompts.append(messages[-1].content)
+        if len(prompts) == 1:
+            await asyncio.sleep(30)  # a long first step
+        yield StreamChunk(text="ok", finish_reason="stop")
+
+    repl.session.llm.stream = stream
+    with create_pipe_input() as keys, create_app_session(input=keys, output=DummyOutput()):
+        loop = asyncio.create_task(repl.loop())
+        try:
+            await asyncio.sleep(0.3)
+            keys.send_text("start\r")
+            await asyncio.sleep(0.3)
+            keys.send_text("use the db in demo_data/\r")  # queued for the next step
+            await asyncio.sleep(0.3)
+            assert repl.session.pending_steering == ("use the db in demo_data/",)
+            keys.send_text("\x1b")  # Esc
+            for _ in range(40):
+                if len(prompts) >= 2:
+                    break
+                await asyncio.sleep(0.1)
+            assert prompts == ["start", "use the db in demo_data/"]
+            assert "Sending your message now." in repl.console.export_text()
+        finally:
+            repl.running = False
+            keys.send_text("\x04")
+            await asyncio.wait_for(loop, 5)
+
+
+async def test_alt_enter_still_makes_a_new_line_with_a_message_waiting(repl):
+    """Esc now sends waiting messages; Alt+Enter starts with Esc too, and must still work."""
+    import asyncio
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    with create_pipe_input() as keys, create_app_session(input=keys, output=DummyOutput()):
+        loop = asyncio.create_task(repl.loop())
+        try:
+            repl._turn = asyncio.create_task(asyncio.sleep(30))  # a turn is running
+            repl.session.steer("waiting")
+            await asyncio.sleep(0.3)
+            keys.send_text("a\x1b\rb")  # a, Alt+Enter, b
+            await asyncio.sleep(0.3)
+            assert repl._prompt.app.current_buffer.text == "a\nb"
+            assert not repl._turn.cancelled()
+        finally:
+            repl._turn.cancel()
+            repl.session.take_steering()
+            repl.running = False
+            repl._prompt.app.current_buffer.reset()  # Ctrl-D only exits an empty input
+            keys.send_text("\x04")
+            await asyncio.wait_for(loop, 5)
+
+
+def test_the_spinner_clock_keeps_counting_through_blank_text(renderer, monkeypatch):
+    """Some models stream blank lines between pieces of a tool call; the clock restarted
+    each time (0s, 1s, 0s, 1s)."""
+    import tinyharness.cli.render as render
+    from tinyharness.events import ToolInputStreaming
+
+    now = [100.0]
+    monkeypatch.setattr(render.time, "monotonic", lambda: now[0])
+    renderer.handle(ToolInputStreaming("Bash", 10))
+    for _ in range(5):
+        now[0] += 1
+        renderer.handle(AssistantText("\n"))
+        renderer.handle(ToolInputStreaming("Bash", 2000))
+    assert renderer._activity == "Writing a command"
+    assert int(now[0] - renderer._activity_since) == 5
+
+
+def test_a_multi_line_command_takes_one_row(renderer):
+    """A heredoc shows its first line and how many follow, not its body over several rows."""
+    command = "cat > /tmp/q.sql << 'EOF'\n.mode json\nSELECT endpoint FROM usage\nEOF"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, "", False))
+    (row,) = shown(renderer)
+    assert row.startswith("✓ Bash    cat > /tmp/q.sql << 'EOF' (+3 lines)")
+
+
+def test_calls_allowed_by_the_users_own_rules_get_no_credit_line(renderer):
+    renderer.handle(ToolUse("Bash", {"command": "ls"}, "Bash(ls)", id="c1"))
+    renderer.handle(PermissionDecision("Bash", True, "rule", "matches allow rule Bash(ls)"))
+    renderer.handle(ToolResult("Bash", "(no output)", False, id="c1"))
+    assert len(shown(renderer)) == 1

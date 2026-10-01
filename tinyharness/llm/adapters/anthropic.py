@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from tinyharness.agent.history import Image
 from tinyharness.llm.adapters.base import Adapter, StreamParser, parse_arguments
 from tinyharness.llm.types import LLMError, ModelInfo, Request, StreamChunk
 
@@ -102,7 +103,10 @@ def _messages(request: Request) -> list[dict[str, Any]]:
 
     for m in request.messages:
         if m.role == "tool":
-            user({"type": "tool_result", "tool_use_id": m.tool_call_id, "content": m.content or ""})
+            content: str | list[dict[str, Any]] = m.content or ""
+            if m.images:  # Anthropic takes pictures inside a tool result
+                content = [{"type": "text", "text": m.content or ""}, *map(_image, m.images)]
+            user({"type": "tool_result", "tool_use_id": m.tool_call_id, "content": content})
         elif m.role == "assistant":
             blocks = request.echo(m)
             if blocks is None:
@@ -114,7 +118,13 @@ def _messages(request: Request) -> list[dict[str, Any]]:
             out.append({"role": "assistant", "content": blocks})
         else:
             user({"type": "text", "text": m.content or ""})
+            for image in m.images:
+                user(_image(image))
     return out
+
+
+def _image(image: Image) -> dict[str, Any]:
+    return {"type": "image", "source": {"type": "base64", "media_type": image.media_type, "data": image.data}}
 
 
 class _AnthropicParser(StreamParser):

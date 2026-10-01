@@ -118,3 +118,72 @@ async def test_the_input_box_grows_only_by_the_menu_it_shows(matches, rows):
             )
         height = prompt._get_default_buffer_control_height()
     assert (height.min, height.max) == (rows, rows)
+
+
+@pytest.mark.parametrize(
+    ("line", "command"),
+    [
+        ("/model", True),
+        ("/key anthropic", True),
+        ("/claude-design-skill make a deck", True),
+        ("/var/folders/w4/T/Screenshot\\ 2026-09-30.png  - This is slide 1", False),  # a pasted path
+        ("/Users/me/shot.png what's wrong here?", False),
+        ("fix /model's help text", False),
+    ],
+)
+def test_only_a_slash_and_a_name_is_a_command(line, command):
+    from tinyharness.cli.repl import is_command
+
+    assert is_command(line) is command
+
+
+# ---- attaching screenshots ----
+
+from conftest import png  # noqa: E402
+
+PNG = png(40, 20)
+
+
+def test_pasted_screenshot_paths_are_attached(tmp_path):
+    """As macOS pastes them: spaces escaped, a note after each."""
+    from tinyharness.cli.repl import attachments
+
+    shots = tmp_path / "NSIRD_screencaptureui_OZHpGn"
+    shots.mkdir()
+    for n in (1, 2):
+        (shots / f"Screenshot 2026-09-30 at 3.11.0{n} PM.png").write_bytes(PNG)
+    line = "\n".join(
+        f"{shots}/Screenshot\\ 2026-09-30\\ at\\ 3.11.0{n}\\ PM.png  - This is slide {n}" for n in (1, 2)
+    )
+    images, problems = attachments(line, tmp_path)
+    assert [i.name for i in images] == [
+        "Screenshot 2026-09-30 at 3.11.01 PM.png",
+        "Screenshot 2026-09-30 at 3.11.02 PM.png",
+    ]
+    assert problems == []
+
+
+def test_only_real_images_are_attached(tmp_path):
+    from tinyharness.cli.repl import attachments
+
+    (tmp_path / "fake.png").write_text("not an image")
+    (tmp_path / "broken.png").write_bytes(PNG[:20])
+    (tmp_path / "notes.txt").write_text("hi")
+    images, problems = attachments("look at fake.png broken.png notes.txt missing.png", tmp_path)
+    assert images == []
+    assert problems[0] == "fake.png isn't a PNG, JPEG, GIF or WebP image"
+    assert problems[1].startswith("broken.png: not a readable image")
+
+
+def test_a_pasted_retina_screenshot_is_shrunk(tmp_path):
+    """It used to go in at full size, and a provider rejected every later request."""
+    import base64
+    import io
+
+    from PIL import Image as PILImage
+
+    from tinyharness.cli.repl import attachments
+
+    (tmp_path / "shot.png").write_bytes(png(3024, 1964))
+    [image], _ = attachments("look at shot.png", tmp_path)
+    assert max(PILImage.open(io.BytesIO(base64.b64decode(image.data))).size) == 2000

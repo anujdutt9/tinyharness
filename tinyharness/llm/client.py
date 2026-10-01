@@ -7,10 +7,13 @@ agent loop, compaction and classifier only ever see this interface.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import random
 import re
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +25,7 @@ from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.types import (
     ContextOverflowError,
     Effort,
+    ImageTooLargeError,
     LLMError,
     ModelInfo,
     ProviderConnectionError,
@@ -38,6 +42,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CompletedTurn",
     "ContextOverflowError",
+    "ImageTooLargeError",
     "LLMClient",
     "LLMError",
     "ProviderConnectionError",
@@ -53,6 +58,36 @@ _OVERFLOW = re.compile(
     r"|too many (input )?tokens|input token count|exceeds? the (maximum|model'?s?)",
     re.IGNORECASE,
 )
+
+
+# How providers word "an image in this request is too large".
+_IMAGE_TOO_LARGE = re.compile(
+    r"image dimensions exceed|image (exceeds|is too large|too large)|exceeds? .{0,40}image"
+    r"|image_too_large|image size",
+    re.IGNORECASE,
+)
+
+
+# Answers worth asking again, before any of the reply has streamed: rate limits (429, which
+# a gateway's admission control sends on purpose), overload (503, 529) and gateway errors.
+RETRY_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
+_RETRYABLE_TRANSPORT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError)
+MAX_RETRIES = 3
+STALL_SECONDS = 300.0  # no bytes from the server for this long ends the request
+RETRY_BASE_SECONDS = 1.0
+RETRY_MAX_SECONDS = 60.0
+
+
+def retry_delay(retry_after: str | None, attempt: int) -> float:
+    """Seconds to wait before attempt `attempt + 1`: the server's Retry-After when it gives
+    one (in seconds), otherwise exponential backoff with jitter. Capped either way."""
+    if retry_after:
+        try:
+            return min(RETRY_MAX_SECONDS, max(0.0, float(retry_after)))
+        except ValueError:
+            pass  # an HTTP date: fall back to backoff
+    backoff = RETRY_BASE_SECONDS * 2**attempt
+    return min(RETRY_MAX_SECONDS, backoff * random.uniform(0.5, 1.5))
 
 
 class ToolCallAccumulator:
@@ -72,7 +107,15 @@ class ToolCallAccumulator:
             tc.arguments += fn["arguments"]
 
     def calls(self) -> list[ToolCall]:
-        return [self._by_index[i] for i in sorted(self._by_index)]
+        calls = [self._by_index[i] for i in sorted(self._by_index)]
+        for i, call in enumerate(calls):
+            if not call.id:  # some OpenAI-compatible servers leave ids out; results need one
+                call.id = f"call_{uuid.uuid4().hex[:12]}_{i}"
+        return calls
+
+    def get(self, index: int) -> ToolCall | None:
+        """The call at `index` as assembled so far."""
+        return self._by_index.get(index)
 
 
 @dataclass
@@ -92,6 +135,7 @@ class LLMClient:
         models: ModelDirectory | None = None,
         effort: Effort | None = None,
         timeout: float = 1800.0,
+        retries: int = MAX_RETRIES,
         transport: httpx.AsyncBaseTransport | None = None,  # tests replay recorded responses
     ) -> None:
         self.provider = provider
@@ -101,9 +145,17 @@ class LLMClient:
         self.effort = effort
         self.show_reasoning = False  # request readable reasoning where a provider makes it opt-in
         self.timeout = timeout
+        self.retries = retries
         self.directory = models
         self.transport = transport
         self._tried_listing = False
+
+    def _timeouts(self) -> httpx.Timeout:
+        """`timeout` for connecting and sending; between pieces of a reply, no more than
+        STALL_SECONDS: a connection that has gone silent that long is dead (servers that
+        need longer to start a reply send keep-alive comments), and one stuck agent would
+        otherwise hold up its whole team for the full timeout."""
+        return httpx.Timeout(self.timeout, read=min(self.timeout, STALL_SECONDS))
 
     @property
     def endpoint(self) -> str:
@@ -167,7 +219,7 @@ class LLMClient:
         *,
         model: str | None = None,
         web_search: bool = False,
-    ) -> AsyncIterator[StreamChunk]:
+    ) -> AsyncGenerator[StreamChunk, None]:
         """Stream one reply. The last chunk carries `state` when the provider needs data back next turn."""
         await self._ensure_model_list()
         model = model or self.model
@@ -190,39 +242,66 @@ class LLMClient:
 
         usage: Usage | None = None
         finished = False  # a stream that just stops (a proxy dropping it) isn't a reply
-        try:
-            async with (
-                httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client,
-                client.stream("POST", self.endpoint, json=payload, headers=self._headers()) as resp,
-            ):
-                if resp.status_code >= 400:
-                    body = (await resp.aread()).decode(errors="replace")
-                    raise _http_error(resp.status_code, body, self.endpoint)
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue  # blank lines, `event:` names, `:` keep-alive comments
-                    data = line.removeprefix("data:").strip()
-                    if data == "[DONE]":
-                        finished = True
-                        break
-                    try:
-                        event = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    usage = read_usage(event, usage)
-                    try:
-                        chunks = parser.feed(event)
-                    except LLMError as e:
-                        raise (ContextOverflowError(str(e)) if _OVERFLOW.search(str(e)) else e) from None
-                    for chunk in chunks:
-                        finished = finished or chunk.finish_reason is not None
-                        yield chunk
-        except httpx.TransportError as e:  # refused, reset, DNS, TLS, timeouts, dropped mid-reply
-            failure = describe_network_error(e)
-            raise ProviderConnectionError(
-                failure.message, host=failure.host, code=failure.code, slow_reply=failure.slow_reply
-            ) from e
+        unreadable = 0  # events that weren't valid JSON: skipped, but said so (text may be missing)
+        started = False  # once a chunk has gone out, a failure can't be retried invisibly
+        for attempt in range(self.retries + 1):
+            try:
+                async with (
+                    httpx.AsyncClient(timeout=self._timeouts(), transport=self.transport) as client,
+                    client.stream("POST", self.endpoint, json=payload, headers=self._headers()) as resp,
+                ):
+                    if resp.status_code >= 400:
+                        body = (await resp.aread()).decode(errors="replace")
+                        if resp.status_code in RETRY_STATUSES and attempt < self.retries:
+                            delay = retry_delay(resp.headers.get("retry-after"), attempt)
+                            log.warning(
+                                "%s answered %d; retrying in %.1fs (%d of %d)",
+                                self.endpoint, resp.status_code, delay, attempt + 1, self.retries,
+                            )  # fmt: skip
+                            await asyncio.sleep(delay)
+                            continue
+                        raise _http_error(resp.status_code, body, self.endpoint)
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue  # blank lines, `event:` names, `:` keep-alive comments
+                        data = line.removeprefix("data:").strip()
+                        if data == "[DONE]":
+                            finished = True
+                            break
+                        try:
+                            event = json.loads(data)
+                        except json.JSONDecodeError:
+                            unreadable += 1
+                            log.debug("unreadable stream event from %s: %.120s", self.endpoint, data)
+                            continue
+                        usage = read_usage(event, usage)
+                        try:
+                            chunks = parser.feed(event)
+                        except LLMError as e:
+                            raise _classify(e) from None
+                        for chunk in chunks:
+                            finished = finished or chunk.finish_reason is not None
+                            started = True
+                            yield chunk
+                break
+            except httpx.TransportError as e:  # refused, reset, DNS, TLS, timeouts, dropped mid-reply
+                if not started and attempt < self.retries and isinstance(e, _RETRYABLE_TRANSPORT):
+                    delay = retry_delay(None, attempt)
+                    log.warning("%s: %s; retrying in %.1fs", self.endpoint, type(e).__name__, delay)
+                    await asyncio.sleep(delay)
+                    continue
+                failure = describe_network_error(e)
+                raise ProviderConnectionError(
+                    failure.message, host=failure.host, code=failure.code, slow_reply=failure.slow_reply
+                ) from e
 
+        if unreadable:
+            log.warning(
+                "%d stream event(s) from %s weren't valid JSON and were skipped; the reply may be "
+                "missing some text (run with --debug to see them)",
+                unreadable,
+                self.endpoint,
+            )
         if not finished:
             raise LLMError(
                 f"incomplete response from {self.endpoint}: the stream ended without a finish event, "
@@ -340,9 +419,19 @@ def _http_error(status: int, body: str, endpoint: str) -> LLMError:
         return LLMError(
             f"auth error {status} from {endpoint}; check that your API key is set and valid. Response: {body[:500]}"
         )
+    if status in (400, 413, 422) and _IMAGE_TOO_LARGE.search(body):
+        return ImageTooLargeError(f"an image is too large for this model: {body[:300]}")
     if status in (400, 413, 422) and _OVERFLOW.search(body):
         return ContextOverflowError(f"the conversation is too long for this model: {body[:300]}")
     return LLMError(f"LLM error {status}: {body[:500]}")
+
+
+def _classify(e: LLMError) -> LLMError:
+    """An error reported inside the stream, as the specific kind the loop can recover from."""
+    text = str(e)
+    if _IMAGE_TOO_LARGE.search(text):
+        return ImageTooLargeError(text)
+    return ContextOverflowError(text) if _OVERFLOW.search(text) else e
 
 
 def _merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
