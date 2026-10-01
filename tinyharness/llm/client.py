@@ -147,12 +147,18 @@ class ToolCallAccumulator:
         self._by_index: dict[int, ToolCall] = {}
 
     def add(self, delta: dict[str, Any]) -> None:
-        tc = self._by_index.setdefault(delta.get("index", 0), ToolCall(id="", name=""))
+        index = delta.get("index")
+        latest = max(self._by_index, default=0)
+        if index is None:  # some OpenAI-compatible servers leave it out: a new id is a new call
+            current = self._by_index.get(latest)
+            new_call = current is not None and bool(delta.get("id")) and current.id not in ("", delta["id"])
+            index = latest + 1 if new_call else latest
+        tc = self._by_index.setdefault(index, ToolCall(id="", name=""))
         if delta.get("id"):
             tc.id = delta["id"]
         fn = delta.get("function") or {}
-        if fn.get("name"):
-            tc.name += fn["name"]
+        if (name := fn.get("name")) and name != tc.name:  # some servers repeat it in every delta
+            tc.name += name
         if fn.get("arguments"):
             tc.arguments += fn["arguments"]
 

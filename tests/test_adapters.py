@@ -927,3 +927,21 @@ def test_a_silent_connection_times_out_long_before_the_request_timeout():
     llm = client("deepseek", Server(), timeout=1800.0)
     timeouts = llm._timeouts()
     assert timeouts.read == STALL_SECONDS < 1800.0 and timeouts.connect == 1800.0
+
+
+def test_parallel_calls_without_an_index_stay_separate():
+    """Some OpenAI-compatible servers leave `index` out; two calls became one 'ReadGlob'."""
+    acc = ToolCallAccumulator()
+    acc.add({"id": "a", "function": {"name": "Read", "arguments": '{"path": "x"}'}})
+    acc.add({"id": "b", "function": {"name": "Glob", "arguments": '{"pattern": "*"}'}})
+    assert [(c.id, c.name, c.arguments) for c in acc.calls()] == [
+        ("a", "Read", '{"path": "x"}'),
+        ("b", "Glob", '{"pattern": "*"}'),
+    ]
+
+
+def test_a_name_repeated_in_every_delta_is_not_doubled():
+    acc = ToolCallAccumulator()
+    acc.add({"index": 0, "id": "a", "function": {"name": "Read", "arguments": '{"pa'}})
+    acc.add({"index": 0, "function": {"name": "Read", "arguments": 'th": "x"}'}})
+    assert [(c.name, c.arguments) for c in acc.calls()] == [("Read", '{"path": "x"}')]

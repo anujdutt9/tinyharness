@@ -1,6 +1,7 @@
 """Agent-loop behavior, driven by a scripted fake LLM."""
 
 import asyncio
+import json
 import time
 
 import pytest
@@ -303,7 +304,10 @@ async def test_invalid_arguments_are_explained_briefly(tmp_path):
     llm = ScriptedLLM([[("Agent", '{"description": "no prompt"}')], [("Agent", "{not json")], "done"])
     events, _ = await run(tmp_path, llm, [AgentTool({}, spawner=None)])
     missing, broken = [e.output for e in events if isinstance(e, ToolResult)]
-    assert missing == "error: invalid arguments for Agent: prompt: field required (required: prompt)"
+    assert missing == (
+        "error: invalid arguments for Agent: prompt: field required (required: prompt). "
+        'Received: {"description": "no prompt"}'
+    )
     assert broken.startswith("error: invalid arguments for Agent: they aren't valid JSON (")
     assert "pydantic" not in missing + broken
 
@@ -669,3 +673,72 @@ async def test_an_empty_step_limit_reply_adds_no_empty_message(tmp_path):
     llm = ScriptedLLM([[("A", '{"seconds": 0}')], [StreamChunk(finish_reason="stop")]])
     _, history = await run(tmp_path, llm, [sleep_tool("A", True)], max_steps=1)
     assert history.messages[-1].role == "user"  # the step-limit note; no empty assistant reply after it
+
+
+# ---- calls that arrive malformed or in the wrong place (open models behind a parser) ----
+
+
+class Echo(Tool[SleepInput]):
+    name, description, Input, read_only = "Read", "read", SleepInput, True
+
+    async def run(self, args, ctx):
+        return f"read {args.seconds}"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '```json\n{"seconds": 1}\n```',  # in a code fence
+        '"{\\"seconds\\": 1}"',  # encoded twice
+        '{"seconds": 1}{"seconds": 2}',  # two objects run together
+    ],
+)
+async def test_known_argument_slips_are_repaired(tmp_path, arguments):
+    events, history = await run(tmp_path, ScriptedLLM([[("Read", arguments)], "done"]), [Echo()])
+    assert [e.output for e in events if isinstance(e, ToolResult)] == ["read 1.0"]
+    assert history.messages[2].tool_calls[0].arguments == '{"seconds": 1}'  # valid JSON kept
+
+
+async def test_a_tool_name_in_the_wrong_case_still_runs(tmp_path):
+    events, history = await run(tmp_path, ScriptedLLM([[("read", '{"seconds": 1}')], "done"]), [Echo()])
+    assert [e.output for e in events if isinstance(e, ToolResult)] == ["read 1.0"]
+    assert history.messages[2].tool_calls[0].name == "Read"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Qwen3-Coder, seen in tinyharness's logs as a teammate's "final answer"
+        "Let me read it.\n<tool_call>\n<function=Read>\n<parameter=seconds>\n2\n</parameter>\n</function>\n</tool_call>",
+        # Hermes / Qwen2.5
+        'Let me read it.\n<tool_call>\n{"name": "Read", "arguments": {"seconds": 2}}\n</tool_call>',
+    ],
+)
+async def test_a_tool_call_written_as_text_is_run(tmp_path, text):
+    events, history = await run(tmp_path, ScriptedLLM([text, "done"]), [Echo()])
+    assert [e.output for e in events if isinstance(e, ToolResult)] == ["read 2.0"]
+    assert history.messages[2].content == "Let me read it."
+    assert events[-1] == Done()
+
+
+async def test_tool_calls_in_prose_or_examples_are_not_run(tmp_path):
+    texts = [
+        'Use this format:\n```\n<tool_call>{"name": "Read", "arguments": {}}</tool_call>\n```',
+        '<tool_call>{"name": "Delete", "arguments": {}}</tool_call>',  # no such tool
+    ]
+    for text in texts:
+        events, _ = await run(tmp_path, ScriptedLLM([text]), [Echo()])
+        assert not [e for e in events if isinstance(e, ToolResult)]
+
+
+async def test_a_number_or_object_for_a_text_field_is_taken_as_text(tmp_path):
+    """Seen live: `"content": 233` (Qwen3-Coder) and a JSON object as content (Qwen3.5)."""
+    from tinyharness.tools.write import WriteTool
+
+    calls = [
+        ("Write", '{"path": "n.txt", "content": 233}'),
+        ("Write", '{"path": "d.json", "content": {"a": 1}}'),
+    ]
+    await run(tmp_path, ScriptedLLM([calls, "done"]), [WriteTool()])
+    assert (tmp_path / "n.txt").read_text() == "233"
+    assert json.loads((tmp_path / "d.json").read_text()) == {"a": 1}

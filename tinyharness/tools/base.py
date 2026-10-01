@@ -15,12 +15,13 @@ Flags tell the harness how to treat it:
 from __future__ import annotations
 
 import hashlib
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
-from pydantic import BaseModel, ConfigDict, PrivateAttr
+from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 
 from tinyharness.agent.history import Image
 from tinyharness.llm.types import ToolSpec
@@ -51,9 +52,23 @@ class ToolError(Exception):
 
 
 class ToolInput(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    # Lenient where intent is clear: a number given for a text field is that text (models
+    # send `"content": 233`), and so is an object or list (JSON content for a .json file).
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
     # Set by `Tool.pin_path`: the resolved path the permission gate approved.
     _approved_path: Path | None = PrivateAttr(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _structured_text(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        fixed = dict(data)
+        for name, info in cls.model_fields.items():
+            key = name if name in fixed else info.alias
+            if key in fixed and info.annotation in (str, str | None) and isinstance(fixed[key], dict | list):
+                fixed[key] = json.dumps(fixed[key], indent=2, ensure_ascii=False)
+        return fixed
 
 
 InputT = TypeVar("InputT", bound=ToolInput)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import re
 from collections.abc import AsyncGenerator, Callable, Sequence
@@ -47,6 +48,7 @@ from tinyharness.events import (
 )
 from tinyharness.images import fit_image
 from tinyharness.llm.client import ContextOverflowError, ImageTooLargeError, ToolCallAccumulator
+from tinyharness.llm.textcalls import recover_calls, repair_arguments
 from tinyharness.llm.types import LLMError, RepeatedFailureError, RunawayOutputError, StreamChunk
 from tinyharness.llm.usage import Usage
 from tinyharness.security import mask_secrets
@@ -228,6 +230,12 @@ async def run_agent_loop(
                 yield event
 
         text, calls = "".join(turn.text), turn.calls.calls()
+        if not calls and text:
+            # A call written as text (the server's tool-call parser failed on it) would
+            # otherwise be taken for the final answer.
+            text, calls = recover_calls(text, functools.partial(_schema, available))
+            if calls:
+                deps.transcript.write("recovered_calls", tools=[c.name for c in calls])
         if not calls and not text.strip():
             # Nothing to show or do. That isn't "finished": ask the model to carry on, and
             # stop the turn if it happens again straight away.
@@ -436,6 +444,35 @@ def _error_kind(output: str) -> str:
     return re.sub(r"\d+", "N", first)[:80]
 
 
+def _find_tool(available: dict[str, Tool[Any]], name: str) -> Tool[Any] | None:
+    """The tool a call names; models sometimes get the case wrong ("read")."""
+    if name in available:
+        return available[name]
+    return next((t for n, t in available.items() if n.lower() == name.lower()), None)
+
+
+def _schema(available: dict[str, Tool[Any]], name: str) -> dict[str, Any] | None:
+    tool = _find_tool(available, name)
+    return tool.input_schema() if tool is not None else None
+
+
+def _arguments(call: ToolCall, *, repair: bool) -> dict[str, Any] | json.JSONDecodeError:
+    """A call's arguments as an object. Known slips (a code fence, JSON encoded twice, two
+    objects run together) are repaired, and the repaired JSON replaces the original in the
+    history: some APIs reject a past call whose arguments aren't valid JSON."""
+    try:
+        raw = json.loads(call.arguments or "{}")
+        if isinstance(raw, dict):
+            return raw
+        error = json.JSONDecodeError("not a JSON object", call.arguments, 0)
+    except json.JSONDecodeError as e:
+        error = e
+    if repair and (fixed := repair_arguments(call.arguments)) is not None:
+        call.arguments = fixed
+        return dict(json.loads(fixed))
+    return error
+
+
 def _explain_invalid(tool: Tool[Any], error: json.JSONDecodeError | ValidationError) -> str:
     """What's wrong with a call's arguments, briefly: for the model to fix on its retry,
     and for the user's screen (pydantic's own message has types, inputs and a docs link)."""
@@ -574,24 +611,29 @@ async def _prepare_call(
         history.add_tool_result(call.id, message)
         return ToolResult(call.name, message, is_error=True, id=call.id)
 
-    tool = available.get(call.name)
+    tool = _find_tool(available, call.name)
     if tool is None:
-        yield reject(f"error: unknown or unavailable tool {call.name!r}")
+        yield reject(
+            f"error: unknown or unavailable tool {call.name!r}. Available: {', '.join(sorted(available))}"
+        )
         return
+    call.name = tool.name  # "read" -> "Read", so the history names the tool that ran
 
-    try:
-        raw = json.loads(call.arguments or "{}")
-    except json.JSONDecodeError as e:
+    raw = _arguments(call, repair=not cut_off)
+    if isinstance(raw, json.JSONDecodeError):
         yield reject(
             CUT_OFF_CALL
             if cut_off
-            else f"error: invalid arguments for {tool.name}: {_explain_invalid(tool, e)}"
+            else f"error: invalid arguments for {tool.name}: {_explain_invalid(tool, raw)}"
         )
         return
     try:
         args = tool.parse(raw)
     except ValidationError as e:
-        yield reject(f"error: invalid arguments for {tool.name}: {_explain_invalid(tool, e)}")
+        yield reject(
+            f"error: invalid arguments for {tool.name}: {_explain_invalid(tool, e)}. "
+            f"Received: {call.arguments[:300]}"
+        )
         return
 
     summary = tool.describe(args)
