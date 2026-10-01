@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/anujdutt9/tinyharness/main/docs/assets/banner.png" alt="tinyharness: an agent harness you can read in an afternoon. Pip, the tinyharness pony, wears a yellow work harness with a notebook pouch." width="880">
+  <img src="docs/assets/banner.png" alt="tinyharness: an agent harness you can read in an afternoon. Pip, the tinyharness pony, wears a yellow work harness with a notebook pouch." width="880">
 </p>
 
 <p align="center">
@@ -16,8 +16,8 @@ a Python SDK for building your own. The agent core is about 8k lines of code wit
 framework underneath, so you can read the whole thing in an afternoon.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/anujdutt9/tinyharness/main/docs/assets/session-dark.svg">
-  <img src="https://raw.githubusercontent.com/anujdutt9/tinyharness/main/docs/assets/session-light.svg" alt="A tinyharness session: Pip greets you beside the model, project and sandbox; the agent runs the failing tests, reads invoice.py, fixes the discount bug with a one-line edit, and the tests pass.">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/session-dark.svg">
+  <img src="docs/assets/session-light.svg" alt="A tinyharness session: Pip greets you beside the model, project and sandbox; the agent runs the failing tests, reads invoice.py, fixes the discount bug with a one-line edit, and the tests pass.">
 </picture>
 
 ## Why tinyharness
