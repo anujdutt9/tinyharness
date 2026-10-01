@@ -173,6 +173,50 @@ First release.
 - A call allowed without asking says by what, on its own line under it:
   `⎿ auto mode · read-only query in the project`, `⎿ allow rule`, `⎿ hook`.
 
+### Reliability
+From an audit of 157 real sessions across 9 models, the code, and how opencode, pi,
+Codex and deepseek-harness handle the same things. Each item has a regression test.
+- Every reply has one of a shared set of outcomes (`stop`, `tool_calls`, `length`,
+  `filtered`, `refused`, `paused`), normalized from each API's own words. A reply cut off
+  at the output limit is continued instead of taken as the answer; a tool call cut off
+  mid-arguments isn't run, and the model is told to write in smaller pieces.
+- The history sent to a provider is always well formed: every tool call answered right
+  after it, empty assistant messages dropped, and tool-call ids another provider wouldn't
+  accept replaced (deterministically, so the prompt cache still matches). Ctrl+C keeps the
+  results of the calls that did finish.
+- Context use starts from the provider's own token count, and the estimate counts
+  tool-call arguments and images (a Write's content used to count as nothing). A summary
+  can cut inside one long task, repeats the request word for word, and sees the tool
+  calls, files changed, todo list and any earlier summary in full. Old tool calls' long
+  arguments are trimmed like old results.
+- Tool calls written as text (Hermes JSON, Qwen3-Coder XML) are recovered when they name
+  a real tool; malformed arguments are repaired (a code fence, double encoding, two
+  objects run together); a number or object for a text field is taken as text; a wrong
+  case in a tool name still finds the tool; invalid arguments are echoed back.
+- Streams: busy errors and connection resets before any output are retried;
+  `retry-after-ms` is honoured; multi-line SSE events are joined; a body that isn't an
+  event stream is reported; parallel calls from servers without `index` stay separate.
+- Grep anchors work in every mode; Glob skips dependency folders; Edit keeps CRLF files
+  CRLF, refuses an empty `old_string`, drops Read's line numbers from `old_string`, and its
+  whitespace-tolerant match no longer adds blank lines; Bash runs non-interactively, its
+  timeout covers the whole command, and omitted output is saved to a file it names; Read
+  pages by size and always says how to continue.
+- The system prompt states the OS (BSD tools on macOS), shell, Python command and git
+  branch. Subagents get these and the project's AGENTS.md.
+- Finishing: once a turn, an agent that changed code and ran nothing since is asked to
+  check it. A Stop hook can hold the turn open (`command = "uv run pytest -q -x"`), and a
+  PostToolUse hook's reason reaches the model.
+- Teams: a teammate's answer is its last reply as kept; one that only answered a
+  teammate's message is asked for its report; TeamBoard waits for news instead of being
+  polled; a failed subagent hands back its last calls and words; the lead is told to check
+  a key claim before building on it.
+- The session log records how each turn ended (done, interrupted, or the error), the
+  provider's stop reason, and OpenRouter's upstream route.
+- Earlier copies of a file are no longer rewritten as stale on every edit (that broke
+  prompt-cache reuse); the edit's snippet and Edit's stale-file check cover it. Resume
+  still marks changed files stale, and now remembers file versions so a file changed
+  after resuming must be read again.
+
 ### Resume
 - Conversations are saved losslessly as they go (full tool results, reasoning state,
   compactions, todos, model) and resumed with `-c` (latest) or `-r` (picker), or
