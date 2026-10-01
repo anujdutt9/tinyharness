@@ -48,7 +48,7 @@ def sleep_tool(name: str, read_only: bool) -> Tool:
     return SleepTool()
 
 
-async def run(tmp_path, llm, tools, mode=PermissionMode.BYPASS, callback=None, max_steps=50):
+async def run(tmp_path, llm, tools, mode=PermissionMode.BYPASS, callback=None, max_steps=50, inbox=None):
     history = History([Message(role="system", content="test")])
     with Transcript(tmp_path, "test") as transcript:
         deps = LoopDeps(
@@ -59,6 +59,7 @@ async def run(tmp_path, llm, tools, mode=PermissionMode.BYPASS, callback=None, m
             transcript=transcript,
             ctx=make_ctx(tmp_path),
             max_steps=max_steps,
+            inbox=inbox,
         )
         events = [e async for e in run_agent_loop("go", history, deps)]
     return events, history
@@ -935,3 +936,11 @@ async def test_calls_that_stay_unreadable_end_the_turn_with_an_error(tmp_path):
     llm = ScriptedLLM([garbled, garbled, garbled, "never reached"])
     with pytest.raises(RunawayOutputError, match="tool calls as text that couldn't be run"):
         await run(tmp_path, llm, [Echo()])
+
+
+async def test_a_reply_that_mentions_a_teammate_message_is_kept(tmp_path):
+    """A guard against forged teammate messages discarded any reply containing
+    `<teammate-message`, in the main session too: asking about team.py lost the answer."""
+    answer = "The board wraps each message in `<teammate-message from=...>` tags."
+    events, history = await run(tmp_path, ScriptedLLM([answer]), [], inbox=lambda: [])
+    assert events == [AssistantText(answer), Done()] and history.messages[-1].content == answer

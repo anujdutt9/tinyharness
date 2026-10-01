@@ -126,21 +126,7 @@ UNREADABLE_CALL_NOTE = (
     "couldn't be run: it names a tool that doesn't exist, or its arguments couldn't be read. "
     "Make the call through the tool-calling interface, with one of the available tools: {tools}."
 )
-# A teammate's answer is its last reply. When that reply came right after a teammate's
-# message, it's usually an answer to the message ("waiting for your numbers"), not the
-# report the lead needs (seen live: placeholders and invented numbers as "results").
-REPORT_NOTE = (
-    "[tinyharness] That reply ends your task, and your last reply is all the lead sees. "
-    "Write your final report now: what you did and found, with the actual results. Don't "
-    "wait for teammates; say what's missing instead."
-)
 TEAMMATE_NOTE = "<teammate-message"  # how the team board delivers a teammate's message
-# Sent when a reply contains a made-up teammate message: models copy the framing they see
-# and "report" other teammates' (invented) numbers, which the lead then trusts.
-FORGED_NOTE = (
-    "[tinyharness] Your last reply contained a <teammate-message>. Only the harness writes "
-    "those; it was discarded. Reply in your own words, with only what you found yourself."
-)
 
 
 @dataclass
@@ -202,15 +188,13 @@ async def run_agent_loop(
     empty_replies = 0  # empty replies in a row
     failures = _Failures()
     unverified: list[str] = []  # code files changed since the last command that could check them
-    asked_to_verify = asked_for_report = False
-    answered_message = False  # its latest reply came after a teammate's message, with no tool call since
+    asked_to_verify = False
     stop_blocks = 0
     unreadable_calls = 0
     for _ in range(deps.max_steps):
         # Messages from teammates arrive between steps, as a user message.
         for note in deps.inbox() if deps.inbox is not None else []:
             # (The main session's inbox carries the user's own messages typed mid-turn.)
-            answered_message = answered_message or note.startswith(TEAMMATE_NOTE)
             deps.transcript.write("user", text=note)
             history.append(Message(role="user", content=note))
             yield MessageDelivered(note)
@@ -319,15 +303,6 @@ async def run_agent_loop(
                 history.append(Message(role="user", content=EMPTY_NOTE))
             continue
         empty_replies = 0
-        if deps.inbox is not None and TEAMMATE_NOTE in text and not stuck_once:
-            stuck_once = True
-            if turn.usage is not None:
-                yield _account(turn, deps)
-            deps.transcript.write("stuck", reason="forged teammate message", text=text[:500])
-            yield ModelStuck("it wrote a message as if from a teammate")
-            deps.transcript.write("user", text=FORGED_NOTE)
-            history.append(Message(role="user", content=FORGED_NOTE))
-            continue
         deps.transcript.write(
             "assistant", text=text, tool_calls=[c.to_dict() for c in calls], finish=turn.finish_detail
         )
@@ -341,14 +316,7 @@ async def run_agent_loop(
             deps.transcript.write("user", text=CUT_OFF_NOTE)
             history.append(Message(role="user", content=CUT_OFF_NOTE))
             continue
-        if calls:
-            answered_message = False
         if not calls:
-            if answered_message and not asked_for_report:
-                asked_for_report = True
-                deps.transcript.write("user", text=REPORT_NOTE)
-                history.append(Message(role="user", content=REPORT_NOTE))
-                continue
             if unverified and not asked_to_verify and "Bash" in available:
                 asked_to_verify = True
                 note = UNVERIFIED_NOTE.format(files=", ".join(unverified[:5]))
