@@ -17,11 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import re
 import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
@@ -264,7 +262,6 @@ class TeamTool(Tool[TeamInput]):
 
     async def run(self, args: TeamInput, ctx: ToolContext) -> str:
         board = self._board(args)
-        _check_paths(args, ctx.workspace.root)
         board.request = ctx.request
         board.context = args.context.strip()
         await run_team(board, self.agents, self.spawner, ctx)
@@ -286,59 +283,7 @@ class TeamTool(Tool[TeamInput]):
             if state.id in state.depends_on:
                 raise ToolError(f"task {state.id} depends on itself")
         _check_no_cycles(tasks)
-        _check_some_run_together(tasks)
         return Board(args.goal, tasks)
-
-
-# Absolute or home-relative paths in a task prompt, e.g. /data/app.db or ~/notes/q3.md.
-_PATH = re.compile(r"(?<![\w.:/~-])(~?/[\w.\-]+(?:/[\w.\-]+)*)")
-
-
-def _check_paths(args: TeamInput, root: Path) -> None:
-    """Refuse a team whose prompts name paths that can't be right: neither the path nor
-    its folder exists. Teammates see only their prompt, so a wrong path sends one
-    hunting, or onto a file of the same name elsewhere. A new file in an existing
-    folder is fine."""
-    bad: list[str] = []
-    for t in args.tasks:
-        for raw in (found.rstrip(".") for found in _PATH.findall(t.prompt)):
-            path = Path(raw).expanduser()
-            if not path.is_absolute():
-                path = root / path
-            # Only filesystem paths: an API route (/v1/chat) doesn't start at a real folder.
-            top = Path(path.anchor, *path.parts[1:2])
-            if not top.exists() or path.exists() or path.parent.is_dir() or raw in bad:
-                continue
-            bad.append(raw)
-    if bad:
-        raise ToolError(
-            f"these paths in the task prompts don't exist: {', '.join(bad)}. "
-            "Check them (Glob or Bash `ls`) and call Team again with the right ones."
-        )
-
-
-def _check_some_run_together(tasks: dict[str, TaskState]) -> None:
-    """Refuse a plan in which no two tasks can ever run at once (a -> b -> c): it gets
-    nothing from a team but costs a fresh agent per step. Tasks the same number of
-    dependency steps from the start can't depend on each other, so two of them can run
-    together; if every step has one task, the plan is a chain."""
-    depth: dict[str, int] = {}
-
-    def depth_of(task_id: str) -> int:
-        if task_id not in depth:
-            deps = tasks[task_id].depends_on
-            depth[task_id] = 1 + max((depth_of(d) for d in deps), default=-1)
-        return depth[task_id]
-
-    per_step: dict[int, int] = {}
-    for task_id in tasks:
-        per_step[depth_of(task_id)] = per_step.get(depth_of(task_id), 0) + 1
-    if max(per_step.values()) < 2:
-        raise ToolError(
-            "every task here waits for the one before it, so nothing would run in parallel. "
-            "Do these steps yourself, or hand a large one to the Agent tool; use Team when at "
-            "least two substantial tasks can run at the same time."
-        )
 
 
 def _check_no_cycles(tasks: dict[str, TaskState]) -> None:

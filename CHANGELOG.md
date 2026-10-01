@@ -373,9 +373,9 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   it's skipped only when none of them finished (one stuck analyst used to sink the
   team's summary). A failure is written to the teammate's log, and a stopped reply's last
   characters are kept, to tell a real loop from a false alarm.
-- `Team` refuses task prompts naming paths that can't exist (neither the path nor its
-  folder does), with a message telling the lead to check them; API routes and URLs
-  aren't mistaken for paths.
+- `Team` runs any plan that's well formed (known agents, no cycles). It used to refuse
+  a plan where no two tasks run at once, and one naming a path whose folder a task was
+  still to make.
 - Subagents default to 40 steps (was 25); `max_steps` in an agent's frontmatter or
   `AgentSpec` changes it.
 - Read-only shell commands (`ls`, `cat`, `grep`, `git log`, `sqlite3 -readonly`, ...,

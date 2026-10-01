@@ -207,10 +207,6 @@ def plan(*tasks):
         ((("a", "reader", ["zzz"]), ("b", "reader", [])), "unknown task"),
         ((("a", "reader", ["b"]), ("b", "reader", ["a"])), "cycle"),
         ((("a", "nobody", []), ("b", "reader", [])), "unknown agent"),
-        (
-            (("a", "reader", []), ("b", "reader", ["a"]), ("c", "reader", ["b"])),
-            "nothing would run in parallel",
-        ),
     ],
 )
 def test_a_bad_team_plan_is_explained(tasks, error):
@@ -682,22 +678,17 @@ async def test_teammates_know_the_request_and_not_to_invent_data(tmp_path):
     assert "starting with 'a'" in prompts["a"] and "never make up data" in prompts["a"]
 
 
-async def test_a_team_naming_a_path_that_cannot_exist_is_refused(tmp_path):
-    (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "app.db").write_text("x")
+async def test_a_chain_plan_and_a_folder_still_to_be_made_are_accepted(tmp_path):
+    """Team used to refuse a plan where no two tasks run at once ("do it yourself") and
+    one naming a path whose folder didn't exist yet (an out/ folder the first task makes)."""
     tool = team_tool()
-
-    def args(prompt):
-        return tool.parse({"goal": "g", "tasks": [
-            {"id": "a", "title": "a", "prompt": prompt, "agent": "reader"},
-            {"id": "b", "title": "b", "prompt": "see /v1/chat/completions and https://x.io/a/b", "agent": "reader"},
-        ]})  # fmt: skip
-
-    good = f"query {tmp_path}/data/app.db and write {tmp_path}/data/out.md"
-    with pytest.raises(ToolError, match="don't exist"):
-        await tool.run(args(f"query {tmp_path}/dta/app.db"), make_ctx(tmp_path))
     tool.spawner = _ok_spawner
-    assert (await tool.run(args(good), make_ctx(tmp_path))).startswith("Team finished (2 done)")
+    chain = tool.parse({"goal": "g", "tasks": [
+        {"id": "a", "title": "a", "prompt": f"write {tmp_path}/out/data.csv", "agent": "reader"},
+        {"id": "b", "title": "b", "prompt": f"chart {tmp_path}/out/data.csv", "agent": "reader",
+         "depends_on": ["a"]},
+    ]})  # fmt: skip
+    assert (await tool.run(chain, make_ctx(tmp_path))).startswith("Team finished (2 done)")
 
 
 async def _ok_spawner(spec, prompt, ctx, /, *, label, extra_tools, inbox):
