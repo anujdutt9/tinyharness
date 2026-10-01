@@ -117,15 +117,12 @@ def _locate(text: str, old: str, new: str) -> tuple[list[tuple[int, int]] | None
     loose match or None for an exact one, how many matches, a note, old, new)."""
     if count := text.count(old):
         return None, count, "", old, new
-    lines = [line for line in old.split("\n") if line]
-    if lines and all(_LINE_NUMBER.match(line) for line in lines):
-        bare = _LINE_NUMBER.sub("", old)
+    if (found := _without_line_numbers(text, old)) is not None:
+        bare, at = found
         new_lines = [line for line in new.split("\n") if line]
         if new_lines and all(_LINE_NUMBER.match(line) for line in new_lines):
             new = _LINE_NUMBER.sub("", new)
-        if count := text.count(bare):
-            return None, count, "; Read's line numbers were left out of old_string", bare, new
-        old = bare
+        return [(at, at + len(bare))], 1, "; Read's line numbers were left out of old_string", bare, new
     if spans := loose_spans(text, old):
         # Models often get invisible whitespace wrong (a blank line written as spaces, a
         # trailing space dropped): same lines otherwise, so edit those lines. A span
@@ -138,6 +135,26 @@ def _locate(text: str, old: str, new: str) -> tuple[list[tuple[int, int]] | None
             new = new[: len(new) - min(trail, len(new) - len(new.rstrip("\n")))]
         return spans, len(spans), "; matched ignoring trailing whitespace", old, new
     raise ToolError(f"old_string not found. {explain_mismatch(text, old)}")
+
+
+def _without_line_numbers(text: str, old: str) -> tuple[str, int] | None:
+    """`old` without Read's line-number prefixes, and where it is in `text`: only if every
+    line has one and they are the real numbers of the lines it matches (so a TSV row
+    starting "3\t" isn't mistaken for line 3). None otherwise."""
+    body = old.rstrip("\n")
+    numbers = [_LINE_NUMBER.match(line) for line in body.split("\n")]
+    if not body or not all(numbers):
+        return None
+    lines = [int(m.group().strip()) for m in numbers if m]
+    if lines != list(range(lines[0], lines[0] + len(lines))):
+        return None
+    bare = _LINE_NUMBER.sub("", body) + old[len(body) :]
+    start = 0
+    while (at := text.find(bare, start)) >= 0:
+        if text.count("\n", 0, at) + 1 == lines[0] and (at == 0 or text[at - 1] == "\n"):
+            return bare, at
+        start = at + 1
+    return None
 
 
 SNIPPET_CONTEXT = 3  # unchanged lines shown before and after an edit

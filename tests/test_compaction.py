@@ -309,3 +309,26 @@ async def test_the_summary_sees_tool_calls_files_todos_and_the_earlier_summary()
     assert prompt.count("earlier fact") == 2000  # whole, not cut to 4,000 characters
     assert '[assistant called] Edit({"path": "page.html"' in prompt
     assert "[result of Edit] edited" in prompt and "/w/page.html" in prompt and "Run tests" in prompt
+
+
+async def test_a_second_summary_still_keeps_the_request():
+    h = one_long_task(40)
+    c = Compactor(ScriptedLLM([]), context_window=100_000, keep_tail_messages=12)
+    assert await c.summarize(h)
+    for i in range(40, 60):
+        h.messages += [assistant("", f"c{i}"), tool(f"c{i}", BIG)]
+    assert await c.summarize(h)
+    request = next(m for m in h.messages if m.role == "user")
+    assert request.content.endswith("build the report from data.db")
+
+
+def test_microcompact_leaves_arguments_it_cannot_shorten():
+    import json
+
+    c = Compactor(ScriptedLLM([]), keep_tail_messages=2, protect_tool_tokens=0, cache_ttl=0, clock=Clock())
+    write = assistant("", "w", name="Write")
+    write.tool_calls[0].arguments = json.dumps(
+        {"path": "d.json", "content": {f"k{i}": "short value" for i in range(5000)}}
+    )
+    h = history(user("go"), write, tool("w", "ok"), user("p1"), user("p2"))
+    assert c.microcompact(h) == 0 and c.microcompact(h) == 0

@@ -945,3 +945,57 @@ def test_a_name_repeated_in_every_delta_is_not_doubled():
     acc.add({"index": 0, "id": "a", "function": {"name": "Read", "arguments": '{"pa'}})
     acc.add({"index": 0, "function": {"name": "Read", "arguments": 'th": "x"}'}})
     assert [(c.name, c.arguments) for c in acc.calls()] == [("Read", '{"path": "x"}')]
+
+
+# ---- found by review of the audit fixes ----
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (
+            400,
+            '{"error": {"message": "maximum context length is 32768 tokens. However, you requested 33268 tokens (32768 in the messages, 500 in the completion)"}}',
+        ),
+        (401, '{"error": {"message": "invalid api key; upstream unavailable"}}'),
+        (404, '{"error": {"message": "model not found upstream"}}'),
+    ],
+)
+async def test_a_request_error_is_never_retried(status, body):
+    server = Server(body, body, body, body, status=status)
+    with pytest.raises(LLMError):
+        await run(client("openrouter", server), CONVERSATION)
+    assert len(server.requests) == 1
+
+
+async def test_events_stream_as_they_arrive_even_without_blank_lines():
+    from tinyharness.llm.client import _sse_data
+
+    seen = []
+
+    async def lines():
+        for i in range(3):
+            seen.append(f"sent {i}")
+            yield f'data: {{"n": {i}}}'
+
+    async for data in _sse_data(lines(), []):
+        seen.append(f"got {data}")
+    assert seen == ["sent 0", 'got {"n": 0}', "sent 1", 'got {"n": 1}', "sent 2", 'got {"n": 2}']
+
+
+def test_ids_inside_echoed_reasoning_are_left_alone():
+    import re
+
+    from tinyharness.agent.history import Message, ReasoningState, ToolCall, well_formed
+
+    call = Message(
+        role="assistant",
+        tool_calls=[ToolCall("fc:abc.1", "Read", "{}")],
+        state=ReasoningState("gemini:g", [{"id": "fc:abc.1"}]),
+    )
+    result = Message(role="tool", tool_call_id="fc:abc.1", content="ok")
+    pattern = re.compile(r"[A-Za-z0-9_-]{1,64}")
+    same, _ = well_formed([call, result], valid_id=pattern, owner="gemini:g")
+    assert same[0].tool_calls[0].id == same[1].tool_call_id == "fc:abc.1"  # matches the echoed state
+    other, _ = well_formed([call, result], valid_id=pattern, owner="anthropic:c")
+    assert pattern.fullmatch(other[0].tool_calls[0].id) and other[1].tool_call_id == other[0].tool_calls[0].id

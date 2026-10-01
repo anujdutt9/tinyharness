@@ -834,3 +834,57 @@ async def test_a_failing_shell_hook_reports_its_output(tmp_path):
 
     result = await HookRunner(cwd=tmp_path)._run_shell("sh -c 'echo FAILED test_x; exit 1'", "Stop", {}, 5)
     assert result["decision"] == "deny" and "FAILED test_x" in result["reason"]
+
+
+async def test_the_users_own_mid_turn_message_doesnt_ask_for_a_report(tmp_path):
+    """The main session's inbox carries the user's messages typed mid-turn."""
+    llm = ScriptedLLM(["Sure, done."])
+    history = History([Message(role="system", content="test")])
+    pending = [["also check the README"]]
+    with Transcript(tmp_path, "test") as transcript:
+        deps = LoopDeps(
+            llm=llm,
+            tools=ToolRegistry([]),
+            compactor=Compactor(llm),
+            transcript=transcript,
+            gate=PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS),
+            ctx=make_ctx(tmp_path),
+            inbox=lambda: pending.pop() if pending else [],
+        )
+        [e async for e in run_agent_loop("go", history, deps)]
+    assert len(llm.requests) == 1
+
+
+async def test_a_recovered_call_drops_saved_reasoning(tmp_path):
+    from tinyharness.agent.history import ReasoningState
+
+    reply = [
+        StreamChunk(text='<tool_call>{"name": "Read", "arguments": {"seconds": 1}}</tool_call>'),
+        StreamChunk(finish_reason="stop"),
+        StreamChunk(state=ReasoningState("p:m", [{"type": "reasoning"}])),
+    ]
+    _, history = await run(tmp_path, ScriptedLLM([reply, "done"]), [Echo()])
+    assert history.messages[2].tool_calls and history.messages[2].state is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Run `<function=Read><parameter=seconds>1</parameter></function>` to clean.",
+        'The format is:\n<tool_call>{"name": "Read", "arguments": {}}</tool_call>\nand then you get the result.',
+        "~~~\n<function=Read><parameter=seconds>1</parameter></function>\n~~~",
+        'Look:\n<tool_call>{"name": "Read", "arguments": {}}</tool_call>\n```\n<function=Read>\n```',
+    ],
+)
+async def test_described_tool_calls_are_not_run(tmp_path, text):
+    events, _ = await run(tmp_path, ScriptedLLM([text]), [Echo()])
+    assert not [e for e in events if isinstance(e, ToolResult)]
+
+
+def test_text_call_parsing_stays_fast_on_hostile_input():
+    from tinyharness.llm.textcalls import recover_calls
+
+    start = time.monotonic()
+    recover_calls("<function=Read>\n" + "<parameter=x>" * 40_000, lambda name: {})
+    recover_calls("<tool_call>" * 40_000, lambda name: {})
+    assert time.monotonic() - start < 1

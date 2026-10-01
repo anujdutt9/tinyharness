@@ -383,3 +383,33 @@ async def test_bash_is_non_interactive_and_keeps_omitted_output(ctx, tmp_path):
     out = await call(bash, {"command": "seq 1 20000"}, ctx)
     path = out.split("all of it is in ", 1)[1].split(":", 1)[0]
     assert Path(path).read_text().splitlines()[9999] == "10000"  # the omitted middle is there
+
+
+async def test_a_tsv_row_starting_with_a_number_isnt_taken_for_a_line_number(ctx, tmp_path):
+    (tmp_path / "t.tsv").write_bytes(b"1\tapple\n2\tbanana\n")
+    await call(ReadTool(), {"path": "t.tsv"}, ctx)
+    with pytest.raises(ToolError, match="not found"):
+        await call(EditTool(), {"path": "t.tsv", "old_string": "3\tbanana", "new_string": "3\tcherry"}, ctx)
+    assert (tmp_path / "t.tsv").read_bytes() == b"1\tapple\n2\tbanana\n"
+
+
+async def test_line_numbers_point_at_the_line_they_name(ctx, tmp_path):
+    (tmp_path / "d.py").write_text("x = 1\nx = 1\n")
+    await call(ReadTool(), {"path": "d.py"}, ctx)
+    await call(EditTool(), {"path": "d.py", "old_string": "     2\tx = 1\n", "new_string": "x = 2\n"}, ctx)
+    assert (tmp_path / "d.py").read_text() == "x = 1\nx = 2\n"
+
+
+async def test_a_list_for_a_pattern_is_an_error_not_a_regex(tmp_path):
+    from pydantic import ValidationError
+
+    from tinyharness.tools.grep import GrepTool
+
+    with pytest.raises(ValidationError):
+        GrepTool().parse({"pattern": ["foo", "bar"]})
+
+
+async def test_read_caps_a_page_by_bytes(ctx, tmp_path):
+    (tmp_path / "u.txt").write_text(("é" * 100 + "\n") * 2000)
+    out = await call(ReadTool(), {"path": "u.txt"}, ctx)
+    assert len(out.encode()) <= 52_000

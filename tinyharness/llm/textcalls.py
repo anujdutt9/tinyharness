@@ -10,8 +10,10 @@ Two formats cover the open models in use:
     <tool_call>{"name": "Read", "arguments": {"path": "a.py"}}</tool_call>      Hermes, Qwen2.5
     <tool_call><function=Read><parameter=path>a.py</parameter></function></tool_call>  Qwen3-Coder
 
-`recover_calls` only takes calls to tools that exist, so prose about tool calls (or an
-example in a code block) isn't run.
+`recover_calls` is strict, since running a tool the model only described would be worse
+than missing a call: the calls must name tools that exist, start a line outside any code
+block or inline code, and be the last thing in the reply (a model that meant to call a
+tool stops there; one explaining the format keeps writing).
 
 `repair_arguments` fixes the small, unambiguous ways arguments come back malformed:
 wrapped in a code fence, JSON encoded twice, two objects run together, or empty.
@@ -27,9 +29,14 @@ from typing import Any
 
 from tinyharness.agent.history import ToolCall
 
-_TOOL_CALL = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
-_FUNCTION = re.compile(r"<function=([\w.-]+)>(.*?)(?:</function>|(?=<function=)|$)", re.DOTALL)
-_PARAMETER = re.compile(r"<parameter=([\w.-]+)>\n?(.*?)\n?</parameter>", re.DOTALL)
+# Each body stops at the next opening tag, so unclosed tags can't make a search quadratic.
+_TOOL_CALL = re.compile(r"<tool_call>((?:(?!</?tool_call>).)*)(?:</tool_call>|$)", re.DOTALL)
+_FUNCTION = re.compile(r"<function=([\w.-]+)>((?:(?!<function=|</function>).)*)(?:</function>)?", re.DOTALL)
+_PARAMETER = re.compile(
+    r"<parameter=([\w.-]+)>\n?((?:(?!<parameter=|</parameter>).)*?)\n?</parameter>", re.DOTALL
+)
+_START = re.compile(r"^[ \t]*(<tool_call>|<function=)", re.MULTILINE)
+MAX_CHARS = 200_000  # a reply longer than this isn't scanned
 _FENCE = re.compile(r"^```[\w-]*\s*\n?(.*?)\n?```$", re.DOTALL)
 
 
@@ -39,8 +46,17 @@ def recover_calls(text: str, schema_of: Callable[[str], dict[str, Any] | None]) 
     start = _first_tag(text)
     if start < 0:
         return text, []
+    tail = text[start:]
+    # Nothing but calls from here on, and none of it code: otherwise it's prose about calls.
+    if (
+        "```" in tail
+        or "~~~" in tail
+        or _FUNCTION.sub("", _TOOL_CALL.sub("", tail)).replace("</tool_call>", "").strip()
+    ):
+        return text, []
     calls: list[ToolCall] = []
-    for body in _TOOL_CALL.findall(text[start:]) or [text[start:]]:
+    for body in _TOOL_CALL.findall(tail) or [tail]:
+        body = body.strip()
         if body.lstrip().startswith("{"):
             call = _from_json(body, schema_of)
             if call is not None:
@@ -55,10 +71,13 @@ def recover_calls(text: str, schema_of: Callable[[str], dict[str, Any] | None]) 
 
 
 def _first_tag(text: str) -> int:
-    """Where the first call starts, ignoring any inside a code block (an example)."""
-    for match in re.finditer(r"<tool_call>|<function=", text):
-        if text.count("```", 0, match.start()) % 2 == 0:
-            return match.start()
+    """Where the first call starts: at the start of a line, outside any code block."""
+    if len(text) > MAX_CHARS:
+        return -1
+    for match in _START.finditer(text):
+        before = text[: match.start()]
+        if before.count("```") % 2 == 0 and before.count("~~~") % 2 == 0:
+            return match.start(1)
     return -1
 
 

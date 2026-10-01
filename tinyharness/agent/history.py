@@ -152,7 +152,11 @@ MISSING_RESULT = "(no result recorded: it may or may not have run; check its eff
 
 
 def well_formed(
-    messages: list[Message], *, placeholder: str = MISSING_RESULT, valid_id: re.Pattern[str] | None = None
+    messages: list[Message],
+    *,
+    placeholder: str = MISSING_RESULT,
+    valid_id: re.Pattern[str] | None = None,
+    owner: str = "",
 ) -> tuple[list[Message], int]:
     """`messages` in the shape every provider accepts, without changing `messages` itself:
 
@@ -162,7 +166,9 @@ def well_formed(
     - an assistant message with nothing in it (no text, no calls, no saved reasoning) is
       dropped: APIs reject empty turns;
     - with `valid_id`, tool-call ids the provider wouldn't accept (another provider's, after
-      /model) are replaced, deterministically, so the prompt cache still matches.
+      /model) are replaced, deterministically, so the prompt cache still matches. Not in
+      replies whose saved reasoning goes back to `owner` as is: that holds the original
+      ids, and the provider issued them itself.
 
     Returns the messages and how many placeholder results were added.
     """
@@ -192,8 +198,13 @@ def well_formed(
             pending = list(m.tool_calls)
     answer_pending()
     if valid_id is not None:
-        out = [_with_valid_ids(m, valid_id) for m in out]
+        echoed = {c.id for m in out if m.state is not None and m.state.owner == owner for c in m.tool_calls}
+        out = [m if _echoed(m, echoed) else _with_valid_ids(m, valid_id) for m in out]
     return out, added
+
+
+def _echoed(m: Message, ids: set[str]) -> bool:
+    return bool(ids) and (m.tool_call_id in ids or any(c.id in ids for c in m.tool_calls))
 
 
 def _with_valid_ids(m: Message, valid: re.Pattern[str]) -> Message:

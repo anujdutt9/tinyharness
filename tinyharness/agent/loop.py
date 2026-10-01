@@ -98,6 +98,7 @@ STEP_LIMIT_NOTE = (
     "Reply now with your final answer: what you found or did, with the actual results, and "
     "what is left unfinished."
 )
+STEP_LIMIT_RESULT = "(not run: the step limit was reached)"
 # A tool failing the same way again and again: the model is told to change approach after
 # NOTE_AT failures in a row, and the turn stops at STOP_AT (seen live: 11 failing edits).
 REPEAT_NOTE_AT = 2
@@ -196,11 +197,13 @@ async def run_agent_loop(
     failures = _Failures()
     unverified: list[str] = []  # code files changed since the last command that could check them
     asked_to_verify = asked_for_report = False
+    answered_message = False  # its latest reply came after a teammate's message, with no tool call since
     stop_blocks = 0
     for _ in range(deps.max_steps):
         # Messages from teammates arrive between steps, as a user message.
-        delivered = deps.inbox() if deps.inbox is not None else []
-        for note in delivered:
+        for note in deps.inbox() if deps.inbox is not None else []:
+            # (The main session's inbox carries the user's own messages typed mid-turn.)
+            answered_message = answered_message or note.startswith(TEAMMATE_NOTE)
             deps.transcript.write("user", text=note)
             history.append(Message(role="user", content=note))
             yield MessageDelivered(note)
@@ -259,6 +262,8 @@ async def run_agent_loop(
             text, calls = recover_calls(text, functools.partial(_schema, available))
             if calls:
                 deps.transcript.write("recovered_calls", tools=[c.name for c in calls])
+                # Saved reasoning would be sent back in place of these calls, without them.
+                turn.state = None
         if not calls and not text.strip():
             # Nothing to show or do. That isn't "finished": ask the model to carry on, and
             # stop the turn if it happens again straight away.
@@ -309,8 +314,10 @@ async def run_agent_loop(
             deps.transcript.write("user", text=CUT_OFF_NOTE)
             history.append(Message(role="user", content=CUT_OFF_NOTE))
             continue
+        if calls:
+            answered_message = False
         if not calls:
-            if delivered and not asked_for_report:
+            if answered_message and not asked_for_report:
                 asked_for_report = True
                 deps.transcript.write("user", text=REPORT_NOTE)
                 history.append(Message(role="user", content=REPORT_NOTE))
@@ -437,7 +444,7 @@ async def _wrap_up(history: History, deps: LoopDeps) -> AsyncGenerator[Event, No
     # reasoning can contain them, and every provider wants a result for every call).
     history.append(Message(role="assistant", content=text or None, tool_calls=calls, state=turn.state))
     for call in calls:
-        history.add_tool_result(call.id, "(not run: the step limit was reached)")
+        history.add_tool_result(call.id, STEP_LIMIT_RESULT)
 
 
 class _Failures:

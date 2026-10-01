@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import Field
 
@@ -19,6 +19,7 @@ from tinyharness.workspace.files import write_text
 
 
 class WriteInput(ToolInput):
+    content_fields: ClassVar[frozenset[str]] = frozenset({"content"})
     path: str = Field(description="Absolute path, or relative to the working directory")
     content: str = Field(description="Full file contents")
 

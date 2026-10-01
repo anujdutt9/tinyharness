@@ -77,9 +77,12 @@ RETRY_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
 _RETRYABLE_TRANSPORT = (httpx.NetworkError, httpx.ConnectTimeout, httpx.RemoteProtocolError)
 # How errors reported inside a stream word "busy, try again" (Anthropic's overloaded_error,
 # OpenRouter's upstream errors), as opposed to a problem with the request itself.
+# Only consulted for errors inside a stream; HTTP statuses are judged by RETRY_STATUSES.
+# A status code counts only next to a word that says it is one: overflow messages quote
+# token counts like "500 in the completion".
 _TRANSIENT = re.compile(
-    r"overloaded|rate.?limit|too many requests|\b(429|5\d\d)\b|temporar|unavailable|timed? ?out"
-    r"|internal (server )?error|upstream|try again",
+    r"overloaded|rate.?limit|too many requests|temporar|service unavailable|timed? ?out"
+    r"|internal (server )?error|try again|\b(error|status|code)\W{0,3}(429|5\d\d)\b",
     re.IGNORECASE,
 )
 MAX_RETRIES = 3
@@ -106,7 +109,11 @@ async def _sse_data(lines: AsyncIterator[str], other: list[str]) -> AsyncGenerat
     data: list[str] = []
     async for line in lines:
         if line.startswith("data:"):
-            data.append(line[5:].strip())
+            item = line[5:].strip()
+            if not data and _whole(item):
+                yield item  # complete on its own: don't hold it back until a blank line
+            else:
+                data.append(item)
         elif not line.strip():
             for item in _split_event(data):
                 yield item
@@ -115,6 +122,19 @@ async def _sse_data(lines: AsyncIterator[str], other: list[str]) -> AsyncGenerat
             other.append(line.strip())
     for item in _split_event(data):
         yield item
+
+
+def _whole(item: str) -> bool:
+    """A data line that is a whole event by itself: an object or list, or [DONE]."""
+    if item == "[DONE]":
+        return True
+    if not item.startswith(("{", "[")):
+        return False
+    try:
+        json.loads(item)
+    except json.JSONDecodeError:
+        return False
+    return True
 
 
 def _split_event(data: list[str]) -> list[str]:
@@ -279,7 +299,8 @@ class LLMClient:
         """Stream one reply. The last chunk carries `state` when the provider needs data back next turn."""
         await self._ensure_model_list()
         model = model or self.model
-        messages, _ = well_formed(messages, valid_id=re.compile(self.provider.tool_id_pattern))
+        owner = f"{self.provider.name}:{model}"
+        messages, _ = well_formed(messages, valid_id=re.compile(self.provider.tool_id_pattern), owner=owner)
         request = Request(
             model=model,
             system="\n\n".join(m.content or "" for m in messages if m.role == "system"),
@@ -287,7 +308,7 @@ class LLMClient:
             tools=list(tools or []),
             effort=self.effort,
             info=self.model_info(model),
-            owner=f"{self.provider.name}:{model}",
+            owner=owner,
             web_search=web_search,
             show_reasoning=self.show_reasoning,
         )
@@ -302,6 +323,7 @@ class LLMClient:
         started = False  # once a chunk has gone out, a failure can't be retried invisibly
         route = ""  # which upstream a router sent this to (OpenRouter names it in every chunk)
         other: list[str] = []  # lines that aren't server-sent events: an error page, say
+        busy: LLMError | None = None  # a transient error reported inside the stream, to retry
         for attempt in range(self.retries + 1):
             parser = self.adapter.parser()
             try:
@@ -334,7 +356,13 @@ class LLMClient:
                         if isinstance(event.get("provider"), str):
                             route = event["provider"]
                         usage = read_usage(event, usage)
-                        chunks = parser.feed(event)
+                        try:
+                            chunks = parser.feed(event)
+                        except LLMError as e:  # an error reported inside the stream
+                            if started or attempt >= self.retries or not _TRANSIENT.search(str(e)):
+                                raise _classify(e) from None
+                            busy = e
+                            break
                         for chunk in chunks:
                             if chunk.finish_reason is not None:
                                 chunk.finish_detail = chunk.finish_reason
@@ -342,14 +370,13 @@ class LLMClient:
                                 finished = True
                             started = True
                             yield chunk
-                break
-            except LLMError as e:  # reported inside the stream
-                if not started and attempt < self.retries and _TRANSIENT.search(str(e)):
+                if busy is not None:  # "overloaded" before any output: ask again
                     delay = retry_delay(None, attempt)
-                    log.warning("%s: %s; retrying in %.1fs", self.endpoint, e, delay)
+                    log.warning("%s: %s; retrying in %.1fs", self.endpoint, busy, delay)
+                    busy = None
                     await asyncio.sleep(delay)
                     continue
-                raise _classify(e) from None
+                break
             except httpx.TransportError as e:  # refused, reset, DNS, TLS, timeouts, dropped mid-reply
                 if not started and attempt < self.retries and isinstance(e, _RETRYABLE_TRANSPORT):
                     delay = retry_delay(None, attempt)

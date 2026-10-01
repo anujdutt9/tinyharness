@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from tinyharness.agent.compaction import Compactor
 from tinyharness.agent.history import History, Message
-from tinyharness.agent.loop import LoopDeps, run_agent_loop
+from tinyharness.agent.loop import STEP_LIMIT_RESULT, LoopDeps, run_agent_loop
 from tinyharness.agent.prompts import environment, load_agent_md
 from tinyharness.agent.transcript import Transcript
 from tinyharness.events import (
@@ -194,10 +194,13 @@ async def run_subagent(
             raise
         # The answer is its last reply as kept in the history: not every streamed piece since
         # the last tool call (a reply the harness asked it to redo would be glued on).
-        answer = next(
-            (m.content.strip() for m in reversed(history.messages) if m.role == "assistant" and m.content),
-            "",
+        # A reply that made tool calls is narration ("Let me read..."), not an answer, unless
+        # it's the step-limit wrap-up, whose calls weren't run.
+        last = next((m for m in reversed(history.messages) if m.role == "assistant"), None)
+        final_reply = last is not None and (
+            not last.tool_calls or history.messages[-1].content == STEP_LIMIT_RESULT
         )
+        answer = (last.content or "").strip() if last is not None and final_reply else ""
         transcript.write("session_end", final=answer[:2000])
         report("done", f"{used} tool call{'s' if used != 1 else ''}")
 

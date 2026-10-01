@@ -53,20 +53,22 @@ class ToolError(Exception):
 
 class ToolInput(BaseModel):
     # Lenient where intent is clear: a number given for a text field is that text (models
-    # send `"content": 233`), and so is an object or list (JSON content for a .json file).
+    # send `"content": 233`).
     model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
+    # Fields holding file content, where an object or list means its JSON text (a .json
+    # file's content). Only these: a list given for a Grep pattern is a mistake to report.
+    content_fields: ClassVar[frozenset[str]] = frozenset()
     # Set by `Tool.pin_path`: the resolved path the permission gate approved.
     _approved_path: Path | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
     def _structured_text(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
+        if not isinstance(data, dict) or not cls.content_fields:
             return data
         fixed = dict(data)
-        for name, info in cls.model_fields.items():
-            key = name if name in fixed else info.alias
-            if key in fixed and info.annotation in (str, str | None) and isinstance(fixed[key], dict | list):
+        for key in cls.content_fields:
+            if isinstance(fixed.get(key), dict | list):
                 fixed[key] = json.dumps(fixed[key], indent=2, ensure_ascii=False)
         return fixed
 

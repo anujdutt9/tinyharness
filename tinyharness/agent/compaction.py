@@ -168,7 +168,13 @@ class Compactor:
                     continue
                 tokens = count_tokens(content)
             elif m.role == "assistant" and m.tool_calls:
-                calls = [c for c in m.tool_calls if c.name not in KEEP_TOOLS and STUB_MARK not in c.arguments]
+                # Only calls trimming would shorten: big arguments made of short strings can't
+                # be, and counting them would rewrite the message on every pass.
+                calls = [
+                    c
+                    for c in m.tool_calls
+                    if c.name not in KEEP_TOOLS and _trim_arguments(c.arguments) != c.arguments
+                ]
                 tokens = sum(count_tokens(c.arguments) for c in calls)
             else:
                 continue
@@ -222,7 +228,7 @@ class Compactor:
         summary = await self.llm.one_shot(self._transcript(head, notes), system=load_prompt("compaction"))
         kept = [*system, Message(role="system", content=f"{SUMMARY_MARK}\n{summary}")]
         if tail[0].role != "user":
-            request = next((m.content for m in reversed(head) if _is_request(m)), "")
+            request = next((r for m in reversed(head) if (r := _request(m))), "")
             kept.append(Message(role="user", content=f"{CONTINUING}\n{request}"))
         history.messages = [*kept, *tail]
         self._baseline = None
@@ -280,13 +286,13 @@ class Compactor:
         return transcript[-budget:]
 
 
-def _is_request(m: Message) -> bool:
-    """A message the user wrote (not a harness note or a teammate's message)."""
-    return (
-        m.role == "user"
-        and bool(m.content)
-        and not (m.content or "").startswith(("[tinyharness]", "<teammate", CONTINUING))
-    )
+def _request(m: Message) -> str:
+    """The user's request in `m`, if it is one: a message they wrote, or the copy an earlier
+    summary kept (then the only copy left). Not a harness note or a teammate's message."""
+    content = m.content or ""
+    if m.role != "user" or content.startswith(("[tinyharness]", "<teammate")):
+        return ""
+    return content.removeprefix(CONTINUING).strip()
 
 
 def _clip(text: str, chars: int) -> str:

@@ -127,10 +127,11 @@ class ReadTool(Tool[ReadInput]):
             if len(line) > MAX_LINE_CHARS:
                 line = f"{line[:MAX_LINE_CHARS]}… [line cut: {len(line) - MAX_LINE_CHARS} more chars]"
             entry = f"{i:>6}\t{line}"
-            if page and size + len(entry) > MAX_BYTES:
+            entry_bytes = len(entry.encode())
+            if page and size + entry_bytes > MAX_BYTES:
                 break
             page.append(entry)
-            size += len(entry) + 1
+            size += entry_bytes + 1
         end = args.offset + len(page)
         if end < len(lines):
             page.append(
