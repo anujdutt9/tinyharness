@@ -114,9 +114,13 @@ def test_microcompact_protects_the_most_recent_tool_output():
 
 
 def test_microcompact_keeps_skill_and_agent_results():
+    """A skill is loaded by reading its SKILL.md: those instructions stay, as an Agent's report does."""
+    skill_read = Message(
+        role="assistant", tool_calls=[ToolCall("s1", "Read", '{"path": "/home/skills/design/SKILL.md"}')]
+    )
     h = history(
         user("go"),
-        assistant("", "s1", name="Skill"),
+        skill_read,
         tool("s1", BIG),
         assistant("", "a1", name="Agent"),
         tool("a1", BIG),

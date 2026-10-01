@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", type=Path, help="config file (default: ~/.tinyharness/config.toml)")
     p.add_argument("--setup", action="store_true", help="choose a provider and add or replace its API key")
     p.add_argument(
-        "--no-skill-tool", action="store_true", help="don't offer skills to the model (run them with /name)"
+        "--no-skill-tool", action="store_true", help="don't list skills to the model (run them with /name)"
     )
     p.add_argument("--expose-skills", action="store_true", help=argparse.SUPPRESS)  # the default now
     p.add_argument("--debug", action="store_true", help="verbose logging and full tracebacks")

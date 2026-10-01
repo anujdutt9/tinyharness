@@ -61,13 +61,12 @@ from tinyharness.permissions import (
 from tinyharness.permissions.classifier import AutoModeClassifier
 from tinyharness.plugins import load_plugins
 from tinyharness.sandbox import Sandbox, SandboxPolicy, detect_sandbox
-from tinyharness.skills import SkillRegistry, build_skill_prompt, load_skills
+from tinyharness.skills import SkillRegistry, build_skill_prompt, load_skills, skills_section
 from tinyharness.subagents import AgentSpec, load_agents
 from tinyharness.subagents.runner import run_subagent
 from tinyharness.tools.base import Tool, ToolContext, ToolError, file_version
 from tinyharness.tools.bash import BashTool
 from tinyharness.tools.registry import default_registry
-from tinyharness.tools.skill import SkillTool
 from tinyharness.trust import TrustStore
 from tinyharness.workspace import Scratch, Workspace
 
@@ -145,7 +144,7 @@ class SessionOptions:
     enable_skills: bool = True
     enable_subagents: bool = True  # load agents from files (built-in, ~/.tinyharness, project)
     enable_plugins: bool = True
-    expose_skill_tool: bool | None = None  # offer the Skill tool; None: the config's `skill_tool`
+    expose_skill_tool: bool | None = None  # list skills in the prompt; None: the config's `skill_tool`
 
     def resolve_config(self) -> Config:
         cfg = load_config(self.config_path, use_last_model=self.use_last_model)
@@ -211,6 +210,8 @@ class Session:
         self.agents.update({spec.name: spec for spec in self.options.agents})  # yours, from code: as given
         self.hooks = HookRunner([*hooks, *self.options.hooks], cwd=root)
 
+        # Skills are listed in the prompt and loaded with Read (subagents get the list too).
+        self.ctx.skills_prompt = skills_section(self.skills.list()) if self.config.skill_tool else ""
         # Skills may ship reference files; let tools read them without prompting.
         for skill in self.skills.list():
             if skill.directory is not None:
@@ -459,7 +460,8 @@ class Session:
     def _system_prompt(self) -> str:
         # Extensions' sections come after the core prompt, in the order they were turned
         # on: the same every time, so the cached prefix holds (docs/extension-api.md).
-        sections = [f"# {name}\n\n{text}" for ext in self.extensions for name, text in ext.sections]
+        sections = [self.ctx.skills_prompt] if self.ctx.skills_prompt else []
+        sections += [f"# {name}\n\n{text}" for ext in self.extensions for name, text in ext.sections]
         return build_system_prompt(
             self.workspace.root,
             self.scratch.dir,
@@ -491,8 +493,6 @@ class Session:
                 self.tools.register(tool)
             for hook in ext.hooks:
                 self.hooks.add(hook)
-        if self.config.skill_tool and len(self.skills):
-            self.tools.register(SkillTool(self.skills))
 
     def set_extensions(self, names: list[str]) -> None:
         """Switch to these extensions now. The tools and system prompt change, so the next

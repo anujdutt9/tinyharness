@@ -56,7 +56,15 @@ TAIL_SHARE = 0.3  # of the window: the most a summary keeps word for word to end
 LONG_STRING = 500  # chars: tool-call strings longer than this are trimmed in old calls
 
 # Results that are instructions or delegated work: expensive to redo, cheap to keep.
-KEEP_TOOLS = frozenset({"Skill", "Agent", "Team"})
+KEEP_TOOLS = frozenset({"Agent", "Team"})
+
+
+def _kept(call: ToolCall | None) -> bool:
+    """A result compaction leaves alone: delegated work, or a skill's instructions (a Read
+    of a SKILL.md, which is how a skill is loaded)."""
+    if call is None:
+        return False
+    return call.name in KEEP_TOOLS or (call.name == "Read" and '/SKILL.md"' in call.arguments)
 
 
 def _already_compacted(content: str) -> bool:
@@ -158,22 +166,20 @@ class Compactor:
         messages = history.messages
         if len(messages) <= self.keep_tail:
             return 0
-        names = {c.id: c.name for m in messages for c in m.tool_calls}
+        calls_by_id = {c.id: c for m in messages for c in m.tool_calls}
         protect = self.protect_tool_tokens
         batch: list[tuple[Message, int]] = []
         for m in reversed(messages[: -self.keep_tail]):
             if m.role == "tool":
                 content = m.content or ""
-                if _already_compacted(content) or names.get(m.tool_call_id or "") in KEEP_TOOLS:
+                if _already_compacted(content) or _kept(calls_by_id.get(m.tool_call_id or "")):
                     continue
                 tokens = count_tokens(content)
             elif m.role == "assistant" and m.tool_calls:
                 # Only calls trimming would shorten: big arguments made of short strings can't
                 # be, and counting them would rewrite the message on every pass.
                 calls = [
-                    c
-                    for c in m.tool_calls
-                    if c.name not in KEEP_TOOLS and _trim_arguments(c.arguments) != c.arguments
+                    c for c in m.tool_calls if not _kept(c) and _trim_arguments(c.arguments) != c.arguments
                 ]
                 tokens = sum(count_tokens(c.arguments) for c in calls)
             else:

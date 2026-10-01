@@ -35,27 +35,3 @@ def test_malformed_frontmatter(tmp_path):
     s = parse_skill_md(sk_dir / "SKILL.md")
     assert s is not None  # graceful degrade, no crash
     assert s.name == "bad"
-
-
-async def test_skill_tool_loads_a_guide_bundled_inside_a_skill(tmp_path):
-    # Seen live: a skill said "invoke `discovery-questions`" (its references/discovery-questions.md),
-    # the model asked the Skill tool for it, and got "unknown skill".
-    import pytest
-
-    from conftest import call, make_ctx
-    from tinyharness.skills import SkillRegistry
-    from tinyharness.tools.base import ToolError
-    from tinyharness.tools.skill import SkillTool
-
-    sk = tmp_path / "design"
-    (sk / "references").mkdir(parents=True)
-    (sk / "SKILL.md").write_text(
-        "---\nname: design\ndescription: Design pages.\n---\nSee `discovery-questions`."
-    )
-    (sk / "references" / "discovery-questions.md").write_text("Ask one round of questions.")
-    tool = SkillTool(SkillRegistry([parse_skill_md(sk / "SKILL.md")]))
-    out = await call(tool, {"name": "discovery-questions"}, make_ctx(tmp_path))
-    text = out if isinstance(out, str) else out.text
-    assert "bundled with the skill design" in text and "Ask one round of questions." in text
-    with pytest.raises(ToolError, match="Installed skills: design"):
-        await call(tool, {"name": "../SKILL"}, make_ctx(tmp_path))

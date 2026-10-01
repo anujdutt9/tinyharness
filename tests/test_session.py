@@ -230,7 +230,9 @@ async def test_every_turn_records_how_it_ended(session):
     assert "upstream exploded" in ends[1]["error"]
 
 
-def test_skills_are_offered_to_the_model_by_default(tmp_path, monkeypatch):
+def test_skills_are_listed_in_the_prompt_with_where_to_read_them(tmp_path, monkeypatch):
+    """No Skill tool: the prompt lists each skill's name, when to use it, and its SKILL.md,
+    which the model loads with Read."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
     skills = tmp_path / "home" / "skills" / "frontend-design"
     skills.mkdir(parents=True)
@@ -247,11 +249,11 @@ def test_skills_are_offered_to_the_model_by_default(tmp_path, monkeypatch):
         )
     )
     try:
-        assert "Skill" in on.tools.names() and "Skill" not in off.tools.names()
-        listing = on.tools.get("Skill").description
-        assert (
-            "frontend-design: Design web pages well." in listing and len(listing) < 1500
-        )  # the description is cut short
+        prompt = on._system_prompt()
+        line = next(x for x in prompt.splitlines() if x.startswith("- frontend-design:"))
+        assert line.endswith(f"({skills / 'SKILL.md'})")
+        assert len(line) - len(str(skills)) < 300  # the description is cut short
+        assert "Skill" not in on.tools.names() and "# Skills" not in off._system_prompt()
     finally:
         on.close()
         off.close()
@@ -269,4 +271,6 @@ async def test_a_prompt_naming_a_skill_is_sent_as_typed(session):
     prompt = "Don't use the claude-design-skill for this one."
     [e async for e in session.run(prompt)]
     assert [m.content for m in session.history.messages if m.role == "user"] == [prompt]
-    assert "a skill, tool or approach they name isn't optional" in session.history.messages[0].content
+    assert "a skill, tool or approach they name isn't optional" in " ".join(
+        session.history.messages[0].content.split()
+    )

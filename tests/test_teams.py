@@ -853,29 +853,19 @@ async def test_a_failed_subagent_hands_back_its_work_so_far(tmp_path):
     assert "upstream died" in message and "Read(" in message and "transcript" in message
 
 
-async def test_built_in_agents_can_load_skills(tmp_path):
-    """Teammates are general-purpose agents: without Skill in their tools, a report builder
-    couldn't load the user's design skill, however well the lead briefed it."""
-    from tinyharness.skills import Skill, SkillRegistry
+def test_subagents_see_the_skills_too(tmp_path):
+    """Teammates load skills the same way the lead does: from the listing, with Read. A
+    report builder couldn't use the user's design skill when only the lead could see it."""
+    from tinyharness.skills import Skill, skills_section
+    from tinyharness.subagents.runner import subagent_system_prompt
     from tinyharness.subagents.specs import builtin_agents
-    from tinyharness.tools.skill import SkillTool
 
-    for name, spec in builtin_agents().items():
-        assert "Skill" in (spec.tools or ["Skill"]), name
-    registry = default_registry().with_tools(
-        [SkillTool(SkillRegistry([Skill("design", "Design pages well.", "Use a grid.")]))]
+    ctx = make_ctx(tmp_path)
+    ctx.skills_prompt = skills_section(
+        [Skill("design", "Design pages well.", "Use a grid.", source=tmp_path / "SKILL.md")]
     )
-    llm = ScriptedLLM([[("Skill", '{"name": "design"}')], "done"])
-    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
-    await run_subagent(
-        builtin_agents()["general-purpose"],
-        "build the page",
-        ctx=make_ctx(tmp_path),
-        llm=llm,
-        tools=registry,
-        gate=gate,
-    )
-    assert "Use a grid." in llm.requests[1][-1].content
+    prompt = subagent_system_prompt(builtin_agents()["general-purpose"], ctx)
+    assert f"- design: Design pages well. ({tmp_path / 'SKILL.md'})" in prompt
 
 
 async def test_a_long_result_is_handed_on_whole_through_a_file(tmp_path):

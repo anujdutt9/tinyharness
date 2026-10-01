@@ -125,9 +125,8 @@ class Config(BaseModel):
     # configs. TINYHARNESS_TODO_LIST=1 turns it on too.
     todo_list: bool = False
 
-    # The Skill tool: the model sees each skill's name and a short description, and loads a
-    # skill's instructions when its task matches (a frontend-design skill for a web page).
-    # A few hundred tokens, in the cached part of the prompt. False: skills run only by /name.
+    # List installed skills (name, when to use it, where its SKILL.md is) in the system prompt,
+    # so the model can load one with Read when a task matches. False: skills run only by /name.
     skill_tool: bool = True
 
     # --- context management ---

@@ -54,12 +54,13 @@ Skills cost nothing until you use them:
 3. **Bundled files** are read one at a time, when the step that needs them comes up.
    The skill's directory is readable without permission prompts.
 
-The model sees each skill's name and the start of its description in the `Skill` tool, and
-loads a skill when its task matches (a design skill for a web page, say); subagents and
-teammates can load them too. You can also point it at one ("use the claude-design-skill")
-or run it yourself with `/<name>`. The listing is a few hundred tokens, cached with the
-rest of the prompt. `skill_tool = false` in the config (or `--no-skill-tool`) leaves skills
-to `/<name>` only.
+The system prompt lists each skill's name, the start of its description and where its
+SKILL.md is. When a task matches (a design skill for a web page, say), the model loads the
+skill by reading that file with Read; there is no separate tool. Subagents and teammates
+see the same list. You can also point it at one ("use the claude-design-skill") or run it
+yourself with `/<name>`. The list is about 80 tokens per skill, cached with the rest of
+the prompt. `skill_tool = false` in the config (or `--no-skill-tool`) leaves skills to
+`/<name>` only.
 
 ## Running skills
 

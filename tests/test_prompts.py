@@ -68,7 +68,7 @@ def test_system_prompt_names_the_model(tmp_path):
         model_id="claude-opus-5-5",
         provider="Anthropic",
     )
-    assert "Claude Opus 5.5 (model id `claude-opus-5-5`, provided by Anthropic)" in prompt
+    assert "Claude Opus 5.5\n(model id `claude-opus-5-5`, via Anthropic)" in prompt
 
 
 def _prompt(work):

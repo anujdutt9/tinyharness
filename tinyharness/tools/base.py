@@ -88,6 +88,7 @@ class ToolContext:
     # file that changed since (a command, a teammate, the user) from the one it remembers.
     seen_versions: dict[str, str] = field(default_factory=dict)
     todos: list[dict[str, str]] = field(default_factory=list)
+    skills_prompt: str = ""  # the installed skills, as listed in the system prompt
     notify: Callable[[Event], None] | None = None  # side-channel events, e.g. subagent progress
     usage: UsageMeter = field(default_factory=UsageMeter)  # tokens and cost, subagents included
     # The user's latest message, so agents started on its behalf know what it's for.

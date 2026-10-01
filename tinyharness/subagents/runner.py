@@ -239,6 +239,8 @@ def subagent_system_prompt(spec: AgentSpec, ctx: ToolContext) -> str:
         env.append(f"Scratch directory for intermediate files: {ctx.scratch.dir}")
     env.append(f"Today's date: {datetime.date.today().isoformat()}")
     parts = [body, "\n".join(env), environment(ctx.workspace.root).replace("# Environment\n", "", 1)]
+    if ctx.skills_prompt:  # subagents can load skills too: by reading SKILL.md
+        parts.append(ctx.skills_prompt)
     # The project's own rules (how to run tests, which package manager) bind subagents too.
     if instructions := load_agent_md(ctx.workspace.root):
         parts.append(f"# Project instructions (AGENTS.md)\n\n{instructions}")

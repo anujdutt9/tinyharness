@@ -176,12 +176,10 @@ First release.
   adding OpenRouter routing preferences used to drop its prompt caching and cost reporting.
 
 ### Skills and delegation
-- Skills are offered to the model by default: the `Skill` tool lists each skill's name and
-  the start of its description (about 600 tokens for 8 skills, cached with the prompt), so
-  an agent building a web page finds and loads a design skill instead of improvising.
-  The built-in agents (explore, plan, general-purpose, researcher) have the Skill tool
-  too, so a teammate can load a skill its task needs. It used to be off unless you passed
-  `--expose-skills`; `skill_tool = false` (or `--no-skill-tool`) turns it off now.
+- Skills are offered to the model by default: the system prompt lists each skill's name,
+  the start of its description and its SKILL.md, which the model reads to load the skill
+  (no Skill tool). Subagents and teammates get the same list. `skill_tool = false` (or
+  `--no-skill-tool`) leaves skills to `/<name>` only.
 - A teammate's result longer than a prompt carries (4,000 characters to a dependent task,
   6,000 in the lead's report) is saved whole in the session's scratch folder, and the next
   task and the lead are told where: it used to be cut off with no way to get the rest, so
@@ -211,6 +209,9 @@ First release.
   that doesn't use them doesn't send their schemas with every request.
 - Agent and Team are the `agents` extension, built only on the public API
   (`th.run_agent`), with their briefing guidance as its prompt section.
+- The core system prompt is about 670 tokens (was about 2,300): how to work, safety, pages,
+  harness notes and answering. With no extensions on, the whole prefix is about 2.9k tokens
+  before your AGENT.md and skills (was about 7k).
 
 ### Reports and pages
 - Pages are written as models write them elsewhere, CDN links included: no offline
@@ -312,7 +313,7 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   turn, so the prompt cache survives. While the cache is warm, output is only cleared
   once the history passes 60% of the context window, and at least 20k tokens at a
   time. After 5 idle minutes, when the cache has expired anyway, it's cleared freely.
-  The last 40k tokens of tool output are kept, and so are `Skill`, `Agent` and `Team`
+  The last 40k tokens of tool output are kept, and so are skill reads, `Agent` and `Team`
   results.
 - WebSearch runs on the provider's `small_model`, as the auto-mode classifier already
   did. If the small model can't take a request (no search tool, rate limited), the main

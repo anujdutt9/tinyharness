@@ -94,3 +94,26 @@ def build_skill_prompt(skill: Skill, args: str = "") -> str:
     if args:
         parts.append(f"User arguments: {args}")
     return "\n\n".join(parts)
+
+
+BRIEF_CHARS = 240  # of each skill's description in the listing: enough to know when it applies
+
+
+def skills_section(skills: list[Skill]) -> str:
+    """The skills, as the model sees them in its system prompt: name, when to use it, and
+    where its SKILL.md is. The model loads one by reading that file; no tool is needed."""
+    listed = [s for s in skills if s.source is not None]
+    if not listed:
+        return ""
+    lines = [
+        "# Skills",
+        "Expert instructions for kinds of task. When a task matches one, Read its SKILL.md and "
+        "follow it; read the files next to it only when a step needs them.",
+    ]
+    lines += [f"- {s.name}: {_brief(s.description)} ({s.source})" for s in listed]
+    return "\n".join(lines)
+
+
+def _brief(description: str) -> str:
+    text = " ".join(description.split())
+    return text if len(text) <= BRIEF_CHARS else text[: BRIEF_CHARS - 1].rsplit(" ", 1)[0] + "…"
