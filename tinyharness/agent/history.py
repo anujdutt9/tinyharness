@@ -8,6 +8,10 @@ only ever sent back to the exact provider and model that produced it.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import re
+import string
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -136,17 +140,81 @@ class History:
         return [m.to_dict() for m in self.messages]
 
     def repair(self, placeholder: str = INTERRUPTED) -> int:
-        """Answer any tool calls left without a result (e.g. the user hit Ctrl-C
-        mid-turn). Providers reject a history with dangling tool calls.
-        Returns the number of placeholder results added."""
-        answered = {m.tool_call_id for m in self.messages if m.role == "tool"}
-        repaired: list[Message] = []
-        added = 0
-        for msg in self.messages:
-            repaired.append(msg)
-            for tc in msg.tool_calls:
-                if tc.id not in answered:
-                    repaired.append(Message(role="tool", tool_call_id=tc.id, content=placeholder))
-                    added += 1
-        self.messages = repaired
+        """Make the stored history valid again after a turn was cut short (Ctrl-C mid tool
+        call, a crash): see `well_formed`. Returns the number of placeholder results added."""
+        self.messages, added = well_formed(self.messages, placeholder=placeholder)
         return added
+
+
+# The result for a tool call that has none when a request is built (normally `repair`
+# has already answered it; this is the backstop, so a request is never rejected for it).
+MISSING_RESULT = "(no result recorded: it may or may not have run; check its effects before running it again)"
+
+
+def well_formed(
+    messages: list[Message], *, placeholder: str = MISSING_RESULT, valid_id: re.Pattern[str] | None = None
+) -> tuple[list[Message], int]:
+    """`messages` in the shape every provider accepts, without changing `messages` itself:
+
+    - each assistant message's tool calls are answered by the tool results right after
+      it: a missing result gets `placeholder`, a result answering no call there is dropped
+      (an id reused by a later turn can't be mistaken for an answer);
+    - an assistant message with nothing in it (no text, no calls, no saved reasoning) is
+      dropped: APIs reject empty turns;
+    - with `valid_id`, tool-call ids the provider wouldn't accept (another provider's, after
+      /model) are replaced, deterministically, so the prompt cache still matches.
+
+    Returns the messages and how many placeholder results were added.
+    """
+    out: list[Message] = []
+    pending: list[ToolCall] = []  # the latest assistant message's calls, not yet answered
+    added = 0
+
+    def answer_pending() -> None:
+        nonlocal added
+        for call in pending:
+            out.append(Message(role="tool", tool_call_id=call.id, content=placeholder))
+            added += 1
+        pending.clear()
+
+    for m in messages:
+        if m.role == "tool":
+            match = next((c for c in pending if c.id == m.tool_call_id), None)
+            if match is not None:
+                pending.remove(match)
+                out.append(m)
+            continue  # a result that answers nothing here
+        answer_pending()
+        if m.role == "assistant" and not (m.content or "").strip() and not m.tool_calls and m.state is None:
+            continue
+        out.append(m)
+        if m.role == "assistant":
+            pending = list(m.tool_calls)
+    answer_pending()
+    if valid_id is not None:
+        out = [_with_valid_ids(m, valid_id) for m in out]
+    return out, added
+
+
+def _with_valid_ids(m: Message, valid: re.Pattern[str]) -> Message:
+    if m.tool_calls and not all(valid.fullmatch(c.id) for c in m.tool_calls):
+        calls = [ToolCall(_valid_id(c.id, valid), c.name, c.arguments) for c in m.tool_calls]
+        return dataclasses.replace(m, tool_calls=calls)
+    if m.tool_call_id and not valid.fullmatch(m.tool_call_id):
+        return dataclasses.replace(m, tool_call_id=_valid_id(m.tool_call_id, valid))
+    return m
+
+
+_ALPHANUMERIC = string.ascii_letters + string.digits
+
+
+def _valid_id(call_id: str, valid: re.Pattern[str]) -> str:
+    """A stand-in for `call_id` that `valid` accepts, the same every time."""
+    if valid.fullmatch(call_id):
+        return call_id
+    digest = int.from_bytes(hashlib.sha256(call_id.encode()).digest())
+    short = "".join(_ALPHANUMERIC[(digest >> (6 * i)) % 62] for i in range(9))  # Mistral: 9 alphanumerics
+    for candidate in (f"call_{digest:x}"[:29], short):
+        if valid.fullmatch(candidate):
+            return candidate
+    return call_id

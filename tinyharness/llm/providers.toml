@@ -94,6 +94,7 @@ api_key_env = "MISTRAL_API_KEY"
 key_url = "https://console.mistral.ai/api-keys"
 default_model = "mistral-medium-latest"
 small_model = "mistral-small-latest"
+tool_id_pattern = "[A-Za-z0-9]{9}"
 
 [groq]
 label = "Groq"

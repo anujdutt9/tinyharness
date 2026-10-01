@@ -28,7 +28,7 @@ from pydantic import ValidationError
 
 from tinyharness.agent.history import History, Image, Message, ReasoningState, ToolCall
 from tinyharness.agent.runaway import RunawayGuard
-from tinyharness.agent.world import file_meta, stub_superseded
+from tinyharness.agent.world import file_meta
 from tinyharness.events import (
     AssistantText,
     Compacted,
@@ -317,32 +317,36 @@ async def run_agent_loop(
         #    search), with any credential values masked so they never enter the model's
         #    context. The model gets them in the order it asked for them, once all are in.
         finished: dict[int, tuple[str, dict[str, Any], list[Image]]] = {}
-        async for i, (result, is_error) in _in_order_finished(approved, parallel, deps):
-            item = approved[i]
-            output = mask_secrets(result.text, _config_key(deps))
-            await _fire_hook(
-                deps,
-                "PostToolUse",
-                {
-                    "tool": item.tool.name,
-                    "args": item.args.model_dump(),
-                    "result": output[:TRANSCRIPT_RESULT_CHARS],
-                },
-            )
-            output += failures.note(item.tool.name, output, is_error)
-            deps.transcript.write("tool_result", tool=item.tool.name, result=output[:TRANSCRIPT_RESULT_CHARS])
-            # Which file (and which version of it) this result came from, for resuming later.
-            meta = {} if is_error else file_meta(item.tool, item.args, deps.ctx)
-            finished[i] = (output, meta, result.images)
-            yield ToolResult(item.tool.name, output, is_error, id=item.call.id)
-            if item.tool.name == "TodoWrite" and not is_error:
-                yield TodosUpdated(list(deps.ctx.todos))
-        for i, item in enumerate(approved):
-            history.add_tool_result(item.call.id, *finished[i])
-            if n := stub_superseded(history.messages, finished[i][1], deps.ctx.workspace.root):
-                deps.transcript.write(
-                    "compaction", kind="superseded", path=finished[i][1].get("path"), count=n
+        try:
+            async for i, (result, is_error) in _in_order_finished(approved, parallel, deps):
+                item = approved[i]
+                output = mask_secrets(result.text, _config_key(deps))
+                await _fire_hook(
+                    deps,
+                    "PostToolUse",
+                    {
+                        "tool": item.tool.name,
+                        "args": item.args.model_dump(),
+                        "result": output[:TRANSCRIPT_RESULT_CHARS],
+                    },
                 )
+                output += failures.note(item.tool.name, output, is_error)
+                deps.transcript.write(
+                    "tool_result", tool=item.tool.name, result=output[:TRANSCRIPT_RESULT_CHARS]
+                )
+                # Which file (and which version of it) this result came from, for resuming later.
+                meta = {} if is_error else file_meta(item.tool, item.args, deps.ctx)
+                finished[i] = (output, meta, result.images)
+                yield ToolResult(item.tool.name, output, is_error, id=item.call.id)
+                if item.tool.name == "TodoWrite" and not is_error:
+                    yield TodosUpdated(list(deps.ctx.todos))
+        finally:
+            # In the order the model asked for them. If the turn was cut short (Ctrl-C), the
+            # calls that did finish keep their real results: an Edit that was applied must
+            # not be reported as "not run" and done again. The rest are answered by repair().
+            for i, item in enumerate(approved):
+                if i in finished:
+                    history.add_tool_result(item.call.id, *finished[i])
         if failures.stuck:  # results are in the history first, so it stays valid
             deps.transcript.write("stuck", reason="repeated tool failure", detail=failures.stuck)
             raise RepeatedFailureError(failures.stuck)

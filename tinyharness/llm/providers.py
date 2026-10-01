@@ -50,6 +50,9 @@ class Provider(BaseModel):
     # merged into the request for chat providers that switch it on another way, false: none.
     web_search: bool | dict[str, Any] = False
     models: list[ModelInfo] = Field(default_factory=list)  # for endpoints without a model list
+    # Tool-call ids this API accepts; ids that don't match (another provider's, after a
+    # model switch) are replaced in requests. The default is what Anthropic requires.
+    tool_id_pattern: str = r"[A-Za-z0-9_-]{1,64}"
 
     @field_validator("models", mode="before")
     @classmethod

@@ -556,8 +556,10 @@ async def test_invalid_arguments_repeated_count_too(tmp_path):
         await run(tmp_path, ScriptedLLM([bad] * 5), [failing_tool()])
 
 
-async def test_after_an_edit_earlier_copies_of_the_file_are_marked_stale(tmp_path):
-    # Seen live: a model kept copying old_string from a Read taken before its own edit.
+async def test_an_edit_keeps_earlier_reads_and_shows_the_file_as_it_is_now(tmp_path):
+    """Seen live: a model kept copying old_string from a Read taken before its own edit. The
+    fix is the edit's own snippet (a current copy) and Edit refusing a file that changed
+    since it was read, not rewriting old messages, which would break the prompt cache."""
     from tinyharness.tools.registry import default_registry
 
     (tmp_path / "page.html").write_text("<p>scales</p>\n")
@@ -565,7 +567,6 @@ async def test_after_an_edit_earlier_copies_of_the_file_are_marked_stale(tmp_pat
         [
             [("Read", '{"path": "page.html"}')],
             [("Edit", '{"path": "page.html", "old_string": "scales", "new_string": "plugins"}')],
-            [("Read", '{"path": "page.html"}')],
             "done",
         ]
     )
@@ -581,9 +582,38 @@ async def test_after_an_edit_earlier_copies_of_the_file_are_marked_stale(tmp_pat
             ctx=make_ctx(tmp_path),
         )
         [e async for e in run_agent_loop("go", history, deps)]
-    reads = [m.content for m in history.messages if m.role == "tool" and m.meta.get("content")]
-    assert reads[0].startswith("[stale:") and "changed since this was read" in reads[0]
-    assert "plugins" in reads[1] and "scales" not in "".join(reads)
+    read, edit = [m.content for m in history.messages if m.role == "tool"]
+    assert "scales" in read  # unchanged: earlier messages stay byte-identical
+    assert "plugins" in edit.split("as they are now:", 1)[1]
+
+
+async def test_a_call_that_finished_before_ctrl_c_keeps_its_result(tmp_path):
+    """Results used to be added only once the whole batch was done, so Ctrl-C during the
+    second call reported the first (an applied edit, a commit) as not run."""
+    tools = [sleep_tool("Quick", False), sleep_tool("Slow", False)]
+    llm = ScriptedLLM([[("Quick", '{"seconds": 0}'), ("Slow", '{"seconds": 30}')]])
+    history = History([Message(role="system", content="test")])
+    with Transcript(tmp_path, "test") as transcript:
+        deps = LoopDeps(
+            llm=llm,
+            tools=ToolRegistry(tools),
+            gate=PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS),
+            compactor=Compactor(llm),
+            transcript=transcript,
+            ctx=make_ctx(tmp_path),
+        )
+
+        async def consume():
+            async for event in run_agent_loop("go", history, deps):
+                if isinstance(event, ToolResult) and event.name == "Quick":
+                    task.cancel()  # the user presses Ctrl-C while Slow runs
+
+        task = asyncio.ensure_future(consume())
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    history.repair()
+    results = {m.tool_call_id: m.content for m in history.messages if m.role == "tool"}
+    assert results == {"call_0": "Quick done", "call_1": "(interrupted by user)"}
 
 
 def _call(i, name, arguments, finish=None):

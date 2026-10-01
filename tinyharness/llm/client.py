@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from tinyharness.agent.history import Message, ReasoningState, ToolCall
+from tinyharness.agent.history import Message, ReasoningState, ToolCall, well_formed
 from tinyharness.llm.adapters import ADAPTERS
 from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.types import (
@@ -273,6 +273,7 @@ class LLMClient:
         """Stream one reply. The last chunk carries `state` when the provider needs data back next turn."""
         await self._ensure_model_list()
         model = model or self.model
+        messages, _ = well_formed(messages, valid_id=re.compile(self.provider.tool_id_pattern))
         request = Request(
             model=model,
             system="\n\n".join(m.content or "" for m in messages if m.role == "system"),
