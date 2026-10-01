@@ -187,3 +187,29 @@ def test_a_pasted_retina_screenshot_is_shrunk(tmp_path):
     (tmp_path / "shot.png").write_bytes(png(3024, 1964))
     [image], _ = attachments("look at shot.png", tmp_path)
     assert max(PILImage.open(io.BytesIO(base64.b64decode(image.data))).size) == 2000
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_pip_greets_you_on_every_launch_when_the_terminal_can_show_him(tmp_path, monkeypatch, compact):
+    import io
+
+    from rich.console import Console
+
+    from tinyharness import Session, SessionOptions
+    from tinyharness.cli.app import print_banner
+    from tinyharness.cli.theme import THEME
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    session = Session(SessionOptions(config_path=tmp_path / "none.toml", working_dir=tmp_path))
+    try:
+        color = Console(
+            file=io.StringIO(), force_terminal=True, color_system="truecolor", width=100, theme=THEME
+        )
+        print_banner(color, session, compact=compact)
+        assert "▀" in color.file.getvalue()  # Pip, in half-blocks
+        plain = Console(file=io.StringIO(), width=100, color_system=None, theme=THEME)
+        print_banner(plain, session, compact=compact)
+        assert "▀" not in plain.file.getvalue()  # no colors, no Pip
+    finally:
+        session.close()

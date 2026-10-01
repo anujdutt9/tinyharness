@@ -166,4 +166,4 @@ The release workflow tests, builds and publishes to PyPI.
 
 ## License
 
-MIT. Pip was drawn with GPT Image and redrawn in pixels for the terminal.
+MIT.

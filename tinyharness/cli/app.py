@@ -87,9 +87,33 @@ KEYS = (
 
 
 def print_banner(console: Console, session: Session, *, compact: bool = False) -> None:
-    """The full card the first time; after that, one line (plus anything that needs attention)."""
+    """Pip beside the session's details: all of them the first time, after that the model,
+    project and mode (plus anything that needs attention). Without room or real colors for
+    Pip, the later launches get one line."""
     cfg = session.config
     mode = session.mode
+    if compact and pip.fits(console):
+        details = Table.grid(padding=(0, 2))
+        details.add_column(style="muted")
+        details.add_column()
+        details.add_row(
+            "model",
+            Text.assemble((session.model_label, "bold"), (f"  via {cfg.provider_info.label}", "muted")),
+        )
+        details.add_row("project", pretty_path(cfg.working_dir, limit=60))
+        details.add_row("mode", Text(MODE_LABEL[mode], style=f"bold {MODE_STYLE[mode]}"))
+        body = Group(
+            Text.assemble(wordmark(), (f"  v{__version__}", "subtle")),
+            Text("an agent harness you can read in an afternoon", style=f"italic {MUTED}"),
+            Text(),
+            details,
+            *_attention(session),
+        )
+        console.print()
+        _with_pip(console, body)
+        console.print()
+        console.print(KEYS)
+        return
     if compact:
         line = Text.assemble(
             (f"{LOGO} ", BRAND),
@@ -148,16 +172,21 @@ def print_banner(console: Console, session: Session, *, compact: bool = False) -
         details,
     )
     console.print()
-    if pip.fits(console):  # Pip beside the details, like the README's notebook page
-        card = Table.grid(padding=(0, 3))
-        card.add_column(vertical="middle")
-        card.add_column(vertical="middle")
-        card.add_row(pip.portrait(), body)
-        console.print(Padding(card, (0, 0, 0, 2)))
+    if pip.fits(console):
+        _with_pip(console, body)
     else:
         console.print(Padding(body, (0, 0, 0, 2)))
     console.print()
     console.print(KEYS)
+
+
+def _with_pip(console: Console, body: Group) -> None:
+    """Pip beside `body`, like the README's notebook page."""
+    card = Table.grid(padding=(0, 3))
+    card.add_column(vertical="middle")
+    card.add_column(vertical="middle")
+    card.add_row(pip.portrait(), body)
+    console.print(Padding(card, (0, 0, 0, 2)))
 
 
 def _attention(session: Session) -> list[Text]:
