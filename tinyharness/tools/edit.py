@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,9 @@ class EditTool(Tool[EditInput]):
     description = (
         "Replace `old_string` with `new_string` in a file. `old_string` must match exactly "
         "and be unique unless replace_all=true; include surrounding lines to disambiguate. "
-        "You must Read the file first in this session."
+        "Copy it from the file without Read's line-number prefixes. Keep it small: the lines "
+        "that change plus enough around them to be unique. You must Read the file first in "
+        "this session."
     )
     Input = EditInput
 
@@ -56,20 +59,28 @@ class EditTool(Tool[EditInput]):
             raise ToolError("old_string and new_string are identical")
 
         try:
-            text = read_text(path)
+            original = read_text(path)
         except OSError as e:
             raise ToolError(f"read failed: {e.strerror or e}") from e
+        except UnicodeDecodeError:
+            raise ToolError(f"{path} isn't UTF-8 text; Edit only changes UTF-8 files") from None
 
-        note = ""
-        count = text.count(args.old_string)
-        if count:
-            spans = None
-        elif spans := loose_spans(text, args.old_string):
-            # Models often get invisible whitespace wrong (a blank line written as spaces,
-            # a trailing space dropped): same lines otherwise, so edit those lines.
-            count, note = len(spans), "; matched ignoring trailing whitespace"
+        # A file with Windows line endings throughout is edited as if it had \n ones (what
+        # the model sees and writes), then written back with its own.
+        crlf = "\r\n" in original and "\n" not in original.replace("\r\n", "")
+        text = original.replace("\r\n", "\n") if crlf else original
+        old, new = args.old_string, args.new_string
+        if crlf:
+            old, new = old.replace("\r\n", "\n"), new.replace("\r\n", "\n")
+        if not old:
+            if text:
+                raise ToolError(
+                    "old_string is empty. To add text, include the lines next to where it goes in "
+                    "old_string; to replace the whole file, use Write"
+                )
+            spans, count, note = None, 1, ""  # filling an empty file
         else:
-            raise ToolError(f"old_string not found. {explain_mismatch(text, args.old_string)}")
+            spans, count, note, old, new = _locate(text, old, new)
         if count > 1 and not args.replace_all:
             raise ToolError(
                 f"old_string is not unique ({count} occurrences); "
@@ -77,23 +88,56 @@ class EditTool(Tool[EditInput]):
             )
 
         replaced = count if args.replace_all else 1
-        first = text.find(args.old_string) if spans is None else spans[0][0]
+        first = (text.find(old) if old else 0) if spans is None else spans[0][0]
         if spans is None:
-            new_text = text.replace(args.old_string, args.new_string, replaced)
+            new_text = text.replace(old, new, replaced) if old else new
         else:
             for start, end in reversed(spans[:replaced]):  # from the end, so offsets stay valid
-                text = text[:start] + args.new_string + text[end:]
+                text = text[:start] + new + text[end:]
             new_text = text
         try:
-            write_text(path, new_text)  # all or nothing
+            write_text(path, new_text.replace("\n", "\r\n") if crlf else new_text)  # all or nothing
         except OSError as e:
             raise ToolError(f"write failed: {e.strerror or e}") from e
         mark_seen(ctx, path)  # the model knows the change it just made
         more = f", {replaced - 1} more not shown" if replaced > 1 else ""
         return (
             f"edited {path} ({replaced} replacement{'s' if replaced != 1 else ''}{note}{more}). "
-            f"The changed lines as they are now:\n{snippet(new_text, first, args.new_string)}"
+            f"The changed lines as they are now:\n{snippet(new_text, first, new)}"
         )
+
+
+# Read's line numbers ("    42\t"), when a model copies them into old_string.
+_LINE_NUMBER = re.compile(r"^ *\d+\t", re.MULTILINE)
+
+
+def _locate(text: str, old: str, new: str) -> tuple[list[tuple[int, int]] | None, int, str, str, str]:
+    """Find `old` in `text`: exactly, else with Read's line numbers taken off (and off
+    `new` too, if it has them), else ignoring trailing whitespace. Returns (spans for a
+    loose match or None for an exact one, how many matches, a note, old, new)."""
+    if count := text.count(old):
+        return None, count, "", old, new
+    lines = [line for line in old.split("\n") if line]
+    if lines and all(_LINE_NUMBER.match(line) for line in lines):
+        bare = _LINE_NUMBER.sub("", old)
+        new_lines = [line for line in new.split("\n") if line]
+        if new_lines and all(_LINE_NUMBER.match(line) for line in new_lines):
+            new = _LINE_NUMBER.sub("", new)
+        if count := text.count(bare):
+            return None, count, "; Read's line numbers were left out of old_string", bare, new
+        old = bare
+    if spans := loose_spans(text, old):
+        # Models often get invisible whitespace wrong (a blank line written as spaces, a
+        # trailing space dropped): same lines otherwise, so edit those lines. A span
+        # covers whole lines without the newlines around them, so new_string loses the
+        # ones old_string had there, or they'd be doubled.
+        lead = len(old) - len(old.lstrip("\n"))
+        trail = len(old) - len(old.rstrip("\n"))
+        new = new[min(lead, len(new) - len(new.lstrip("\n"))) :]
+        if trail:
+            new = new[: len(new) - min(trail, len(new) - len(new.rstrip("\n")))]
+        return spans, len(spans), "; matched ignoring trailing whitespace", old, new
+    raise ToolError(f"old_string not found. {explain_mismatch(text, old)}")
 
 
 SNIPPET_CONTEXT = 3  # unchanged lines shown before and after an edit

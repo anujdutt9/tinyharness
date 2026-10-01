@@ -234,3 +234,101 @@ async def test_another_agents_change_counts_as_unseen(tmp_path):
     await call(ReadTool(), {"path": "a.txt"}, lead)
     await call(EditTool(), {"path": "a.txt", "old_string": "beta", "new_string": "BETA"}, lead)
     assert (tmp_path / "a.txt").read_text() == "ALPHA\nBETA\n"
+
+
+# ---- found by the robustness audit (each was reproduced against the old code) ----
+
+
+async def _read_then_edit(ctx, tmp_path, name, content, old, new, **extra):
+    (tmp_path / name).write_bytes(content)
+    await call(ReadTool(), {"path": name}, ctx)
+    msg = await call(EditTool(), {"path": name, "old_string": old, "new_string": new, **extra}, ctx)
+    return (tmp_path / name).read_bytes(), msg
+
+
+async def test_a_loose_match_adds_no_blank_line(ctx, tmp_path):
+    # old_string has a trailing space the file doesn't, and ends with a newline like new_string
+    data, msg = await _read_then_edit(
+        ctx,
+        tmp_path,
+        "f.py",
+        b"def f():\n    return 1\nprint(f())\n",
+        "def f(): \n    return 1\n",
+        "def f():\n    return 2\n",
+    )
+    assert data == b"def f():\n    return 2\nprint(f())\n" and "ignoring trailing whitespace" in msg
+
+
+async def test_a_crlf_file_keeps_its_line_endings(ctx, tmp_path):
+    data, _ = await _read_then_edit(
+        ctx, tmp_path, "w.txt", b"one\r\ntwo\r\nthree\r\n", "one\ntwo\n", "ONE\nTWO\n"
+    )
+    assert data == b"ONE\r\nTWO\r\nthree\r\n"
+
+
+async def test_an_empty_old_string_is_refused(ctx, tmp_path):
+    (tmp_path / "e.txt").write_text("abc\n")
+    await call(ReadTool(), {"path": "e.txt"}, ctx)
+    with pytest.raises(ToolError, match="old_string is empty"):
+        await call(
+            EditTool(), {"path": "e.txt", "old_string": "", "new_string": "X", "replace_all": True}, ctx
+        )
+    assert (tmp_path / "e.txt").read_text() == "abc\n"  # used to become "XaXbXcX\nX"
+
+
+async def test_an_empty_file_can_be_filled(ctx, tmp_path):
+    data, _ = await _read_then_edit(ctx, tmp_path, "new.txt", b"", "", "hello\n")
+    assert data == b"hello\n"
+
+
+async def test_reads_line_numbers_in_old_string_are_left_out(ctx, tmp_path):
+    data, msg = await _read_then_edit(
+        ctx,
+        tmp_path,
+        "n.py",
+        b"x = 1\ny = 2\n",
+        "     1\tx = 1\n     2\ty = 2",
+        "     1\tx = 10\n     2\ty = 20",
+    )
+    assert data == b"x = 10\ny = 20\n" and "line numbers were left out" in msg
+
+
+async def test_a_file_that_isnt_utf8_gets_a_clear_error(ctx, tmp_path):
+    (tmp_path / "l.txt").write_bytes("café\n".encode("latin-1"))
+    await call(ReadTool(), {"path": "l.txt"}, ctx)
+    with pytest.raises(ToolError, match="isn't UTF-8 text"):
+        await call(EditTool(), {"path": "l.txt", "old_string": "caf", "new_string": "CAF"}, ctx)
+
+
+async def test_grep_anchors_work_in_every_mode(ctx, tmp_path):
+    from tinyharness.tools.grep import GrepTool
+
+    (tmp_path / "m.py").write_text("import os\nimport sys\n\ndef main():\n    pass\n")
+    found = await call(GrepTool(), {"pattern": "^def main"}, ctx)
+    counted = await call(GrepTool(), {"pattern": "^import", "output_mode": "count"}, ctx)
+    assert "1 file(s) matched" in found  # was "no files matched"
+    assert counted.startswith("2 total")  # was 1
+
+
+async def test_grep_says_when_it_hit_the_limit_and_caps_long_lines(ctx, tmp_path):
+    from tinyharness.tools.grep import GrepTool
+
+    for i in range(5):
+        (tmp_path / f"f{i}.txt").write_text("needle")
+    (tmp_path / "min.js").write_text("needle" + "x" * 5000)
+    listed = await call(GrepTool(), {"pattern": "needle", "head_limit": 2}, ctx)
+    assert "head_limit reached" in listed
+    content = await call(GrepTool(), {"pattern": "needle", "include": "*.js", "output_mode": "content"}, ctx)
+    assert len(content) < 600 and "more chars" in content
+
+
+async def test_glob_skips_dependency_directories_and_explains_absolute_patterns(ctx, tmp_path):
+    from tinyharness.tools.glob import GlobTool
+
+    (tmp_path / "node_modules" / "x").mkdir(parents=True)
+    (tmp_path / "node_modules" / "x" / "a.py").write_text("")
+    (tmp_path / "src.py").write_text("")
+    out = await call(GlobTool(), {"pattern": "**/*.py"}, ctx)
+    assert "src.py" in out and "node_modules" not in out
+    with pytest.raises(ToolError, match="must be relative"):
+        await call(GlobTool(), {"pattern": str(tmp_path / "*.py")}, ctx)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import os
 import re
@@ -18,7 +19,8 @@ from tinyharness.workspace.files import read_bytes
 
 MAX_FILE_BYTES = 2_000_000
 BINARY_PROBE_BYTES = 4096
-SKIP_DIRS = frozenset({"node_modules", "__pycache__", "venv", "dist", "build"})
+SKIP_DIRS = frozenset({"node_modules", "__pycache__", "venv", "dist", "build", "target"})
+MAX_LINE_CHARS = 300  # a match in a minified file would otherwise fill the context
 
 
 class GrepInput(ToolInput):
@@ -53,26 +55,32 @@ class GrepTool(Tool[GrepInput]):
     async def run(self, args: GrepInput, ctx: ToolContext) -> str:
         root = resolve_search_root(args.path, ctx, args)
         try:
-            regex = re.compile(args.pattern, re.IGNORECASE if args.case_insensitive else 0)
+            # MULTILINE: `^def main` means a line starting with it, in every output mode
+            # (content mode matches line by line; the others search whole files).
+            regex = re.compile(args.pattern, re.MULTILINE | (re.IGNORECASE if args.case_insensitive else 0))
         except re.error as e:
             raise ToolError(f"invalid regex: {e}") from e
+        # A big tree takes a while: off the event loop, so other calls and Ctrl-C aren't held up.
+        return await asyncio.to_thread(_search, root, regex, args)
 
-        if root.is_file():
-            # A file named directly gets the same checks a directory walk applies to each file.
-            if is_secret_path(root):
-                raise ToolError(
-                    f"refusing to search secret-shaped path: {root}. "
-                    "Set TINYHARNESS_ALLOW_SECRET_READS=1 if you really mean it."
-                )
-            _check_searchable(root)
-            files = [root]
-        else:
-            files = list(_iter_searchable(root, args.include))
-        if args.output_mode == "files_with_matches":
-            return _files_with_matches(files, regex, args.head_limit, root)
-        if args.output_mode == "count":
-            return _count(files, regex, args.head_limit, root)
-        return _content(files, regex, args.head_limit, root)
+
+def _search(root: Path, regex: re.Pattern[str], args: GrepInput) -> str:
+    if root.is_file():
+        # A file named directly gets the same checks a directory walk applies to each file.
+        if is_secret_path(root):
+            raise ToolError(
+                f"refusing to search secret-shaped path: {root}. "
+                "Set TINYHARNESS_ALLOW_SECRET_READS=1 if you really mean it."
+            )
+        _check_searchable(root)
+        files = [root]
+    else:
+        files = list(_iter_searchable(root, args.include))
+    if args.output_mode == "files_with_matches":
+        return _files_with_matches(files, regex, args.head_limit, root)
+    if args.output_mode == "count":
+        return _count(files, regex, args.head_limit, root)
+    return _content(files, regex, args.head_limit, root)
 
 
 def _iter_searchable(root: Path, include: str | None) -> Iterator[Path]:
@@ -132,7 +140,8 @@ def _files_with_matches(files: list[Path], regex: re.Pattern[str], limit: int, r
                 break
     if not hits:
         return f"(no files matched {regex.pattern!r} under {root})"
-    return f"{len(hits)} file(s) matched:\n" + "\n".join(hits)
+    more = " (head_limit reached: more files may match)" if len(hits) >= limit else ""
+    return f"{len(hits)} file(s) matched{more}:\n" + "\n".join(hits)
 
 
 def _count(files: list[Path], regex: re.Pattern[str], limit: int, root: Path) -> str:
@@ -155,8 +164,10 @@ def _content(files: list[Path], regex: re.Pattern[str], limit: int, root: Path) 
         text = _load(p)
         if text is None:
             continue
-        for lineno, line in enumerate(text.splitlines(), start=1):
+        for lineno, line in enumerate(text.split("\n"), start=1):  # numbered as Read and Edit number them
             if regex.search(line):
+                if len(line) > MAX_LINE_CHARS:
+                    line = f"{line[:MAX_LINE_CHARS]}… [{len(line) - MAX_LINE_CHARS} more chars]"
                 out.append(f"{p}:{lineno}:{line}")
                 if len(out) >= limit:
                     return f"{len(out)} match(es) (head_limit reached):\n" + "\n".join(out)
