@@ -25,6 +25,7 @@ from tinyharness.events import (
     ToolResult,
     ToolUse,
 )
+from tinyharness.llm.providers import DEFAULT_CONTEXT
 from tinyharness.subagents.specs import AgentSpec
 
 if TYPE_CHECKING:
@@ -151,7 +152,7 @@ async def run_subagent(
             llm=llm,
             tools=registry,
             gate=gate,
-            compactor=Compactor(llm),
+            compactor=Compactor(llm, context_window=_context_window(llm, model)),
             transcript=transcript,
             ctx=ctx,
             allowed_tools=allowed,
@@ -208,3 +209,10 @@ def subagent_system_prompt(spec: AgentSpec, ctx: ToolContext) -> str:
         env.append(f"Scratch directory for intermediate files: {ctx.scratch.dir}")
     env.append(f"Today's date: {datetime.date.today().isoformat()}")
     return f"{body}\n\n" + "\n".join(env)
+
+
+def _context_window(llm: Any, model: str | None) -> int:
+    """The subagent's model's window, as the provider reports it (a subagent may run on a
+    smaller model than the session)."""
+    info = llm.model_info(model) if hasattr(llm, "model_info") else None
+    return info.context if info is not None and info.context else DEFAULT_CONTEXT

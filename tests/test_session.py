@@ -4,7 +4,6 @@ import pytest
 
 from tinyharness import MissingAPIKeyError, Session, SessionOptions
 from tinyharness.agent.history import Message
-from tinyharness.llm.tokens import count_message_tokens
 
 
 @pytest.fixture(autouse=True)
@@ -168,7 +167,7 @@ async def test_switching_models_keeps_the_context_reading(session, monkeypatch):
     await _switch(repl, "openai:some-model")
     assert repl.context_used > 0
     assert repl.context_used == pytest.approx(
-        count_message_tokens(session.history.to_dicts()) / session.context_window
+        session.compactor.used(session.history) / session.context_window
     )
 
 

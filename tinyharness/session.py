@@ -27,7 +27,7 @@ from tinyharness import trust
 from tinyharness.agent import world
 from tinyharness.agent.compaction import SUMMARY_MARK, Compactor
 from tinyharness.agent.history import History, Image, Message
-from tinyharness.agent.loop import LoopDeps, run_agent_loop
+from tinyharness.agent.loop import LoopDeps, run_agent_loop, summary_notes
 from tinyharness.agent.prompts import build_system_prompt, load_agent_md
 from tinyharness.agent.sessionlog import (
     FileSessionStore,
@@ -43,7 +43,7 @@ from tinyharness.hooks import Hook, HookRunner, load_hooks
 from tinyharness.llm.client import LLMClient, Ping
 from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.providers import DEFAULT_CONTEXT, Provider
-from tinyharness.llm.tokens import count_message_tokens
+from tinyharness.llm.tokens import estimate_tokens
 from tinyharness.llm.types import Effort
 from tinyharness.llm.usage import UsageMeter
 from tinyharness.paths import default_config_path, home_dir, move_legacy_state, project_dir
@@ -537,11 +537,9 @@ class Session:
         self.compactor.budget_cap(self.history)
         self.compactor.microcompact(self.history)
         before = list(self.history.messages)
-        if not await self.compactor.summarize(self.history, keep_tail=1):
+        if not await self.compactor.summarize(self.history, keep_tail=1, notes=summary_notes(self.ctx)):
             return False
-        if count_message_tokens(self.history.to_dicts()) >= count_message_tokens(
-            [m.to_dict() for m in before]
-        ):
+        if estimate_tokens(self.history.messages) >= estimate_tokens(before):
             self.history.messages = before  # the summary didn't save anything: keep the original
             return False
         self.transcript.write("compacted", kind="manual")

@@ -51,6 +51,7 @@ from tinyharness.llm.types import LLMError, RepeatedFailureError, RunawayOutputE
 from tinyharness.llm.usage import Usage
 from tinyharness.security import mask_secrets
 from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolOutput
+from tinyharness.tools.todo import format_todos
 
 if TYPE_CHECKING:
     from tinyharness.agent.compaction import Compactor
@@ -190,7 +191,7 @@ async def run_agent_loop(
             async for event in _ask_model(history, available, deps, turn):
                 yield event
         except ContextOverflowError:
-            if not await deps.compactor.summarize(history):
+            if not await deps.compactor.summarize(history, notes=summary_notes(deps.ctx)):
                 raise
             deps.transcript.write("compaction", kind="summary", reason="context overflow")
             yield Compacted("summary")
@@ -270,6 +271,7 @@ async def run_agent_loop(
         history.append(Message(role="assistant", content=text or None, tool_calls=calls, state=turn.state))
         if turn.usage is not None:
             yield _account(turn, deps)
+            deps.compactor.observe(history, turn.usage)
 
         # 2. No tool calls means the model is finished, unless its reply was cut off.
         if not calls and turn.finish_reason == "length":
@@ -546,7 +548,7 @@ async def _compact(history: History, deps: LoopDeps) -> AsyncGenerator[Event, No
     if n := compactor.microcompact(history):
         deps.transcript.write("compaction", kind="microcompact", count=n)
         yield Compacted("microcompact", n)
-    if compactor.needs_summary(history) and await compactor.summarize(history):
+    if compactor.needs_summary(history) and await compactor.summarize(history, notes=summary_notes(deps.ctx)):
         deps.transcript.write("compaction", kind="summary")
         yield Compacted("summary")
 
@@ -635,6 +637,11 @@ async def _execute(item: _ApprovedCall, deps: LoopDeps) -> tuple[ToolOutput, boo
     except Exception as e:
         return ToolOutput(f"error: {type(e).__name__}: {e}"), True
     return (result if isinstance(result, ToolOutput) else ToolOutput(result)), False
+
+
+def summary_notes(ctx: ToolContext) -> str:
+    """Current state a summary must keep: the todo list as it is now."""
+    return f"[current todo list]\n{format_todos(ctx.todos)}" if ctx.todos else ""
 
 
 def _account(turn: _Turn, deps: LoopDeps) -> TokenUsage:

@@ -206,3 +206,106 @@ async def test_summary_can_keep_just_the_latest_exchange():
     assert await compactor(keep_tail_messages=12).summarize(h, keep_tail=1)
     assert [m.content for m in h.messages[2:]] == ["second", None, "file content", "two"]
     assert h.messages[1].content.startswith(SUMMARY_MARK)
+
+
+# ---- one long task (found by the audit: summarizing used to need a user message to cut at) ----
+
+
+def one_long_task(n: int, result: str = BIG) -> History:
+    """What an autonomous run looks like: one request, then only the agent's own steps."""
+    out = [Message(role="system", content="sys"), user("build the report from data.db")]
+    for i in range(n):
+        out += [assistant("", f"c{i}"), tool(f"c{i}", result)]
+    return history(*out)
+
+
+async def test_one_long_task_can_be_summarized():
+    h = one_long_task(40)
+    llm = ScriptedLLM([])
+    c = Compactor(llm, context_window=100_000, keep_tail_messages=12)
+    assert await c.summarize(h)
+    after = h.messages
+    assert after[1].content.startswith(SUMMARY_MARK)
+    # The kept part starts with the request, word for word, and never with a tool result.
+    assert after[2].role == "user" and after[2].content.endswith("build the report from data.db")
+    assert after[3].role == "assistant"
+    calls = {c.id for m in after for c in m.tool_calls}
+    assert calls == {m.tool_call_id for m in after if m.role == "tool"}
+
+
+async def test_a_short_recent_exchange_is_kept_whole():
+    h = history(
+        Message(role="system", content="sys"),
+        user("a"),
+        assistant("one"),
+        user("b"),
+        assistant("", "t"),
+        tool("t", "x"),
+        assistant("two"),
+    )
+    assert await compactor().summarize(h, keep_tail=1)
+    assert [m.content for m in h.messages[2:]] == ["b", None, "x", "two"]
+
+
+def test_tool_call_arguments_count_toward_the_context():
+    """30 Writes of ~120 KB each used to count as 63 tokens, so compaction never ran."""
+    content = "x" * 120_000
+    h = history(user("go"), *[assistant("", f"w{i}", name="Write") for i in range(3)])
+    for m in h.messages[1:]:
+        m.tool_calls[0].arguments = f'{{"path": "a.html", "content": "{content}"}}'
+    assert compactor().used(h) > 3 * count_tokens(content)
+
+
+def test_the_providers_count_is_the_baseline():
+    from tinyharness.llm.usage import Usage
+
+    h = history(user("hi"), assistant("hello"))
+    c = compactor()
+    c.observe(h, Usage(input=9_000, cached=1_000, output=10))
+    assert c.used(h) == 10_010
+    h.append(user("more"))
+    assert 10_010 < c.used(h) < 10_030
+    h.messages = h.messages[1:]  # rewritten (a summary, /clear): the count no longer applies
+    assert c.used(h) < 100
+
+
+async def test_microcompact_trims_old_tool_call_arguments():
+    c = Compactor(ScriptedLLM([]), keep_tail_messages=2, protect_tool_tokens=0, cache_ttl=0, clock=Clock())
+    write = assistant("", "w", name="Write")
+    write.tool_calls[0].arguments = f'{{"path": "a.html", "content": "{BIG}"}}'
+    write.state = object()  # saved reasoning repeats the arguments; it must go too
+    h = history(user("go"), write, tool("w", "wrote a.html"), user("p1"), user("p2"))
+    assert c.microcompact(h) == 1
+    import json
+
+    args = json.loads(h.messages[1].tool_calls[0].arguments)
+    assert args["path"] == "a.html" and args["content"].startswith("[trimmed:")
+    assert h.messages[1].state is None
+
+
+async def test_the_summary_sees_tool_calls_files_todos_and_the_earlier_summary():
+    seen = []
+
+    class Recording(ScriptedLLM):
+        async def one_shot(self, prompt, **_):
+            seen.append(prompt)
+            return "summary"
+
+    h = history(
+        Message(role="system", content="sys"),
+        Message(role="system", content=f"{SUMMARY_MARK}\n" + "earlier fact " * 2000),
+        user("fix the chart"),
+        assistant("", "e1", name="Edit"),
+        tool("e1", "edited"),
+        user("thanks"),
+        assistant("ok"),
+    )
+    h.messages[3].tool_calls[0].arguments = '{"path": "page.html", "old_string": "a", "new_string": "b"}'
+    h.messages[4].meta = {"path": "/w/page.html", "sha": "1", "content": False}
+    assert await Compactor(Recording([])).summarize(
+        h, keep_tail=1, notes="[current todo list]\n  ○ Run tests"
+    )
+    prompt = seen[0]
+    assert prompt.count("earlier fact") == 2000  # whole, not cut to 4,000 characters
+    assert '[assistant called] Edit({"path": "page.html"' in prompt
+    assert "[result of Edit] edited" in prompt and "/w/page.html" in prompt and "Run tests" in prompt

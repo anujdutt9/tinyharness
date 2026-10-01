@@ -63,7 +63,6 @@ from tinyharness.cli.theme import (
 from tinyharness.cli.widgets import pick
 from tinyharness.events import Event, SubagentUpdate
 from tinyharness.llm.client import LLMError, ProviderConnectionError
-from tinyharness.llm.tokens import count_message_tokens
 from tinyharness.paths import auth_path, home_dir, pretty_path
 from tinyharness.permissions import PermissionMode
 from tinyharness.security import find_api_key
@@ -733,7 +732,7 @@ class Repl:
 
     def _measure_context(self) -> None:
         with contextlib.suppress(Exception):  # the toolbar is a nicety; never fail a turn over it
-            used = count_message_tokens(self.session.history.to_dicts())
+            used = self.session.compactor.used(self.session.history)
             self.context_used = used / self.session.context_window
         self.git = git_status(self.session.workspace.root)
 

@@ -35,7 +35,6 @@ from tinyharness.cli.theme import (
 )
 from tinyharness.cli.widgets import ask, pick
 from tinyharness.config import RECENT_MODELS, forget_model, recent_models, remember_model, save_theme
-from tinyharness.llm.tokens import count_message_tokens
 from tinyharness.permissions import PermissionMode
 from tinyharness.security import redact
 from tinyharness.session import MissingAPIKeyError
@@ -154,7 +153,7 @@ def clear(repl: Repl, arg: str) -> None:
 
 @command("/context", "show how much of the context window is used", group="Session")
 def context(repl: Repl, arg: str) -> None:
-    used = count_message_tokens(repl.session.history.to_dicts())
+    used = repl.session.compactor.used(repl.session.history)
     window = repl.session.context_window
     fraction = min(used / window, 1.0)
     width = 30
@@ -209,7 +208,7 @@ def cost(repl: Repl, arg: str) -> None:
 @command("/compact", "summarize the conversation so far to free up context", group="Session")
 async def compact(repl: Repl, arg: str) -> None:
     session = repl.session
-    before = count_message_tokens(session.history.to_dicts())
+    before = session.compactor.used(session.history)
     try:
         with repl.console.status("[muted]Summarizing the conversation…[/]", spinner="dots"):
             done = await session.compact()
@@ -219,7 +218,7 @@ async def compact(repl: Repl, arg: str) -> None:
     if not done:
         repl.console.print("  [muted]Nothing to compact yet: the conversation is already short.[/]")
         return
-    after = count_message_tokens(session.history.to_dicts())
+    after = session.compactor.used(session.history)
     repl._measure_context()
     _ok(
         repl,
