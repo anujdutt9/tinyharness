@@ -295,3 +295,14 @@ async def test_an_extension_given_in_code_runs_in_a_scripted_session(tmp_path):
         assert results == ["Hello, Ada."]
     finally:
         session.close()
+
+
+def test_an_extension_in_config_and_in_code_loads_once(tmp_path, monkeypatch):
+    from tinyharness.extensions import agents
+
+    session = make_session(tmp_path, monkeypatch, ["agents"], extensions=[agents])
+    try:
+        assert [e.name for e in session.extensions] == ["agents"]
+        assert session._system_prompt().count("# Subagents") == 1
+    finally:
+        session.close()

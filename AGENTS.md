@@ -19,8 +19,14 @@ itself. Every line here should change what you do.
 - `llm/client.py`: HTTP, streaming, retries, stop-reason normalization.
   `llm/adapters/`: one per wire format (chat, responses, anthropic, gemini).
   `llm/textcalls.py`: repairing malformed or text-written tool calls.
-- `tools/`: one file per tool. `prompts/system.md`: the system prompt.
-- `subagents/`, `tools/team.py`: subagents and teams. `session.py`: ties it all together.
+- `tools/`: one file per tool. The core offers Read, Write, Edit, Glob, Grep and Bash;
+  the rest are turned on through extensions. `prompts/system.md`: the core system prompt.
+- `ext.py`: the extension API (`setup(th)`; docs/extension-api.md). `extensions/`: the
+  built-in ones (web, pdf, open, todo, agents). New features go here, not in the core.
+- `sandbox/`: Seatbelt profile and `proxy.py`, the allowlist proxy that is a sandboxed
+  command's only network. `permissions/`: the gate and modes.
+- `subagents/`, `tools/team.py`: subagents and teams (the `agents` extension).
+  `session.py`: ties it all together. `testing.py`: the scripted model for tests.
 
 ## Guarantees: don't break these
 Each was a real failure; each has tests. A change that weakens one needs a reason.
@@ -28,8 +34,9 @@ Each was a real failure; each has tests. A change that weakens one needs a reaso
    message, whatever happens (Ctrl+C, errors, the step limit, compaction).
 2. A reply's outcome comes from the normalized stop reason (`llm/types.py` FinishReason).
    Never run a tool call from a reply cut off at the output limit.
-3. Earlier messages stay byte-identical unless compaction deliberately rewrites them
-   (prompt caching; people run this on their own vLLM servers).
+3. Earlier messages stay byte-identical unless compaction deliberately rewrites them,
+   and the prefix (tools, then the system prompt with per-session facts last) is the
+   same from call to call (prompt caching; people run this on their own vLLM servers).
 4. Compaction always has a way out, including inside one long autonomous turn.
 5. A tool error tells the model what to do next, not just what failed.
 6. Adapters never look at model names; per-model behavior comes from the provider's

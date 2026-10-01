@@ -582,9 +582,10 @@ def extensions(repl: Repl, arg: str) -> None:
     for ext in session.extensions:
         cost = session.extension_tokens(ext)
         what = ", ".join(t.name for t in ext.tools) or "no tools"
+        needs = f"  [warn]needs {', '.join(ext.needs)}[/]" if ext.needs else ""
         table.add_row(
             f"  [bold default]{ext.name}[/]",
-            f"{_short(ext.description or what, 56)}  [subtle]+{cost:,} tokens per request[/]",
+            f"{_short(ext.description or what, 56)}  [subtle]+{cost:,} tokens per request[/]{needs}",
         )
     for err in session.extension_errors:
         table.add_row(f"  [bold default]{err.name}[/]", f"[error]not loaded: {err.error}[/]")

@@ -1,28 +1,15 @@
-# Extension API (draft for review)
+# Extension API
 
-Status: approved 1 Oct 2026; v1 implemented in `tinyharness/ext.py`. The design behind it, with the
-benchmark and sources, is in the redesign proposal; this page is the contract.
+An extension is one Python file with a `setup(th)` function. It can add tools, sections
+of the system prompt, slash commands and handlers for agent events. The built-in features
+(web, pdf, open, todo, agents) are extensions written against this same API, in
+[`tinyharness/extensions/`](../tinyharness/extensions); the API itself is
+[`tinyharness/ext.py`](../tinyharness/ext.py).
 
-## Why
-
-tinyharness sends a 9.1k-token prefix on every model call, against pi's 2.8k, because
-every feature is always on: 14 tools and a 2.3k-token system prompt. Most sessions use
-six of those tools. So the core keeps only what every session needs, and everything else
-becomes an extension you turn on: one Python file with a `setup()` function.
-
-Goals:
-
-- A small core: agent loop, session, sandbox and permission gate, CLI, and six tools
-  (Read, Write, Edit, Bash, Grep, Glob).
-- One way to add anything: a tool, a prompt section, a slash command, a reaction to an
-  event. The built-in features use the same API, so it's proven on real features.
-- Security holds when other people's code is loaded: extensions say what they need, the
-  gate and sandbox apply to their tools, and project extensions need folder trust.
-- The prompt prefix stays byte-stable for the whole session, so prompt caches (Anthropic,
-  OpenAI, OpenRouter, vLLM) keep hitting.
-
-Not goals (for v1): running extensions in their own processes, an extension marketplace,
-changing tools or prompt sections in the middle of a session.
+The core stays small: the agent loop, sessions, the sandbox and permission gate, the CLI,
+and six tools (Read, Write, Edit, Glob, Grep, Bash). Everything else is something you turn
+on, so a session doesn't pay for tools it never uses: every tool definition and prompt
+section is sent with every request.
 
 ## A complete extension
 
@@ -32,8 +19,6 @@ changing tools or prompt sections in the middle of a session.
 
 from tinyharness.ext import Extension
 
-NEEDS: list[str] = []  # what it needs beyond the sandbox; see "Capabilities"
-
 
 def setup(th: Extension) -> None:
     @th.tool(read_only=True)
@@ -42,9 +27,9 @@ def setup(th: Extension) -> None:
 
         name: who to greet
         """
-        return f"Hello, {name}!"
+        return f"{th.config.get('greeting', 'Hello')}, {name}."
 
-    th.prompt_section("hello", "Use the hello tool to greet people by name.")
+    th.prompt_section("Greetings", "Use the hello tool to greet people by name.")
 
     @th.on("tool_call")
     async def no_force_push(call, ctx):
@@ -56,7 +41,8 @@ def setup(th: Extension) -> None:
         ctx.say(f"Hello, {arg or 'world'}!")
 ```
 
-Turn it on in `~/.tinyharness/config.toml` (settings for one extension go in its own table):
+Turn it on in `~/.tinyharness/config.toml`. Settings for one extension go in its own
+table and reach it as `th.config`:
 
 ```toml
 [extensions]
@@ -66,49 +52,51 @@ enabled = ["web", "agents", "hello"]
 greeting = "Hi"
 ```
 
-Or for this session only: `/extensions on hello`.
+Or for the current session only: `/extensions on hello`. `/extensions` lists what's loaded,
+what failed to load and why, and how many tokens each extension adds to every request.
 
 ## Where extensions come from
 
-An entry in `enabled` names a module. It's looked up in this order (first match wins):
+An entry in `enabled` names an extension, looked up in this order (first match wins):
 
-| Source | Example | Trust |
+| Source | Example | Loaded |
 |---|---|---|
-| Built-in | `tinyharness/extensions/web.py` | always loaded |
-| Your folder | `~/.tinyharness/extensions/hello.py` or `hello/__init__.py` | always loaded |
-| The project | `<project>/.tinyharness/extensions/x.py` | only in a trusted folder (`trust.py`), fingerprinted like plugins |
-| An installed package | entry point group `tinyharness.extensions`, e.g. `pip install tinyharness-jira` | loaded because you installed it and named it |
+| Built-in | `tinyharness/extensions/web.py` | always |
+| Your folder | `~/.tinyharness/extensions/hello.py` or `hello/__init__.py` | always |
+| The project | `<project>/.tinyharness/extensions/x.py` | only in a folder you've trusted (it's code that runs outside the sandbox) |
+| An installed package | entry point group `tinyharness.extensions`, e.g. `pip install tinyharness-jira` | when you name it |
 
-One extension that fails to import or raises in `setup()` is skipped with a warning; the
-session still starts.
+From the SDK, pass extensions in code: `SessionOptions(extensions=[module_or_setup_function])`.
+One named both in config and in code loads once.
+
+An extension that fails to import or raises in `setup()` is skipped and reported in
+`/extensions`; the session still starts.
 
 ## The `th` object
 
-Everything an extension does goes through the `Extension` object passed to `setup()`.
+Everything an extension does goes through the `Extension` passed to `setup()`.
 
 ### Tools
 
 ```python
-@th.tool(name=None, read_only=False, network=False, writes=None)
-async def fn(arg: type, ...) -> str | ToolOutput: ...
+@th.tool(name=None, read_only=False, network=False)
+async def fn(arg: type, ..., ctx: ToolContext) -> str | ToolOutput: ...
 
-th.add_tool(MyTool())   # an existing Tool subclass (tools/base.py), unchanged
+th.add_tool(MyTool())   # a Tool subclass (tools/base.py), for full control
+th.remove_tool("Glob")  # take a core tool away
 ```
 
-- The decorator builds the tool from the function: its name (or `name=`), the
-  docstring's first paragraph as the description, the type hints and defaults as the
-  schema (via pydantic), and `arg: description` lines in the docstring as field
-  descriptions.
-- `read_only=True`: no side effects. It never asks, may run alongside other calls, and is
-  allowed in plan mode.
-- `network=True`: it reaches other machines. It follows the network rules below.
-- Returning `str` gives text; `ToolOutput` (already in `tools/base.py`) can carry images.
-  Raising `ToolError` gives the model an error result.
-- `th.add_tool` takes any `Tool` subclass, so today's tools move into extensions without
-  being rewritten.
-
-A tool with the same name as a core tool replaces it, and `/extensions` shows the
-replacement.
+- The decorator builds a tool from an async function: its name (or `name=`), the first
+  paragraph of its docstring as the description, its type hints and defaults as the
+  schema, and `arg: description` lines in the docstring as the field descriptions. A
+  parameter named `ctx` receives the `ToolContext` (workspace, scratch folder, usage).
+- `read_only=True`: no side effects. It never asks, may run alongside other read-only
+  calls, and is offered in plan mode.
+- `network=True`: it reaches other machines, and the permission gate treats it like
+  WebFetch.
+- Return text, or a `ToolOutput` to include images. Raise `ToolError` to give the model an
+  error it can act on.
+- A tool with the same name as a core tool replaces it.
 
 ### Prompt sections
 
@@ -116,34 +104,29 @@ replacement.
 th.prompt_section(name: str, text: str)
 ```
 
-Text added to the system prompt, under `# <name>`. Sections are placed after the core
-prompt, in the order extensions appear in `extensions`, and in registration order within
-one extension. Short text belongs in the tool's description; a section is for guidance
-that spans tools (how to brief a teammate, say).
+Text added to the system prompt under `# <name>`, after the core prompt, in the order the
+extensions were turned on. Guidance that belongs to one tool goes in its description; a
+section is for guidance about a feature as a whole (how to brief a teammate, say), and it
+is sent only while the extension is on.
 
 ### Events
 
 ```python
 @th.on(event)
-async def handler(payload, ctx) -> None | Result: ...
+async def handler(payload, ctx): ...
 ```
 
 | Event | Payload | A handler can |
 |---|---|---|
-| `session_start` | session info | prepare state |
-| `user_prompt` | `{"prompt": text}` | add context for the model: `return ctx.note(text)` |
-| `tool_call` | a `Call` (`.tool`, `.input`) | stop it: `return ctx.block(reason)` |
-| `tool_result` | `{"tool", "args", "result"}` | add a note for the model: `return ctx.note(text)` |
-| `turn_end` | `{}` | keep the turn going: `return ctx.block(instruction)` (at most twice per turn) |
+| `session_start` | `{"session_id", "resumed"}` | prepare state |
+| `user_prompt` | `{"prompt"}` | add context for the model: `return ctx.note(text)` |
+| `tool_call` | a `Call` (`.tool`, `.input`) | stop the call: `return ctx.block(reason)`; the reason goes to the model |
+| `tool_result` | `{"tool", "args", "result"}` | add a note to the result: `return ctx.note(text)` |
+| `turn_end` | `{}` | keep the turn going: `return ctx.block(instruction)` (twice per turn at most) |
 
-Returning `None` lets things proceed. (Changing a call's input and a `session_end` event
-are left for later; nothing needs them yet.)
-
-Handlers run in the order extensions were loaded, and the first block wins. These are the
-same events as today's hooks: `hooks.toml` stays, and each shell hook becomes a handler
-on this event bus (`PreToolUse` = `tool_call`, `PostToolUse` = `tool_result`,
-`Stop` = `turn_end`, `UserPromptSubmit` = `user_prompt`, `SessionStart` =
-`session_start`). There is one mechanism, with two ways to configure it.
+Returning `None` lets things proceed; the first block wins. These are the events
+`hooks.toml` uses (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
+`Stop`), on the same bus, so a shell hook and an extension handler see the same things.
 
 ### Slash commands
 
@@ -152,120 +135,84 @@ on this event bus (`PreToolUse` = `tool_call`, `PostToolUse` = `tool_result`,
 async def handler(arg: str, ctx) -> None: ...
 ```
 
-They appear in `/help` and the `/` menu under the extension's name. `ctx.say(text)` prints
-to the user; `await ctx.send(text)` sends a message to the model as if the user typed it.
+They appear in `/help` and the `/` menu. `ctx.say(text)` prints to the user;
+`await ctx.send(text)` sends a message to the agent as if the user had typed it;
+`ctx.session` is the session.
 
 ### Running a subagent
 
 ```python
 answer = await th.run_agent(
-    task: str,
-    *,
-    agent: str = "general-purpose",   # an agent spec from agents/*.md (its tools and prompt)
-    model: str | None = None,         # default: the agent's, else the session's model
-    label: str = "",
-    extra_tools: list[Tool] | None = None,
-    inbox: Callable[[], list[str]] | None = None,
-) -> str
+    task,
+    agent="general-purpose",  # an agent definition: built-in, agents/*.md, or AgentSpec
+    model=None,  # default: the agent's model, else the session's
+    label="",
+    extra_tools=None,
+    inbox=None,  # a function returning messages to deliver between steps
+)
 ```
 
-A child agent loop with its own history, under the same gate and sandbox, with progress
-shown in the UI. This is the core primitive the `agents` extension builds Agent and Team
-on (`subagents/runner.py` today), and anyone else can build their own orchestration on it.
+Runs a subagent to completion, with its own history, under the session's permission gate
+and sandbox, and returns its answer. The `agents` extension builds the Agent and Team tools
+on this; you can build your own orchestration the same way.
 
 ### Everything else
 
-- `th.remove_tool(name)`: take a core tool away (an extension that replaces how something is done).
-- `th.config`: this extension's table from config (`[extensions.hello]`), as a dict.
-- `th.session`: read-only facts: working directory, model, provider, mode.
-- `th.state_dir`: a folder for this extension's files (`~/.tinyharness/extensions-data/<name>/`).
+- `th.config`: this extension's table from config (`[extensions.<name>]`), as a dict.
+- `th.session`: the session (working directory, model, mode, tools).
+- `th.state_dir`: a folder for the extension's own files,
+  `~/.tinyharness/extensions-data/<name>/`.
 - `th.log`: a logger named for the extension.
 
 ## Rules
 
-1. **Frozen at session start.** Tools and prompt sections can only be registered in
-   `setup()`. After that the tool list and system prompt don't change on their own, so the
-   cached prefix stays byte-identical. `/extensions on|off <name>` switches one right away
-   and says the next request rebuilds the prompt cache once.
-2. **Deterministic prefix.** Core prompt, then extension sections; core tools, then
-   extension tools, in config order. Schemas are serialized with sorted keys.
-3. **Same gate for everyone.** Extension tools go through the permission gate exactly like
-   core tools: `read_only` never asks, writes follow the mode, network follows the
-   network rules. An extension can't mark itself as exempt.
-4. **Disposal.** Everything `setup()` registered is removed when the extension is turned off.
-5. **No silent prompt growth.** `/extensions` lists each one with the tokens it adds to
-   every request (tool schemas plus sections), so the cost of turning one on is visible.
+1. **Registered at session start.** Tools and prompt sections are registered in `setup()`
+   and then stay the same, so the provider's cached prefix keeps hitting. `/extensions on`
+   or `off` switches one immediately, and the next request rebuilds the cache once.
+2. **A stable order.** Core prompt, then extension sections; core tools, then extension
+   tools; extensions in the order they were turned on.
+3. **One permission gate.** Extension tools go through the same checks as core tools:
+   `read_only` tools never ask, other tools follow the permission mode, network tools ask
+   per site. An extension can't exempt its tools.
+4. **Visible cost.** `/extensions` shows the tokens each extension adds to every request
+   (its tool definitions and prompt sections).
 
-## Capabilities
+## Declaring what an extension needs
 
-`NEEDS` declares what an extension needs beyond the sandbox:
+An extension can declare what it needs beyond the sandbox, and `/extensions` shows it:
 
 ```python
 NEEDS = ["network:api.github.com", "write:~/notes"]
 ```
 
-(`NEEDS` is read and shown today; consent and enforcement come next, on top of the
-sandbox proxy.)
+Today this is a declaration for you to read; it isn't enforced. Planned: asking once
+before loading an extension with needs (remembered with a fingerprint of the file, like
+folder trust), adding its hosts to the sandbox's allowlist for its own tools, and a
+`th.run(cmd)` helper that runs commands in the sandbox with those needs applied.
 
-- **Consent.** The first time an extension with `NEEDS` is loaded, you're shown the list
-  once and asked to allow it. The answer is stored with a fingerprint of the file, as
-  folder trust is, so a changed extension asks again.
-- **Network.** `network:<host>` adds hosts to the sandbox's allowlist for this extension's
-  tools. A `network=True` tool reaching any other host asks, as WebFetch does today.
-- **Writes.** `write:<path>` lets this extension's tools write there without asking.
-- **Commands.** `th.run(cmd)` runs a shell command in the same sandbox as Bash, with this
-  extension's `NEEDS` applied. Extensions should use it rather than `subprocess`.
+What no extension system in this design does: sandbox an extension's own Python code.
+It runs in the harness's process with the harness's rights, as in pi, opencode and
+Claude Code. Only load extensions you trust, as you would any package.
 
-Limit, stated plainly: v1 doesn't sandbox an extension's own Python. Python running in the
-harness process has the harness's rights, as in pi, opencode and Claude Code. `NEEDS` is
-enforced for its tools' permission decisions and for commands run through `th.run`.
-Running each extension in a sandboxed subprocess (as Cline does) is the v2 path, and the
-API above doesn't change for it.
+## Built-in extensions
 
-## What moves where
+| Extension | Adds | Without it |
+|---|---|---|
+| `web` | WebSearch, WebFetch, and when to cite pages | no web access beyond the sandbox's allowlist |
+| `pdf` | Pdf: pages, text and images of a PDF | the model reads PDFs with Bash (`pdftotext`, pypdf) |
+| `open` | Open: shows you a file or URL in its app | the model tells you the path |
+| `todo` | TodoWrite: a live checklist for multi-step work | `todo_list = true` turns it on too |
+| `agents` | Agent and Team, and how to brief a subagent | no subagents |
 
-| Today | After |
-|---|---|
-| Read, Write, Edit, Bash, Grep, Glob | core |
-| WebSearch, WebFetch | `web` extension |
-| Pdf | `pdf` extension (Bash with `pdftotext` or pypdf covers most uses without it) |
-| Open | `open` extension |
-| TodoWrite (and `todo_list = true`) | `todo` extension |
-| Agent, Team, TeamBoard, TeamMessage, agents/*.md | `agents` extension, built on `th.run_agent` |
-| Auto-mode classifier | `classifier` extension, run only on escapes |
-| Skill tool | removed: skills are listed in the prompt and read with Read |
-| `hooks.toml`, Python hooks in the SDK | unchanged for users; run on the event bus |
-| Plugins (skills + agents + hooks bundles) | unchanged |
-| `SessionOptions.tools` (SDK) | unchanged; it's a programmatic extension |
-
-By default `enabled = []`: a new user gets the lean core. `tinyharness --setup` offers the
-common set (web, agents, todo) as one choice.
+None is on by default. Hooks (`hooks.toml`), plugins, skills and `SessionOptions(tools=...)`
+work as before, alongside extensions.
 
 ## Skills
 
-Unchanged for you: `/claude-design-skill [args]` still puts the skill's instructions in
-your message, as it does today.
-
-What changes is how the model finds a skill on its own. The core prompt lists each skill:
-
-```
-# Skills
-Read a skill's SKILL.md and follow it when the task matches. Its other files are
-next to it; read them only when a step needs them.
-- claude-design-skill: Design artifacts in HTML/CSS… (~/.tinyharness/skills/claude-design-skill/SKILL.md)
-```
-
-Read already allows the skill folders (they're read roots of the workspace), so no tool is
-needed. This saves the Skill tool's schema (about 200 tokens); the listing still costs
-about 50 tokens per installed skill, as it does now.
-
-## The core prompt
-
-After the move, the core system prompt holds only what every session needs, about 500
-tokens: who it is, the sandbox in two sentences, "verify your work", answer style, the
-environment, and the skills listing. Guidance for a feature moves into that feature's
-extension, so it's present exactly when the feature is (how to brief a teammate goes with
-`agents`; citing pages goes with `web`).
+Skills don't need an extension or a tool. The core prompt lists each installed skill (its
+name, the start of its description and where its `SKILL.md` is), and the model loads one
+by reading that file when a task matches. `/<skill-name> [args]` runs one yourself. The
+list costs about 80 tokens per skill; `skill_tool = false` leaves skills to `/<name>` only.
 
 ## Testing an extension
 
@@ -285,23 +232,4 @@ async def test_hello(tmp_path):
     assert results == ["Hello, Ada."]
 ```
 
-The same `extensions=[...]` works in `SessionOptions` for SDK users: a module with
-`setup(th)`, or a setup function itself.
-
-## How we'll know it worked
-
-The benchmark from the redesign proposal, rerun with three additions: a research task
-(needs `web`), a team task (needs `agents`), and a Gemma 4 column. Accepted when:
-
-- the prefix with no extensions is under 3k tokens;
-- cost is within 1.2× of pi on the five original tasks;
-- success is no lower than today on every task, with the needed extension turned on;
-- the built-in extensions pass their existing tests unchanged, through `th.add_tool`.
-
-## Decided
-
-1. **Mid-session switching** is allowed (`/extensions on|off`); `/extensions` shows each
-   one's tokens per request, and switching says the cache is rebuilt once.
-2. **Tool search** is not in v1; revisit when someone has more than about ten extension
-   tools on.
-3. **Names** stay short: `th`, `NEEDS`.
+Each turn is a string (a text reply) or a list of `(tool name, arguments JSON)` calls.

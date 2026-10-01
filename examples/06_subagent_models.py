@@ -36,6 +36,7 @@ from tinyharness import (
     SubagentUpdate,
     ToolUse,
 )
+from tinyharness.extensions import agents as agents_extension
 
 # An agent can also be a Markdown file, in ~/.tinyharness/agents/ or
 # <project>/.tinyharness/agents/. The same `model` values work in its frontmatter.
@@ -111,7 +112,11 @@ async def main() -> None:
         ),
     ]
 
-    session = Session(SessionOptions(working_dir=work_dir, agents=agents, on_event=on_event))
+    # Subagents come with the agents extension (in config: [extensions] enabled = ["agents"]).
+    options = SessionOptions(
+        working_dir=work_dir, agents=agents, extensions=[agents_extension], on_event=on_event
+    )
+    session = Session(options)
     try:
         # Show what each agent runs on. Session.llm_for resolves the `model` setting,
         # the same way the Agent tool does when it starts one.

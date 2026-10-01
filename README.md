@@ -12,7 +12,7 @@
 **tinyharness** is the loop that turns an LLM into an agent: it reads, searches and edits
 your code, runs commands in a sandbox, asks before it changes things, and keeps long
 sessions inside the context window. It works as a coding agent in your terminal and as
-a Python SDK for building your own. The agent core is about 8k lines of code with no
+a Python SDK for building your own. The agent core is about 9k lines of code with no
 framework underneath, so you can read the whole thing in an afternoon.
 
 <picture>
@@ -22,18 +22,22 @@ framework underneath, so you can read the whole thing in an afternoon.
 
 ## Why tinyharness
 
-- **Readable.** About 8k lines for the agent core (10.6k with the terminal UI), commented
-  for people learning how agents work. Start with [`agent/loop.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/agent/loop.py).
+- **Readable.** About 9k lines of code for the agent core (12k with the terminal UI),
+  commented for people learning how agents work. Start with [`agent/loop.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/agent/loop.py).
 - **Any model, even yours.** Anthropic, OpenAI, Gemini, xAI, OpenRouter, DeepSeek, Mistral
   and Groq, each through its own current API, plus any OpenAI-compatible server: vLLM,
   Ollama, llama.cpp, SGLang.
 - **Robust with small models.** Cut-off replies, empty replies, tool calls written as
   text, malformed arguments and repeated failures are handled by the harness, so mid-size
   open models get work done too. [How](https://github.com/anujdutt9/tinyharness/blob/main/docs/features.md#reliability).
-- **Safe by default.** Commands run in an OS sandbox, edits ask with a diff, and API keys
-  never reach the model.
-- **Coding and general agents.** Subagents, parallel teams, skills, hooks, web search,
-  PDFs and screenshots, for research and analysis as much as for code.
+- **Safe without the friction.** Commands run in an OS sandbox that reaches only package
+  registries, GitHub and CDNs; routine work inside it doesn't ask, anything beyond it
+  does, and API keys never reach the model.
+- **Small and fast.** Six core tools and a short prompt (about 3k tokens before your
+  instructions) that stays the same from call to call, so the provider's cache hits.
+- **Extensible.** One Python file with `setup(th)` adds tools, prompt sections, commands
+  and hooks. Web search, PDFs, subagents and parallel teams are built-in extensions you
+  turn on.
 
 ## Quickstart
 
@@ -56,6 +60,8 @@ In the session, type `/` to autocomplete commands. The ones you'll use most:
 | `/mode` | change the permission mode (or press Shift+Tab) |
 | `/effort` | how hard the model reasons, `low` … `max`, the same for every model |
 | `/skills`, `/<skill>` | list or run skills |
+| `/extensions` | what's on and what it costs per request; `/extensions on web` |
+| `/sandbox` | what commands can write, read and reach |
 | `/context`, `/clear` | context usage, or a fresh conversation |
 | `/key [provider]` | add or replace a provider's API key |
 
@@ -87,11 +93,13 @@ asyncio.run(main())
 ```
 
 The CLI and the SDK consume the same typed event stream. For headless runs, pass
-`permission_callback=` to decide what would otherwise prompt. Subagents can be defined in
+`permission_callback=` to decide what would otherwise prompt. Extensions can be passed in
+code (`SessionOptions(extensions=[...])`) and tested against a scripted model
+(`tinyharness.testing`). Subagents can be defined in
 code (`AgentSpec`) or Markdown, each on any provider's model, and conversations can be
 resumed from code (`SessionOptions(resume="latest")`). See [`examples/`](https://github.com/anujdutt9/tinyharness/tree/main/examples) for a
 one-shot query, a multi-turn session, resuming, a custom tool, a permission policy with
-hooks, skills, and subagents on different models.
+hooks, skills, subagents on different models, and an extension.
 
 ## What's inside
 
@@ -118,11 +126,13 @@ Each of these in detail: [docs/features.md](https://github.com/anujdutt9/tinyhar
                                                  ├─ compaction (agent/compaction.py)
                                                  ├─ runaway / empty-reply recovery (agent/runaway.py)
                                                  ├─ permission gate (permissions/gate.py) ── hooks
-                                                 └─ tools (tools/*.py) ── workspace, sandbox
+                                                 └─ tools (tools/*.py) ── workspace, sandbox + allowlist proxy
                                                       │
-                                                      └─ Agent / Team ──► subagents (subagents/runner.py)
-                                                                          the same loop, fresh history,
-                                                                          any provider:model
+                                                      └─ extensions (ext.py, extensions/) add tools,
+                                                         prompt sections, commands and hooks; the agents
+                                                         extension's Agent / Team ──► subagents
+                                                         (subagents/runner.py): the same loop, fresh
+                                                         history, any provider:model
 ```
 
 Suggested reading order:
@@ -136,8 +146,9 @@ Suggested reading order:
 | 5 | [`agent/history.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/agent/history.py) | The conversation, and the normalization every request goes through |
 | 6 | [`session.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/session.py) | Wiring it all together; state that persists between prompts |
 | 7 | [`llm/adapters/`](https://github.com/anujdutt9/tinyharness/tree/main/tinyharness/llm/adapters) | One small adapter per provider API; the rest of the code never sees a provider's format |
-| 8 | [`subagents/runner.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/subagents/runner.py) | Subagents are the same loop with a fresh history |
-| 9 | [`cli/`](https://github.com/anujdutt9/tinyharness/tree/main/tinyharness/cli) | Rendering events (`render.py`), the REPL, slash commands; colors in `theme.py`, Pip in `pip.py` |
+| 8 | [`ext.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/ext.py), [`extensions/`](https://github.com/anujdutt9/tinyharness/tree/main/tinyharness/extensions) | How a feature plugs in: the built-in extensions use the same API as yours |
+| 9 | [`subagents/runner.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/subagents/runner.py) | Subagents are the same loop with a fresh history |
+| 10 | [`cli/`](https://github.com/anujdutt9/tinyharness/tree/main/tinyharness/cli) | Rendering events (`render.py`), the REPL, slash commands; colors in `theme.py`, Pip in `pip.py` |
 
 Every prompt sent to the model is a Markdown file in [`tinyharness/prompts/`](https://github.com/anujdutt9/tinyharness/tree/main/tinyharness/prompts).
 
@@ -145,7 +156,8 @@ Every prompt sent to the model is a Markdown file in [`tinyharness/prompts/`](ht
 
 - [docs/features.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/features.md): everything above, in detail
 - [docs/configuration.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/configuration.md): API keys, providers, gateways, self-hosted models, where files live
-- [docs/extending.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/extending.md): custom tools, hooks, subagents and plugins
+- [docs/extending.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/extending.md): extensions, custom tools, hooks, subagents and plugins
+- [docs/extension-api.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/extension-api.md): the extension API in full
 - [docs/skills.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/skills.md): writing and sharing skills
 - [CHANGELOG.md](https://github.com/anujdutt9/tinyharness/blob/main/CHANGELOG.md) and [AGENTS.md](https://github.com/anujdutt9/tinyharness/blob/main/AGENTS.md) (how to work on tinyharness, for people and agents)
 

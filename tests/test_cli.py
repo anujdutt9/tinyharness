@@ -264,10 +264,12 @@ def test_sandbox_and_extensions_commands_show_config_names_literally(tmp_path, m
     try:
         COMMANDS["/sandbox"].handler(repl, "")
         COMMANDS["/extensions"].handler(repl, "on todo")
+        repl.session.extensions[0].needs = ["network:api.example.com"]
+        COMMANDS["/extensions"].handler(repl, "")
         out = repl.console.file.getvalue()
         if repl.session.sandbox is not None:
             assert "[sandbox] allow_hosts" in out and "pypi.org" in out
-        assert "[extensions] enabled" in out
+        assert "[extensions] enabled" in out and "needs network:api.example.com" in out
     finally:
         repl.session.close()
 

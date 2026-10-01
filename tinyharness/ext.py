@@ -343,7 +343,9 @@ def load_extensions(
         except Exception as e:
             errors.append(LoadError(name, f"{type(e).__name__}: {e}"))
     for item in given:  # named after the module, or the function (`def hello(th)` is "hello")
-        sources.append((item.__name__.rpartition(".")[2], item))
+        name = item.__name__.rpartition(".")[2]
+        if name not in (n for n, _ in sources):  # also turned on in config: load it once
+            sources.append((name, item))
     for name, source in sources:
         try:
             if source is None:
