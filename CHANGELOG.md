@@ -209,6 +209,8 @@ First release.
 - The core is six tools: Read, Write, Edit, Glob, Grep, Bash. Web, Pdf, Open and TodoWrite
   are built-in extensions (`web`, `pdf`, `open`, `todo`), off until turned on, so a session
   that doesn't use them doesn't send their schemas with every request.
+- Agent and Team are the `agents` extension, built only on the public API
+  (`th.run_agent`), with their briefing guidance as its prompt section.
 
 ### Reports and pages
 - Pages are written as models write them elsewhere, CDN links included: no offline

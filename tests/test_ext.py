@@ -245,3 +245,31 @@ def test_the_older_todo_list_setting_turns_on_the_todo_extension(tmp_path, monke
         assert [e.name for e in session.extensions] == ["todo"] and "TodoWrite" in session.tools.names()
     finally:
         session.close()
+
+
+def test_agents_and_teams_are_an_extension_built_on_run_agent(tmp_path, monkeypatch):
+    off = make_session(tmp_path, monkeypatch, [])
+    on = make_session(tmp_path, monkeypatch, ["agents"])
+    try:
+        assert not {"Agent", "Team"} & set(off.tools.names()) and "# Subagents" not in off._system_prompt()
+        assert {"Agent", "Team"} <= set(on.tools.names()) and "# Subagents" in on._system_prompt()
+    finally:
+        off.close()
+        on.close()
+
+
+async def test_the_agent_tool_runs_its_subagent_through_run_agent(tmp_path, monkeypatch):
+    session = make_session(tmp_path, monkeypatch, ["agents"])
+    calls = []
+
+    async def fake_run_agent(agent, task, **kwargs):
+        calls.append((agent, task))
+        return "found it"
+
+    monkeypatch.setattr(session, "run_agent", fake_run_agent)
+    try:
+        agent = session.tools.get("Agent")
+        out = await agent.run(agent.parse({"subagent_type": "explore", "prompt": "find x"}), session.ctx)
+        assert "found it" in str(out) and calls == [("explore", "find x")]
+    finally:
+        session.close()

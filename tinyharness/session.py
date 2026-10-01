@@ -64,12 +64,10 @@ from tinyharness.sandbox import Sandbox, SandboxPolicy, detect_sandbox
 from tinyharness.skills import SkillRegistry, build_skill_prompt, load_skills
 from tinyharness.subagents import AgentSpec, load_agents
 from tinyharness.subagents.runner import run_subagent
-from tinyharness.tools.agent import AgentTool
 from tinyharness.tools.base import Tool, ToolContext, ToolError, file_version
 from tinyharness.tools.bash import BashTool
 from tinyharness.tools.registry import default_registry
 from tinyharness.tools.skill import SkillTool
-from tinyharness.tools.team import TeamTool
 from tinyharness.trust import TrustStore
 from tinyharness.workspace import Scratch, Workspace
 
@@ -423,11 +421,6 @@ class Session:
         )
         return client, None
 
-    def _agent_is_read_only(self, spec: AgentSpec) -> bool:
-        """An agent that can't change anything, so several can safely run at once."""
-        names = self.tools.names() if spec.tools is None else spec.tools
-        return all(tool.read_only for name in names if (tool := self.tools.get(name)) is not None)
-
     # ------------------------------------------------------------------ settings
 
     def reload_keys(self) -> None:
@@ -500,9 +493,6 @@ class Session:
                 self.hooks.add(hook)
         if self.config.skill_tool and len(self.skills):
             self.tools.register(SkillTool(self.skills))
-        if self.agents:
-            self.tools.register(AgentTool(self.agents, self._spawn_subagent, self._agent_is_read_only))
-            self.tools.register(TeamTool(self.agents, self._spawn_subagent, self._agent_is_read_only))
 
     def set_extensions(self, names: list[str]) -> None:
         """Switch to these extensions now. The tools and system prompt change, so the next

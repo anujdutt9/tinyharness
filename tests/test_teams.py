@@ -36,7 +36,9 @@ def is_read_only(spec: AgentSpec) -> bool:
 def session(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    s = Session(SessionOptions(config_path=tmp_path / "none.toml", working_dir=tmp_path / "work"))
+    config = tmp_path / "config.toml"
+    config.write_text('[extensions]\nenabled = ["agents"]\n')
+    s = Session(SessionOptions(config_path=config, working_dir=tmp_path / "work"))
     yield s
     s.close()
 
@@ -407,9 +409,9 @@ def test_agents_can_be_passed_in_code(tmp_path, monkeypatch):
         permission_mode="acceptEdits",
     )
     explore = AgentSpec(name="explore", description="My own explorer.", tools=["Read"])
-    options = SessionOptions(
-        config_path=tmp_path / "none.toml", working_dir=tmp_path / "work", agents=[reviewer, explore]
-    )
+    config = tmp_path / "config.toml"
+    config.write_text('[extensions]\nenabled = ["agents"]\n')
+    options = SessionOptions(config_path=config, working_dir=tmp_path / "work", agents=[reviewer, explore])
     session = Session(options)
     try:
         assert session.agents["reviewer"] is reviewer
@@ -489,8 +491,9 @@ def test_agents_without_a_tool_list_get_every_tool(tmp_path, session):
     (tmp_path / "helper.md").write_text("---\nname: helper\ndescription: Helps.\n---\nHelp.")
     spec = parse_agent_md(tmp_path / "helper.md")
     assert spec.tools is None and AgentSpec("x", "y").tools is None
-    assert not session._agent_is_read_only(spec)  # it can write, like the session
-    assert session._agent_is_read_only(AgentSpec("none", "no tools", tools=[]))
+    is_read_only = session.tools.get("Agent").agent_is_read_only
+    assert not is_read_only(spec)  # it can write, like the session
+    assert is_read_only(AgentSpec("none", "no tools", tools=[]))
 
 
 async def test_agents_without_a_tool_list_get_every_tool_but_spawning_and_todos(tmp_path):

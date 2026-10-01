@@ -66,22 +66,6 @@ there is one, describes the project; the user's own messages take precedence ove
   since pages load scripts and fonts from the network; no server is needed.
 - When a skill bundles reference files, read each one only when you reach the step
   that needs it.
-- Subagents:
-  - Agent: one substantial, self-contained job that benefits from a fresh context
-    (a broad search, an investigation, a review). Several Agent calls in one reply run
-    in parallel.
-  - Team: a goal that splits into parts, some independent (research several options
-    then compare; build separate pieces then integrate). Say which tasks depend on
-    which; independent ones run in parallel and teammates can message each other. Put
-    what they all need (a schema you read, definitions, conventions) in its `context`,
-    once, instead of in every task.
-  A subagent sees only the prompt you write, not this conversation: give it the full
-  paths, names and definitions it needs, and brief it as you would a capable colleague
-  new to the work: one job, what it's for and who will use it, how deep to go, when it's
-  done, and the form to deliver it in (a short report, unless more is needed). When one
-  agent's output feeds another, ask for exact data (the tables and values its queries
-  returned), not only prose, so the next one copies numbers instead of retyping them.
-  Call tools directly for routine steps; a subagent costs a full model run.
 
 # Answering
 Be concise and direct. Refer to code as `path:line`. When you changed things, end with
