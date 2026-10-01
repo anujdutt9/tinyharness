@@ -12,18 +12,38 @@ from tinyharness.assets import ASSETS_DIR
 from tinyharness.paths import home_dir, project_dir
 from tinyharness.prompts import load_prompt
 
+# Instruction files in each folder, in the order they're read; later ones take precedence.
+INSTRUCTION_FILES = (
+    "AGENTS.md",  # the name most agents use (Codex, opencode, pi, Cursor, Amp, Gemini CLI)
+    "AGENT.md",
+    "CLAUDE.md",  # so repos set up for Claude Code work out of the box
+)
+
 
 def agent_md_sources(working_dir: Path) -> list[Path]:
-    """AGENT.md files, lowest precedence first: managed, user, project, local."""
+    """Instruction files, lowest precedence first: managed, user, then each folder from the
+    repository's root down to the working directory (as Codex does: a subfolder's rules
+    refine the root's, so launching in `src/` still gets the repo's AGENTS.md), then the
+    private per-project ones. Outside a git repository only the working directory counts,
+    so a stray AGENTS.md in a parent folder (your home) doesn't apply to everything."""
     return [
         Path("/etc/tinyharness/AGENT.md"),
         home_dir() / "AGENT.md",
-        working_dir / "AGENTS.md",  # the name most agents use (Codex, Cursor, Amp, Gemini CLI)
-        working_dir / "AGENT.md",
-        working_dir / "CLAUDE.md",  # so repos set up for Claude Code work out of the box
+        *(folder / name for folder in _repo_folders(working_dir) for name in INSTRUCTION_FILES),
         project_dir(working_dir) / "AGENT.md",
         working_dir / "AGENT.local.md",
     ]
+
+
+def _repo_folders(working_dir: Path) -> list[Path]:
+    """The working directory and its parents up to the git repository's root, root first."""
+    here = working_dir.resolve()
+    chain = [here]
+    for parent in here.parents:
+        if (chain[-1] / ".git").exists():  # a directory, or a file in a worktree or submodule
+            return chain[::-1]
+        chain.append(parent)
+    return [here]
 
 
 def load_agent_md(working_dir: Path) -> str:

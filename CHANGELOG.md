@@ -173,6 +173,12 @@ First release.
 - A call allowed without asking says by what, on its own line under it:
   `⎿ auto mode · read-only query in the project`, `⎿ allow rule`, `⎿ hook`.
 
+### Project instructions
+- AGENTS.md (and AGENT.md, CLAUDE.md) are read from the repository's root down to the
+  folder tinyharness runs in, as Codex does: launching in `src/` still gets the repo's
+  rules, and a subfolder's file refines them. Outside a git repository only the working
+  directory counts, so a file in a parent folder doesn't apply everywhere.
+
 ### Look and feel
 - A new identity, "Field Notes": ink blue on paper, with a highlighter for what matters.
   The CLI's palette follows it in both themes, and the wordmark is "tiny" under the
