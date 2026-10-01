@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import shutil
 import time
@@ -39,11 +40,13 @@ from tinyharness.agent.sessionlog import (
 )
 from tinyharness.config import Config, dotenv_paths, load_auth, load_config, load_dotenv_files
 from tinyharness.events import Compacted, Done, Event, ToolResult, ToolUse
+from tinyharness.ext import Command as ExtCommand
+from tinyharness.ext import Extension, LoadError, load_extensions
 from tinyharness.hooks import Hook, HookRunner, load_hooks
 from tinyharness.llm.client import LLMClient, Ping
 from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.providers import DEFAULT_CONTEXT, Provider
-from tinyharness.llm.tokens import estimate_tokens
+from tinyharness.llm.tokens import count_tokens, estimate_tokens
 from tinyharness.llm.types import Effort
 from tinyharness.llm.usage import UsageMeter
 from tinyharness.paths import default_config_path, home_dir, move_legacy_state, project_dir
@@ -216,10 +219,6 @@ class Session:
             if skill.directory is not None:
                 self.workspace.add_read_root(skill.directory)
 
-        self.tools = default_registry()
-        if not self.config.todo_list:
-            self.tools.remove("TodoWrite")
-        self.tools.register(WebSearchTool(lambda: self.llm))
         self.sandbox: Sandbox | None = detect_sandbox() if self.config.sandbox.enabled else None
         self.sandbox_policy = SandboxPolicy.for_project(
             root,
@@ -228,15 +227,9 @@ class Session:
             extra_write=self.config.sandbox.allow_write,
             allow_localhost=self.config.sandbox.allow_localhost,
         )
-        if shutil.which("bash") or shutil.which("sh"):
-            self.tools.register(BashTool(self.sandbox, self.sandbox_policy))
-        for tool in self.options.tools:  # before the Agent tool, so subagents can use them too
-            self.tools.register(tool)
-        if self.config.skill_tool and len(self.skills):
-            self.tools.register(SkillTool(self.skills))
-        if self.agents:
-            self.tools.register(AgentTool(self.agents, self._spawn_subagent, self._agent_is_read_only))
-            self.tools.register(TeamTool(self.agents, self._spawn_subagent, self._agent_is_read_only))
+        self.extensions: list[Extension] = []
+        self.extension_errors: list[LoadError] = []
+        self._load_extensions(self.config.extensions.enabled)
 
         # One gate for the whole session, so "don't ask again" answers and mode
         # changes (e.g. Shift+Tab in the CLI) carry over from prompt to prompt.
@@ -469,14 +462,89 @@ class Session:
         self._sync()
 
     def _system_prompt(self) -> str:
+        # Extensions' sections come after the core prompt, in the order they were turned
+        # on: the same every time, so the cached prefix holds (docs/extension-api.md).
+        sections = [f"# {name}\n\n{text}" for ext in self.extensions for name, text in ext.sections]
         return build_system_prompt(
             self.workspace.root,
             self.scratch.dir,
             model_name=self.model_label,
             model_id=self.config.model,
             provider=self.config.provider_info.label,
-            extra=self.options.extra_system,
+            extra="\n\n".join(filter(None, [*sections, self.options.extra_system])),
             todo_list=self.config.todo_list,
+        )
+
+    # ------------------------------------------------------------------ extensions
+
+    def _load_extensions(self, names: list[str]) -> None:
+        """Load `names` and build the tool set: core tools, your SDK tools, then each
+        extension's, in order. Also used to switch extensions mid-session."""
+        ext_hooks = {id(h) for ext in self.extensions for h in ext.hooks}
+        self.hooks.hooks = [h for h in self.hooks.hooks if id(h) not in ext_hooks]
+        self.extensions, self.extension_errors = load_extensions(
+            names, self, self.config.extensions.settings(), project=self.project_trusted
+        )
+        self.tools = default_registry()
+        if not self.config.todo_list:
+            self.tools.remove("TodoWrite")
+        self.tools.register(WebSearchTool(lambda: self.llm))
+        if shutil.which("bash") or shutil.which("sh"):
+            self.tools.register(BashTool(self.sandbox, self.sandbox_policy))
+        for tool in self.options.tools:  # before the Agent tool, so subagents can use them too
+            self.tools.register(tool)
+        for ext in self.extensions:
+            for name in ext.replaces:
+                self.tools.remove(name)
+            for tool in ext.tools:
+                self.tools.register(tool)
+            for hook in ext.hooks:
+                self.hooks.add(hook)
+        if self.config.skill_tool and len(self.skills):
+            self.tools.register(SkillTool(self.skills))
+        if self.agents:
+            self.tools.register(AgentTool(self.agents, self._spawn_subagent, self._agent_is_read_only))
+            self.tools.register(TeamTool(self.agents, self._spawn_subagent, self._agent_is_read_only))
+
+    def set_extensions(self, names: list[str]) -> None:
+        """Switch to these extensions now. The tools and system prompt change, so the next
+        request rebuilds the provider's prompt cache once."""
+        self.config.extensions.enabled = list(names)
+        self._load_extensions(self.config.extensions.enabled)
+        if self.history.messages and self.history.messages[0].role == "system":
+            first = self.history.messages[0].content or ""
+            if not first.startswith(SUMMARY_MARK):
+                self.history.messages[0] = Message(role="system", content=self._system_prompt())
+        self.transcript.write("extensions", enabled=[e.name for e in self.extensions])
+
+    def extension_command(self, name: str) -> ExtCommand | None:
+        return next((c for ext in self.extensions for c in ext.commands if c.name == name), None)
+
+    def extension_tokens(self, ext: Extension) -> int:
+        """Tokens this extension adds to every request: its tool schemas and prompt sections."""
+        text = json.dumps([t.spec().__dict__ for t in ext.tools], default=str)
+        return count_tokens(text + "".join(t for _, t in ext.sections))
+
+    async def run_agent(
+        self,
+        agent: str,
+        task: str,
+        *,
+        model: str | None = None,
+        label: str = "",
+        extra_tools: Iterable[Tool[Any]] = (),
+        inbox: Callable[[], list[str]] | None = None,
+        ctx: ToolContext | None = None,
+    ) -> str:
+        """A subagent run to completion under this session's gate and sandbox: its answer.
+        The primitive the agents extension builds Agent and Team on."""
+        spec = self.agents.get(agent)
+        if spec is None:
+            raise ToolError(f"unknown agent {agent!r}; available: {', '.join(self.agents) or 'none'}")
+        if model:
+            spec = replace(spec, model=model)
+        return await self._spawn_subagent(
+            spec, task, ctx or self.ctx, label=label, extra_tools=extra_tools, inbox=inbox
         )
 
     def _require_key(self, provider: str) -> None:

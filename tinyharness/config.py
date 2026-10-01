@@ -65,6 +65,23 @@ class SandboxSettings(BaseModel):
     allow_localhost: bool = False  # let commands use loopback (tests that start a local server)
 
 
+class ExtensionSettings(BaseModel):
+    """`[extensions]`: which extensions to load, and a table of settings for each.
+
+    [extensions]
+    enabled = ["web", "agents"]
+    [extensions.web]
+    max_results = 5
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    enabled: list[str] = Field(default_factory=list)
+
+    def settings(self) -> dict[str, Any]:
+        return dict(self.model_extra or {})
+
+
 class Config(BaseModel):
     model_config = ConfigDict(validate_assignment=True, extra="ignore")
 
@@ -91,6 +108,7 @@ class Config(BaseModel):
     permission_mode: PermissionMode = PermissionMode.DEFAULT
     permissions: PermissionSettings = Field(default_factory=lambda: PermissionSettings())
     sandbox: SandboxSettings = Field(default_factory=lambda: SandboxSettings())
+    extensions: ExtensionSettings = Field(default_factory=lambda: ExtensionSettings())
     scratch_max_age_hours: int = 24
 
     # --- terminal ---

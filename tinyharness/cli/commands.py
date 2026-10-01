@@ -105,6 +105,11 @@ def help_(repl: Repl, arg: str) -> None:
     if len(repl.session.skills):
         skill = Command("/<skill>", "run a skill (see /skills)", help_, "[args]", "Tools & skills")
         groups["Tools & skills"].append(skill)
+    for ext in repl.session.extensions:
+        for c in ext.commands:
+            groups.setdefault("Extensions", []).append(
+                Command(f"/{c.name}", f"{c.help} [subtle]({ext.name})[/]", help_, c.usage, "Extensions")
+            )
 
     width = max(len(f"    {c.name} {c.usage}") for cmds in groups.values() for c in cmds)
     for group, cmds in groups.items():
@@ -512,6 +517,52 @@ def tools(repl: Repl, arg: str) -> None:
         badge = "[subtle]read-only[/]" if tool.read_only else "[warn]asks[/]" if tool.needs_permission else ""
         table.add_row(f"  [bold default]{tool.name}[/]", f"{_short(tool.description, 64)}  {badge}")
     repl.console.print(table)
+
+
+@command(
+    "/extensions", "list extensions, or turn one on or off", group="Tools & skills", usage="[on|off name]"
+)
+def extensions(repl: Repl, arg: str) -> None:
+    from tinyharness.ext import builtin_names
+
+    session = repl.session
+    action, _, name = arg.partition(" ")
+    name = name.strip()
+    if action in ("on", "off") and name:
+        names = [n for n in session.config.extensions.enabled if n != name]
+        if action == "on":
+            names.append(name)
+        session.set_extensions(names)
+        if action == "on" and name not in [e.name for e in session.extensions]:
+            error = next((e.error for e in session.extension_errors if e.name == name), "not loaded")
+            _fail(repl, f"{name}: {error}")
+            return
+        _ok(
+            repl,
+            f"{name} turned {action} for this session [muted]· the next request rebuilds the "
+            f"prompt cache once. To keep it, list it under [extensions] enabled in config.toml[/]",
+        )
+        return
+    if arg:
+        _fail(repl, "usage: /extensions [on|off name]")
+        return
+    table = _grid()
+    for ext in session.extensions:
+        cost = session.extension_tokens(ext)
+        what = ", ".join(t.name for t in ext.tools) or "no tools"
+        table.add_row(
+            f"  [bold default]{ext.name}[/]",
+            f"{_short(ext.description or what, 56)}  [subtle]+{cost:,} tokens per request[/]",
+        )
+    for err in session.extension_errors:
+        table.add_row(f"  [bold default]{err.name}[/]", f"[error]not loaded: {err.error}[/]")
+    if session.extensions or session.extension_errors:
+        repl.console.print(table)
+    off = [n for n in builtin_names() if n not in session.config.extensions.enabled]
+    if off:
+        repl.console.print(f"  [muted]Built in, off: {', '.join(off)} · /extensions on <name>[/]")
+    elif not session.extensions:
+        repl.console.print("  [muted]No extensions. Add one at[/] ~/.tinyharness/extensions/<name>.py")
 
 
 @command("/skills", "list skills", group="Tools & skills")

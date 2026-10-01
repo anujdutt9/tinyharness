@@ -62,6 +62,7 @@ from tinyharness.cli.theme import (
 )
 from tinyharness.cli.widgets import pick
 from tinyharness.events import Event, SubagentUpdate
+from tinyharness.ext import CommandContext
 from tinyharness.llm.client import LLMError, ProviderConnectionError
 from tinyharness.paths import auth_path, home_dir, pretty_path
 from tinyharness.permissions import PermissionMode
@@ -100,6 +101,7 @@ class SlashCompleter(Completer):
             return
         entries = [(cmd.name, cmd.help) for cmd in dict.fromkeys(COMMANDS.values())]
         entries += [(f"/{s.name}", f"skill · {s.description}") for s in self.session.skills.list()]
+        entries += [(f"/{c.name}", c.help) for e in self.session.extensions for c in e.commands]
         for name, help_text in entries:
             if name.startswith(text):
                 yield Completion(name, start_position=-len(text), display_meta=_short(help_text, 60))
@@ -533,6 +535,16 @@ class Repl:
         if cmd := COMMANDS.get(name):
             self.console.print()
             result = cmd.handler(self, arg)
+            if inspect.isawaitable(result):
+                await result
+        elif ext_cmd := self.session.extension_command(name[1:]):
+            self.console.print()
+            context = CommandContext(
+                say=lambda text: self.console.print(Text(f"  {text}")),
+                send=lambda text: self._run(self.session.run(text)),
+                session=self.session,
+            )
+            result = ext_cmd.handler(arg, context)
             if inspect.isawaitable(result):
                 await result
         elif self.session.skills.get(name[1:]):

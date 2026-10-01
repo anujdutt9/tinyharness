@@ -171,7 +171,9 @@ class _Turn:
 async def run_agent_loop(
     prompt: str, history: History, deps: LoopDeps, images: Sequence[Image] = ()
 ) -> AsyncGenerator[Event, None]:
-    await _fire_hook(deps, "UserPromptSubmit", {"prompt": prompt})
+    submitted = await _fire_hook(deps, "UserPromptSubmit", {"prompt": prompt})
+    if submitted and isinstance(submitted.get("context"), str) and submitted["context"].strip():
+        prompt = f"{prompt}\n\n{submitted['context'].strip()}"  # an extension's note for the model
     deps.transcript.write("user", text=prompt, images=[image.name for image in images])
     history.append(Message(role="user", content=prompt, images=list(images)))
 
