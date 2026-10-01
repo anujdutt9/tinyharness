@@ -923,3 +923,18 @@ async def test_a_changed_page_counts_as_checked_only_once_it_is_looked_at(tmp_pa
 async def test_gemmas_own_tool_call_format_is_recovered(tmp_path, text):
     events, _ = await run(tmp_path, ScriptedLLM([text, "done"]), [Echo()])
     assert [e.output for e in events if isinstance(e, ToolResult)] == ["read 3.0"]
+
+
+async def test_empty_replies_that_were_billed_blame_the_provider(tmp_path):
+    """Seen live: an OpenRouter upstream billed output and returned nothing; the error used
+    to tell the user to try a stronger model."""
+    from tinyharness.llm.usage import Usage
+
+    empty = [
+        StreamChunk(finish_reason="stop", finish_detail="stop"),
+        StreamChunk(usage=Usage(input=10, output=60), route="Novita"),
+    ]
+    with pytest.raises(
+        RunawayOutputError, match=r"provider \(Novita\) sent 4 empty replies.*ignore = \[\"Novita\"\]"
+    ):
+        await run(tmp_path, ScriptedLLM([empty] * 4), [])

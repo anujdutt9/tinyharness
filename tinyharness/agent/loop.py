@@ -278,6 +278,8 @@ async def run_agent_loop(
                 )
             empty_replies += 1
             if empty_replies >= MAX_EMPTY_REPLIES:
+                if turn.usage is not None and turn.usage.output:  # it wrote something; none arrived
+                    raise RunawayOutputError(_dropped_replies(empty_replies, turn.route))
                 raise _stuck_again(RunawayOutputError("its replies were empty"))
             deps.transcript.write(
                 "stuck",
@@ -597,6 +599,19 @@ async def _ask_model(
             for event in _take(chunk, turn):
                 yield event
     deps.compactor.mark_call()
+
+
+def _dropped_replies(count: int, route: str) -> str:
+    """Why a run of empty replies is the provider's, not the model's: output was billed but
+    nothing came back (seen live: an OpenRouter upstream dropping Qwen3-Coder's tool calls)."""
+    via = f" ({route})" if route else ""
+    return (
+        f"the provider{via} sent {count} empty replies in a row: the model produced output (it "
+        "was billed) but none of it arrived, which usually means the provider's tool-call parser "
+        "dropped it. Try again, or use another provider for this model"
+        + (' (on OpenRouter: extra_body = { provider = { ignore = ["' + route + '"] } })' if route else "")
+        + "."
+    )
 
 
 def _stuck_again(stuck: RunawayOutputError) -> RunawayOutputError:
