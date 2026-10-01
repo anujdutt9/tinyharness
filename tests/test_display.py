@@ -884,3 +884,13 @@ def test_a_passing_test_run_shows_its_result_on_the_row():
     )
     assert _test_summary("tests/a.py ....\n======= 212 passed in 4.10s =======") == "212 passed in 4.10s"
     assert _test_summary("all good") == ""
+
+
+def test_a_passing_test_row_needs_no_output_under_it():
+    console = Console(width=100, record=True)
+    renderer = Renderer(console)
+    renderer.handle(ToolUse("Bash", {"command": "python3 -m unittest"}, "Bash(python3 -m unittest)", id="t"))
+    renderer.handle(ToolResult("Bash", "...\n------\nRan 3 tests in 0.001s\n\nOK", False, id="t"))
+    renderer._stop_live()
+    out = console.export_text()
+    assert "3 passed" in out and "Ran 3 tests" not in out

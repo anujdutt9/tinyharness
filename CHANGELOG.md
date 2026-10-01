@@ -173,6 +173,20 @@ First release.
 - A call allowed without asking says by what, on its own line under it:
   `⎿ auto mode · read-only query in the project`, `⎿ allow rule`, `⎿ hook`.
 
+### Look and feel
+- A new identity, "Field Notes": ink blue on paper, with a highlighter for what matters.
+  The CLI's palette follows it in both themes, and the wordmark is "tiny" under the
+  highlighter.
+- Meet Pip, the tinyharness pony. He's on the README's notebook-page banner, and in the
+  terminal he greets you beside the session details as pixel art (only in color
+  terminals wide enough for him).
+- Your message is echoed under the highlighter; tool rows lead from the target to the
+  result with dot leaders; the turn summary starts with a rule; a passing test run shows
+  its result on its row (`3 passed`) instead of output under it.
+- The README is rewritten around what tinyharness is and how to start, with a real
+  session screenshot; the full feature reference and configuration guide moved to
+  `docs/features.md` and `docs/configuration.md`.
+
 ### Reliability
 From an audit of 157 real sessions across 9 models, the code, and how opencode, pi,
 Codex and deepseek-harness handle the same things. Each item has a regression test.

@@ -152,6 +152,7 @@ class _RunningTool:
     note: str = ""  # who allowed it without asking (e.g. "auto mode · read-only query"), shown under it
     started: float = 0.0  # when it was dispatched (not when it was asked about)
     id: str = ""  # the call's id, to match its result (a parallel batch finishes in any order)
+    summed_up: bool = False  # its row says it all (a passing test run): no output preview under it
 
     @property
     def name(self) -> str:
@@ -432,7 +433,9 @@ class Renderer:
                 _duration(elapsed), style="subtle"
             )
         lines: list[RenderableType] = [self._row(glyph, tool, right)]
-        preview = self._preview(tool, self._relative(result.output), result.is_error)
+        preview = (
+            [] if tool.summed_up else self._preview(tool, self._relative(result.output), result.is_error)
+        )
         if preview:
             under = None  # the preview already shows the line that would go here
         body = preview or ([under] if under else [])
@@ -539,6 +542,7 @@ class Renderer:
         if is_test:
             self._turn.tests_passed = True
             if summary := _test_summary(text):  # the result on the row: `212 passed in 4.1s`
+                tool.summed_up = True
                 return Text(DONE, style="ok"), Text(summary, style="ok"), None
         if last:  # the output shows under the row
             return Text(DONE, style="ok"), Text(), None
