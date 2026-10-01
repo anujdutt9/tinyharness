@@ -938,3 +938,25 @@ async def test_empty_replies_that_were_billed_blame_the_provider(tmp_path):
         RunawayOutputError, match=r"provider \(Novita\) sent 4 empty replies.*ignore = \[\"Novita\"\]"
     ):
         await run(tmp_path, ScriptedLLM([empty] * 4), [])
+
+
+async def test_a_gemma_call_with_a_raw_multiline_command_is_recovered(tmp_path):
+    """Seen live: a Python script in Gemma's <|"|> strings, with quotes and newlines, wasn't
+    recovered, and the turn ended with the script as its answer."""
+    from tinyharness.sandbox.policy import SandboxPolicy
+    from tinyharness.tools.bash import BashTool
+
+    text = '<|tool_call>call:bash{command:<|"|>python3 -c "\nprint(\\"ok\\", 1 + 1)\n"<|"|>}<tool_call|>'
+    events, _ = await run(
+        tmp_path, ScriptedLLM([text, "done"]), [BashTool(None, SandboxPolicy(write_roots=(tmp_path,)))]
+    )
+    assert [e.output for e in events if isinstance(e, ToolResult)] == ["ok 2"]
+
+
+async def test_an_unreadable_call_is_answered_instead_of_ending_the_turn(tmp_path):
+    """Seen live: a call to a made-up tool ended the turn, written out as the answer."""
+    garbled = "<|tool_call>call:image_to_text{image_path: 'shot.png'}<tool_call|>"
+    llm = ScriptedLLM([garbled, "Here is what I found."])
+    events, history = await run(tmp_path, llm, [Echo()])
+    assert "couldn't be run" in history.messages[3].content and "Read" in history.messages[3].content
+    assert history.messages[-1].content == "Here is what I found." and events[-1] == Done()

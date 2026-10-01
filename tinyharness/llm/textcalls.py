@@ -88,15 +88,45 @@ def _from_gemma(
     for name, body in _GEMMA.findall(tail):
         if schema_of(name) is None:
             return text, []
-        source = re.sub(r"([{,]\s*)([A-Za-z_][\w-]*)\s*:", r'\1"\2":', body.replace('<|"|>', '"'))
         try:
-            arguments = json.loads(source)
+            arguments = json.loads(_gemma_json(body))
         except json.JSONDecodeError:
             return text, []
         if not isinstance(arguments, dict):
             return text, []
         calls.append(_call(name, arguments))
     return text[:start].rstrip(), calls
+
+
+# A string in Gemma's arguments: raw between its <|"|> delimiters (quotes and newlines
+# included, as in a shell command), or an ordinary JSON string.
+_GEMMA_STRING = re.compile(r'<\|"\|>(.*?)<\|"\|>|"(?:[^"\\]|\\.)*"', re.DOTALL)
+
+
+def _gemma_json(body: str) -> str:
+    """Gemma's `{key: <|"|>raw text<|"|>, n: 3}` as JSON: raw strings encoded, bare keys
+    quoted (only outside strings, so a "word:" inside a command stays as it is)."""
+    out, last = [], 0
+    for match in _GEMMA_STRING.finditer(body):
+        out.append(_quote_keys(body[last : match.start()]))
+        out.append(json.dumps(match.group(1)) if match.group(1) is not None else match.group(0))
+        last = match.end()
+    out.append(_quote_keys(body[last:]))
+    return "".join(out)
+
+
+def _quote_keys(fragment: str) -> str:
+    return re.sub(r"([{,]\s*)([A-Za-z_][\w-]*)\s*:", r'\1"\2":', fragment)
+
+
+def looks_like_a_call(text: str) -> bool:
+    """Whether a reply ends in something shaped like a tool call (one `recover_calls`
+    couldn't use: a tool that doesn't exist, arguments that don't parse), as opposed to
+    prose that mentions the format."""
+    start = _first_tag(text)
+    return start >= 0 and not re.search(
+        r"\n\s*\n\s*[A-Za-z]", text[start:].split("<tool_call|>")[-1].split("</tool_call>")[-1]
+    )
 
 
 def _first_tag(text: str) -> int:

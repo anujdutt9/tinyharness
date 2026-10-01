@@ -48,7 +48,7 @@ from tinyharness.events import (
 )
 from tinyharness.images import fit_image
 from tinyharness.llm.client import ContextOverflowError, ImageTooLargeError, ToolCallAccumulator
-from tinyharness.llm.textcalls import recover_calls, repair_arguments
+from tinyharness.llm.textcalls import looks_like_a_call, recover_calls, repair_arguments
 from tinyharness.llm.types import LLMError, RepeatedFailureError, RunawayOutputError, StreamChunk
 from tinyharness.llm.usage import Usage
 from tinyharness.security import mask_secrets
@@ -121,6 +121,14 @@ _NOT_CODE = (".md", ".txt", ".rst", ".csv", ".log")
 _PAGES = (".html", ".htm", ".svg")  # checked by looking at them (Screenshot)
 _CHECKS = frozenset({"Bash", "Screenshot"})  # tools that can verify a change
 MAX_STOP_BLOCKS = 2  # a Stop hook can keep a turn going this many times
+# A reply ending in a tool call written as text that couldn't be read (seen live from Gemma 4:
+# a made-up tool, a command that didn't parse). Answered this many times per turn.
+MAX_UNREADABLE_CALLS = 2
+UNREADABLE_CALL_NOTE = (
+    "[tinyharness] Your last reply ends in what looks like a tool call written as text, and it "
+    "couldn't be run: it names a tool that doesn't exist, or its arguments couldn't be read. "
+    "Make the call through the tool-calling interface, with one of the available tools: {tools}."
+)
 # A teammate's answer is its last reply. When that reply came right after a teammate's
 # message, it's usually an answer to the message ("waiting for your numbers"), not the
 # report the lead needs (seen live: placeholders and invented numbers as "results").
@@ -200,6 +208,7 @@ async def run_agent_loop(
     asked_to_verify = asked_for_report = False
     answered_message = False  # its latest reply came after a teammate's message, with no tool call since
     stop_blocks = 0
+    unreadable_calls = 0
     for _ in range(deps.max_steps):
         # Messages from teammates arrive between steps, as a user message.
         for note in deps.inbox() if deps.inbox is not None else []:
@@ -265,6 +274,17 @@ async def run_agent_loop(
                 deps.transcript.write("recovered_calls", tools=[c.name for c in calls])
                 # Saved reasoning would be sent back in place of these calls, without them.
                 turn.state = None
+            elif looks_like_a_call(text) and unreadable_calls < MAX_UNREADABLE_CALLS:
+                # A call it meant to make but wrote in a form that can't be used: tell it,
+                # rather than end the turn with the call as its answer.
+                unreadable_calls += 1
+                if turn.usage is not None:
+                    yield _account(turn, deps)
+                note = UNREADABLE_CALL_NOTE.format(tools=", ".join(sorted(available)))
+                deps.transcript.write("stuck", reason="unreadable call", text=text[-300:])
+                history.append(Message(role="assistant", content=text))
+                history.append(Message(role="user", content=note))
+                continue
         if not calls and not text.strip():
             # Nothing to show or do. That isn't "finished": ask the model to carry on, and
             # stop the turn if it happens again straight away.

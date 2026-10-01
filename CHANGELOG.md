@@ -260,7 +260,9 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   calls, files changed, todo list and any earlier summary in full. Old tool calls' long
   arguments are trimmed like old results.
 - Tool calls written as text (Hermes JSON, Qwen3-Coder XML, Gemma 4's own format) are
-  recovered when they name a real tool; malformed arguments are repaired (a code fence, double encoding, two
+  recovered when they name a real tool (Gemma's raw `<|"|>` strings included, multi-line
+  commands with quotes and all); a reply ending in a call that can't be used (a made-up
+  tool, unreadable arguments) is answered with what went wrong instead of ending the turn; malformed arguments are repaired (a code fence, double encoding, two
   objects run together); a number or object for a text field is taken as text; a wrong
   case in a tool name still finds the tool; invalid arguments are echoed back.
 - Streams: busy errors and connection resets before any output are retried;
