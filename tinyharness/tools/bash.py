@@ -6,8 +6,8 @@ has credentials stripped, and output is capped (head and tail kept) before the
 loop masks any remaining secrets.
 
 With a sandbox, the command can write only to the project, scratch and temp dirs,
-can't read credential files and has no network, so the gate can let it run without
-asking in acceptEdits and auto modes. Without one, every command asks. The model can
+can't read credential files and reaches only the allowlist proxy's hosts, so the gate
+lets it run without asking in default and auto modes. Without one, every command asks. The model can
 ask to skip the sandbox (sandbox=false) for one command, which asks the user every time.
 """
 

@@ -10,7 +10,7 @@ Layers are checked in order and the first one with an opinion wins:
                 changes a file that runs code outside it (hooks, plugins, git hooks,
                 settings), skips allow rules and steps 5-6: it always asks, and can't
                 be remembered
-    5. mode     plan / bypass / reads-are-free / acceptEdits / sandboxed commands /
+    5. mode     plan / bypass / reads-are-free / project edits / sandboxed commands /
                 auto (see `_auto`)
     6. scratch  the agent's own scratch directory
     7. ask      the permission callback (interactive prompt or SDK policy)
@@ -73,8 +73,8 @@ PermissionCallback = Callable[[PermissionRequest], Awaitable[Decision]]
 # and its own `permission_mode` (see PermissionGate.child).
 _PERMISSIVENESS = (
     PermissionMode.PLAN,
+    PermissionMode.ASK,
     PermissionMode.DEFAULT,
-    PermissionMode.ACCEPT_EDITS,
     PermissionMode.AUTO,
     PermissionMode.BYPASS,
 )
@@ -190,7 +190,7 @@ class PermissionGate:
             return Decision(True, "agent scratch directory", "mode")
 
         # Auto mode asks about a risky change to a file case by case: a "don't ask again"
-        # there would stop it judging the next one (and used to switch to acceptEdits).
+        # there would stop it judging the next one (and used to switch modes).
         case_by_case = risk is not None and path is not None
         request = PermissionRequest(
             agent=self.agent,
@@ -237,9 +237,9 @@ class PermissionGate:
             return Decision(False, "plan mode blocks mutating tools", "mode")
         if tool.read_only and not tool.network and (path is None or trusted):
             return Decision(True, "read-only, inside the working directory", "mode")
-        if self.mode == PermissionMode.ACCEPT_EDITS and trusted:
-            return Decision(True, "acceptEdits (inside the working directory)", "mode")
-        if self.mode in (PermissionMode.ACCEPT_EDITS, PermissionMode.AUTO) and tool.contained(args):
+        if self.mode == PermissionMode.DEFAULT and trusted:
+            return Decision(True, "default: inside the working directory", "mode")
+        if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO) and tool.contained(args):
             return Decision(True, f"{self.mode.value}: runs in the sandbox", "mode")
         if self.mode == PermissionMode.AUTO:
             return await self._auto(tool, args, path, trusted, history_tail)
@@ -283,7 +283,7 @@ class PermissionGate:
         return Decision(verdict.decision == "allow", verdict.reason, "classifier")
 
     # -- "don't ask again" ------------------------------------------------------
-    # Edits inside the project switch the session to acceptEdits (visible in the
+    # In ask mode, edits inside the project switch the session to default (visible in the
     # mode indicator). Anything outside the project is remembered per directory.
 
     def _remember_label(
@@ -305,7 +305,7 @@ class PermissionGate:
         elif path is None:
             self.rules.add_allow(Rule(tool.name))
         elif trusted:
-            self.set_mode(PermissionMode.ACCEPT_EDITS)
+            self.set_mode(PermissionMode.DEFAULT)
         else:
             folder = glob.escape(str(_directory(path)))
             for name in _readers(tool):

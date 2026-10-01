@@ -24,7 +24,7 @@ async def main() -> None:
         print(f"skill /{skill.name}: {skill.description}")
 
     name = sys.argv[1] if len(sys.argv) > 1 else "Ada"
-    options = SessionOptions(working_dir=work_dir, permission_mode="acceptEdits")
+    options = SessionOptions(working_dir=work_dir, permission_mode="default")
     async for event in invoke_skill("hello-world", args=name, options=options):
         match event:
             case AssistantText(text=text):

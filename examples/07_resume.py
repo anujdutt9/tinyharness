@@ -41,7 +41,7 @@ async def ask(session: Session, prompt: str) -> None:
 
 
 def options(**kw: str) -> SessionOptions:
-    return SessionOptions(working_dir=DEMO, permission_mode="acceptEdits", **kw)
+    return SessionOptions(working_dir=DEMO, permission_mode="default", **kw)
 
 
 async def start() -> None:

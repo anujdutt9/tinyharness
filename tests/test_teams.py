@@ -360,7 +360,7 @@ async def test_auto_mode_is_confirmed_once_per_session(session, monkeypatch):
     assert session.mode == PermissionMode.DEFAULT  # "no" leaves it alone
     assert await repl.enter_auto_mode()
     assert session.mode == PermissionMode.AUTO
-    session.set_mode("default")
+    session.set_mode("ask")
     assert await repl.enter_auto_mode()
     assert len(asked) == 2  # not asked again once agreed
 
@@ -380,18 +380,18 @@ async def test_saying_no_to_auto_mode_does_not_trap_shift_tab(session, monkeypat
     monkeypatch.setattr(repl_module, "pick", pick)
     console = Console(file=io.StringIO())
     repl = Repl(session, console, Renderer(console))
-    session.set_mode("acceptEdits")
+    session.set_mode("default")
     assert repl.next_mode() == PermissionMode.AUTO  # the next press would ask
     await repl.shift_tab_to_auto()
-    assert session.mode == PermissionMode.ACCEPT_EDITS  # "no" keeps the mode
+    assert session.mode == PermissionMode.DEFAULT  # "no" keeps the mode
     cycle = []
     for _ in range(4):  # the presses after that go round without auto, and never ask again
         session.set_mode(repl.next_mode())
         cycle.append(session.mode)
     assert cycle == [
         PermissionMode.PLAN,
+        PermissionMode.ASK,
         PermissionMode.DEFAULT,
-        PermissionMode.ACCEPT_EDITS,
         PermissionMode.PLAN,
     ]
     assert len(asked) == 1
@@ -406,7 +406,7 @@ def test_agents_can_be_passed_in_code(tmp_path, monkeypatch):
         name="reviewer",
         description="Reviews a diff for bugs.",
         tools=["Read", "Grep"],
-        permission_mode="acceptEdits",
+        permission_mode="default",
     )
     explore = AgentSpec(name="explore", description="My own explorer.", tools=["Read"])
     config = tmp_path / "config.toml"
@@ -415,7 +415,7 @@ def test_agents_can_be_passed_in_code(tmp_path, monkeypatch):
     session = Session(options)
     try:
         assert session.agents["reviewer"] is reviewer
-        assert reviewer.permission_mode == PermissionMode.ACCEPT_EDITS
+        assert reviewer.permission_mode == PermissionMode.DEFAULT
         assert session.agents["explore"].description == "My own explorer."  # replaces the built-in
         assert "reviewer" in session.tools.get("Agent").description
     finally:

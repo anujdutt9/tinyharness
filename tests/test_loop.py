@@ -118,7 +118,7 @@ async def test_plan_mode_hides_mutating_tools(tmp_path):
 
 async def test_denied_calls_are_reported_to_the_model(tmp_path):
     llm = ScriptedLLM([[("Change", "{}")], "ok"])
-    events, history = await run(tmp_path, llm, [sleep_tool("Change", False)], mode=PermissionMode.DEFAULT)
+    events, history = await run(tmp_path, llm, [sleep_tool("Change", False)], mode=PermissionMode.ASK)
     decision = next(e for e in events if isinstance(e, PermissionDecision))
     assert not decision.allowed
     assert history.messages[3].content.startswith("denied by prompt")
@@ -145,7 +145,7 @@ async def test_saying_no_stops_the_turn(tmp_path):
 
     llm = ScriptedLLM([[("Change", "{}"), ("Change", "{}")], "should never be requested"])
     events, history = await run(
-        tmp_path, llm, [sleep_tool("Change", False)], mode=PermissionMode.DEFAULT, callback=user
+        tmp_path, llm, [sleep_tool("Change", False)], mode=PermissionMode.ASK, callback=user
     )
     assert events[-1] == Done(reason="interrupted")
     assert len(llm.requests) == 1, "the model must not be called again after the user stops the turn"
@@ -162,7 +162,7 @@ async def test_saying_no_with_feedback_redirects_the_agent(tmp_path):
 
     llm = ScriptedLLM([[("Change", "{}"), ("Change", "{}")], "ok, switching to notes.md"])
     events, history = await run(
-        tmp_path, llm, [sleep_tool("Change", False)], mode=PermissionMode.DEFAULT, callback=user
+        tmp_path, llm, [sleep_tool("Change", False)], mode=PermissionMode.ASK, callback=user
     )
     assert len(asked) == 1, "the rest of the batch is skipped once the user says no"
     assert events[-1] == Done()

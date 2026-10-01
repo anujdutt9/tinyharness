@@ -1,6 +1,6 @@
 """A Session wires the harness together and holds state across prompts.
 
-    session = Session(SessionOptions(permission_mode="acceptEdits"))
+    session = Session(SessionOptions(permission_mode="ask"))
     async for event in session.run("add a --verbose flag to cli.py"):
         ...
     async for event in session.run("now add a test for it"):   # same history & permissions
@@ -97,8 +97,8 @@ def _capped(spec: AgentSpec, root: Path) -> AgentSpec:
         return spec
     if spec.permission_mode != PermissionMode.BYPASS:
         return spec
-    log.warning("agent %r from this project asks for bypassPermissions; using acceptEdits", spec.name)
-    return replace(spec, permission_mode=PermissionMode.ACCEPT_EDITS)
+    log.warning("agent %r from this project asks for bypassPermissions; using default", spec.name)
+    return replace(spec, permission_mode=PermissionMode.DEFAULT)
 
 
 def _new_id() -> str:

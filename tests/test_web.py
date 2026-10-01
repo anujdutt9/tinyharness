@@ -176,7 +176,7 @@ async def test_webfetch_asks_once_per_site(tmp_path):
         asked.append(request.remember_label)
         return Decision(True, source="prompt", remember=True)
 
-    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.ACCEPT_EDITS, callback=callback)
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.DEFAULT, callback=callback)
     tool = WebFetchTool()
 
     async def check(url):

@@ -165,7 +165,7 @@ async def test_changed_files_are_flagged_and_their_old_contents_stubbed(work):
 
 async def test_the_agents_own_edits_are_not_changes(work):
     (work / "a.py").write_text("A = 1\n")
-    first = Session(options(work, permission_mode="acceptEdits"))
+    first = Session(options(work, permission_mode="default"))
     edit = json.dumps({"path": "a.py", "old_string": "A = 1", "new_string": "A = 2"})
     await turn(first, "bump A", [("Read", '{"path": "a.py"}')], [("Edit", edit)], "Done.")
     first.close()
@@ -401,7 +401,7 @@ async def test_after_resume_a_file_changed_by_the_user_must_be_read_again(work):
     await turn(first, "read it", [("Read", '{"path": "plan.md"}')], "ok")
     first.close()
 
-    resumed = Session(options(work, resume="latest", permission_mode="acceptEdits"))
+    resumed = Session(options(work, resume="latest", permission_mode="default"))
     try:
         (work / "plan.md").write_text("v2 from the user\n")  # after resuming
         events = await turn(

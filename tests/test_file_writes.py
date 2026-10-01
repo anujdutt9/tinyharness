@@ -29,7 +29,7 @@ def project(tmp_path):
 
 async def approve(root, tool, raw):
     """What the loop does: ask the gate, then pin the approved path onto the arguments."""
-    gate = PermissionGate(workspace=Workspace(root), mode=PermissionMode.ACCEPT_EDITS)
+    gate = PermissionGate(workspace=Workspace(root), mode=PermissionMode.DEFAULT)
     args = tool.parse(raw)
     decision = await gate.check(tool, raw, tool.target_path(args))
     assert decision.allow and decision.path == root / raw["path"]

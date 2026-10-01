@@ -16,7 +16,7 @@ async def main() -> None:
         working_dir=tempfile.mkdtemp(prefix="tinyharness-"),
         # Edits inside working_dir, and commands in the sandbox, run without asking.
         # Anything else is denied: a one-shot script has no one to ask.
-        permission_mode="acceptEdits",
+        permission_mode="default",
     )
 
     async for event in query(prompt, options):

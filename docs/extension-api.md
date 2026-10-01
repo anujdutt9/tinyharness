@@ -79,10 +79,6 @@ An entry in `enabled` names a module. It's looked up in this order (first match 
 | The project | `<project>/.tinyharness/extensions/x.py` | only in a trusted folder (`trust.py`), fingerprinted like plugins |
 | An installed package | entry point group `tinyharness.extensions`, e.g. `pip install tinyharness-jira` | loaded because you installed it and named it |
 
-A project can also turn extensions on in `<project>/.tinyharness/config.toml`. Only names
-from the first three sources may be turned on that way; a project can't turn on a package
-it didn't ship.
-
 One extension that fails to import or raises in `setup()` is skipped with a warning; the
 session still starts.
 
@@ -239,7 +235,7 @@ API above doesn't change for it.
 | Auto-mode classifier | `classifier` extension, run only on escapes |
 | Skill tool | removed: skills are listed in the prompt and read with Read |
 | `hooks.toml`, Python hooks in the SDK | unchanged for users; run on the event bus |
-| Plugins (skills + agents + hooks bundles) | unchanged; a plugin may also contain `extension.py` |
+| Plugins (skills + agents + hooks bundles) | unchanged |
 | `SessionOptions.tools` (SDK) | unchanged; it's a programmatic extension |
 
 By default `enabled = []`: a new user gets the lean core. `tinyharness --setup` offers the

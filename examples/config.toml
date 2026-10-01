@@ -17,7 +17,7 @@
 
 # --- Workspace & permissions -------------------------------------------------
 # working_dir = "~/code/project"       # default: the directory you launch from
-# permission_mode = "default"          # plan | default | acceptEdits | auto | bypassPermissions
+# permission_mode = "default"          # default | auto | plan | ask | bypassPermissions
 
 # --- Terminal -----------------------------------------------------------------
 # theme = "system"                     # system (asks the terminal) | light | dark; also /theme
@@ -59,12 +59,25 @@
 
 # --- Sandbox ------------------------------------------------------------------
 # Bash commands run in an OS sandbox (macOS: Seatbelt): they write only to the project,
-# scratch and temp dirs, can't read credential files, and have no network. Sandboxed
-# commands run without asking in acceptEdits and auto modes. Unsandboxed, every one asks.
+# scratch and temp dirs, can't read credential files, and reach only the allowed hosts,
+# through a local proxy. Sandboxed commands run without asking in default and auto
+# modes; a command run outside the sandbox (sandbox=false) asks every time. /sandbox
+# shows the limits.
 # [sandbox]
 # enabled = true
 # allow_write = ["~/code/other-repo"]  # more writable dirs (protected like the project)
 # allow_localhost = false              # true: tests may start and reach local servers
+# allow_hosts = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com",
+#                "*.github.com", "*.githubusercontent.com", "cdn.jsdelivr.net"]  # [] = no network
+
+# --- Extensions ---------------------------------------------------------------
+# Built-in: web (WebSearch, WebFetch), pdf, open, todo, agents (Agent, Team). Your own go
+# in ~/.tinyharness/extensions/<name>.py (docs/extension-api.md). Off unless listed;
+# /extensions shows what each adds to every request, /extensions on <name> for a session.
+# [extensions]
+# enabled = ["web", "agents"]
+# [extensions.myext]                   # settings an extension reads as th.config
+# greeting = "hi"
 
 # --- Cost ---------------------------------------------------------------------
 # Token counts are always shown. Dollars need a price: OpenRouter reports what each call

@@ -1,14 +1,56 @@
 # Extending tinyharness
 
-There are five extension points: tools, hooks, subagents, plugins and skills
-(see [skills.md](skills.md)). User-global extensions live in `~/.tinyharness/`.
-Project ones live in `<project>/.tinyharness/`.
+The main way to add anything is an **extension**: one Python file with a `setup(th)`
+function that adds tools, prompt sections, slash commands and event handlers. The
+built-in features (web, pdf, open, todo, agents) are extensions too. The full contract is
+in [extension-api.md](extension-api.md); this page shows the common cases.
 
-## Tools
+Besides extensions there are hooks, subagents, plugins and skills (see
+[skills.md](skills.md)). Your own live in `~/.tinyharness/`; a project's live in
+`<project>/.tinyharness/` (its hooks, plugins and extensions load only once you trust
+the folder).
 
-A tool has three parts: a pydantic model for its arguments, a description for the
-model, and an async `run`. The argument model is turned into the JSON schema sent to
-the LLM, and incoming arguments are checked against it before `run` is called.
+## Extensions
+
+```python
+# ~/.tinyharness/extensions/wordcount.py
+"""Counts words in text files."""
+
+from tinyharness.ext import Extension
+from tinyharness.tools.base import ToolContext, ToolError
+
+
+def setup(th: Extension) -> None:
+    @th.tool(read_only=True)  # read-only: never asks, may run in parallel, allowed in plan mode
+    async def word_count(path: str, ctx: ToolContext) -> str:
+        """Count the words in a text file.
+
+        path: the file to count
+        """
+        file = ctx.workspace.resolve(path)
+        if file is None or not file.is_file():
+            raise ToolError(f"not a file: {path}")  # the model sees this and can recover
+        return f"{len(file.read_text().split())} words"
+```
+
+Turn it on in `~/.tinyharness/config.toml`, or for one session with
+`/extensions on wordcount`:
+
+```toml
+[extensions]
+enabled = ["wordcount"]
+```
+
+The docstring and type hints become the tool's description and schema; a parameter
+named `ctx` gets the tool context. `/extensions` lists what's loaded and how many tokens
+each one adds to every request. From the SDK, pass extensions in code:
+`SessionOptions(extensions=[wordcount])`, a module or a setup function.
+
+## Tools as classes
+
+For full control (custom permission checks, a label for the user, images in the result),
+write a `Tool` subclass and add it with `th.add_tool(...)` in an extension, or pass it in
+`SessionOptions(tools=[...])`:
 
 ```python
 from pydantic import Field
@@ -23,16 +65,16 @@ class WordCount(Tool[WordCountInput]):
     name = "WordCount"
     description = "Count the words in a text file."
     Input = WordCountInput
-    read_only = True  # allowed in plan mode; may run in parallel with other reads
+    read_only = True
 
     async def run(self, args: WordCountInput, ctx: ToolContext) -> str:
         path = ctx.workspace.resolve(args.path)
         if path is None or not path.is_file():
-            raise ToolError(f"not a file: {args.path}")  # the model sees this and can recover
+            raise ToolError(f"not a file: {args.path}")
         return f"{len(path.read_text().split())} words"
 
 
-session.tools.register(WordCount())
+SessionOptions(tools=[WordCount()])
 ```
 
 | Attribute | Effect |
@@ -74,7 +116,9 @@ command = "uv run pytest -q -x"
 timeout = 300
 ```
 
-**Python hooks** are passed through the SDK:
+An extension reacts to the same events with `@th.on("tool_call")`, `"tool_result"`,
+`"user_prompt"` and `"turn_end"` (see [extension-api.md](extension-api.md#events)).
+**Python hooks** can also be passed through the SDK:
 
 ```python
 def guard(event, payload):
@@ -87,9 +131,10 @@ SessionOptions(hooks=[Hook(event="PreToolUse", type="python", callable=guard)])
 
 ## Subagents
 
-The `Agent` tool runs a task in a fresh context and returns only the final answer.
+Subagents and teams come with the `agents` extension (`/extensions on agents`). The
+`Agent` tool runs a task in a fresh context and returns only the final answer.
 The model uses it on its own when a job is big enough. It comes with four built-in
-agents: `explore`, `plan` and `researcher` (read-only; `researcher` searches the web)
+agents: `explore`, `plan` and `researcher` (read-only; `researcher` searches the web when the `web` extension is on)
 and `general-purpose`. Several agents started in one reply run in parallel, writers
 included: their calls that change things (Bash, Edit, Write) take turns, so two never
 write at once, while their model calls overlap. To add your own, put a Markdown file in
@@ -100,7 +145,7 @@ write at once, while their model calls overlap. To add your own, put a Markdown 
 name: reviewer
 description: Reviews a change for bugs and missing tests.
 tools: [Read, Grep, Glob]
-permission_mode: acceptEdits   # optional: never more permissive than this
+permission_mode: default   # optional: never more permissive than this
 ---
 You are a meticulous reviewer. Report concrete bugs with file:line references.
 ```

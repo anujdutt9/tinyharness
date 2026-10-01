@@ -32,11 +32,11 @@ Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash`; each one is a class plus a pyd
 
 ## Permissions
 
-Reads inside the project never ask; edits ask with a diff preview. Answers are Yes / Yes, don't ask again / No + feedback. Shift+Tab cycles modes (`default` → `acceptEdits` → `plan`); plus `auto` (LLM classifier) and `bypassPermissions`. Persistent `allow`/`deny` rules in config
+In the `default` mode, routine work doesn't ask: reads, edits inside the project and sandboxed commands run. Anything that leaves that boundary (a file in another folder, a command with `sandbox=false`, a network tool) asks, with a diff preview for edits. Answers are Yes / Yes, don't ask again / No + feedback. Shift+Tab cycles modes (`default` → `auto` → `plan` → `ask`): `auto` lets an LLM classifier decide the unclear cases, `plan` is read-only, `ask` asks before every edit and command; `bypassPermissions` never asks. (`acceptEdits`, the earlier name, means `default`.) Persistent `allow`/`deny` rules in config
 
 ## Sandbox
 
-`Bash` runs in an OS sandbox (Seatbelt on macOS; on Linux there is no sandbox yet, so every command asks): writes only inside the project, no reading credential files, no network, and no handing work to other apps (`open`, AppleScript). Git hooks and `.tinyharness/` stay read-only, so nothing can plant code that runs later outside it (Write and Edit ask every time for those). A cloned repo's own hooks and plugins load only after you trust the folder, which is asked once, and only if it has any. Sandboxed commands run without asking in `acceptEdits`/`auto`. A command that needs the network (installing a package) can ask to run outside the sandbox, and that asks every time. `Open` shows you a document or page, and always asks
+`Bash` runs in an OS sandbox (Seatbelt on macOS; on Linux there is no sandbox yet, so every command asks): writes only inside the project, no reading credential files, network only to an allowlist of hosts (package registries, GitHub, CDNs) through a local proxy, and no handing work to other apps (`open`, AppleScript). Git hooks and `.tinyharness/` stay read-only, so nothing can plant code that runs later outside it (Write and Edit ask every time for those). A cloned repo's own hooks and plugins load only after you trust the folder, which is asked once, and only if it has any. Sandboxed commands run without asking in `default` and `auto`. A command that needs another host, or to write elsewhere, can ask to run outside the sandbox, and that asks every time. `/sandbox` shows the limits; `[sandbox] allow_hosts` changes the hosts. `Open` shows you a document or page, and always asks
 
 ## Security
 

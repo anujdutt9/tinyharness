@@ -198,6 +198,13 @@ First release.
   built the way a user would, awkward cases included; no unasked-for dependencies or
   renames; and give each subagent one job with a clear done condition.
 
+### Permission modes
+- `default` no longer asks for routine work: reads, edits inside the project and
+  sandboxed commands run; anything that leaves that boundary (another folder,
+  `sandbox=false`, a network tool) asks. The new `ask` mode asks before every edit and
+  command, as `default` used to. `acceptEdits` still works and means `default`.
+  Shift+Tab cycles `default` → `auto` → `plan` → `ask`.
+
 ### Sandbox network
 - Sandboxed commands can reach an allowlist of hosts through a small local proxy
   (`sandbox/proxy.py`): PyPI, npm, GitHub, the common script and font CDNs, and

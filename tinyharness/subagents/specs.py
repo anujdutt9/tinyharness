@@ -7,7 +7,7 @@ Built-ins ship as Markdown in tinyharness/prompts/agents/. Users add their own i
     name: reviewer
     description: Reviews a diff for bugs.
     tools: [Read, Grep, Glob]          # leave out for every tool the session has
-    permission_mode: acceptEdits
+    permission_mode: default
     model: small                       # inherit | small | provider:model | model id
     max_steps: 60                      # model calls before it must wrap up (default 40)
     ---
@@ -47,7 +47,7 @@ class AgentSpec:
 
     def __post_init__(self) -> None:
         if self.permission_mode is not None:
-            self.permission_mode = PermissionMode.parse(self.permission_mode)  # accept "acceptEdits"
+            self.permission_mode = PermissionMode.parse(self.permission_mode)  # accept "default"
 
 
 def parse_agent_md(path: Path) -> AgentSpec | None:

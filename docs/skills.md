@@ -72,7 +72,7 @@ the prompt. `skill_tool = false` in the config (or `--no-skill-tool`) leaves ski
 ```python
 from tinyharness import SessionOptions, invoke_skill
 
-async for event in invoke_skill("release-notes", "v1.2..v1.3", SessionOptions(permission_mode="acceptEdits")):
+async for event in invoke_skill("release-notes", "v1.2..v1.3", SessionOptions()):
     ...
 ```
 

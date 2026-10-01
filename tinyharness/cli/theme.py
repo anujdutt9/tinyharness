@@ -184,24 +184,24 @@ THEME = Theme(
 # -- permission modes -----------------------------------------------------------
 
 MODE_STYLE = {
-    PermissionMode.DEFAULT: MUTED,
-    PermissionMode.ACCEPT_EDITS: BRAND,
+    PermissionMode.ASK: MUTED,
+    PermissionMode.DEFAULT: BRAND,
     PermissionMode.PLAN: BRAND_2,
     PermissionMode.AUTO: WARNING,
     PermissionMode.BYPASS: ERROR,
 }
 
 MODE_LABEL = {
+    PermissionMode.ASK: "ask",
     PermissionMode.DEFAULT: "default",
-    PermissionMode.ACCEPT_EDITS: "accept edits",
     PermissionMode.PLAN: "plan",
     PermissionMode.AUTO: "auto",
     PermissionMode.BYPASS: "bypass",
 }
 
 MODE_HINT = {
-    PermissionMode.DEFAULT: "asks before edits",
-    PermissionMode.ACCEPT_EDITS: "edits in this project run without asking",
+    PermissionMode.ASK: "asks before every edit and command",
+    PermissionMode.DEFAULT: "works in this project and the sandbox; asks before anything else",
     PermissionMode.PLAN: "read-only: looks, doesn't touch",
     PermissionMode.AUTO: "works on its own; asks before risky actions",
     PermissionMode.BYPASS: "never asks",

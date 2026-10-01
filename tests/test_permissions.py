@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from tinyharness.hooks import Hook, HookRunner
@@ -27,7 +29,7 @@ REMEMBER = Decision(True, "ok", "user", remember=True)
 NO = Decision(False, "no", "user")
 
 
-def gate(tmp_path, mode=PermissionMode.DEFAULT, **kwargs) -> PermissionGate:
+def gate(tmp_path, mode=PermissionMode.ASK, **kwargs) -> PermissionGate:
     return PermissionGate(workspace=Workspace(tmp_path), mode=mode, **kwargs)
 
 
@@ -69,7 +71,7 @@ async def test_no_callback_means_deny(tmp_path):
 
 
 async def test_accept_edits_only_inside_the_project(tmp_path):
-    g = gate(tmp_path, PermissionMode.ACCEPT_EDITS)
+    g = gate(tmp_path, PermissionMode.DEFAULT)
     assert (await g.check(WRITE, {}, "in.txt")).source == "mode"
     assert (await g.check(WRITE, {}, "/tmp/elsewhere")).source == "prompt"
 
@@ -84,13 +86,13 @@ async def test_plan_blocks_writes(tmp_path):
 
 
 def test_shift_tab_cycle():
-    mode = PermissionMode.DEFAULT
+    mode = PermissionMode.ASK
     seen = [mode := mode.next() for _ in range(4)]
     assert seen == [
-        PermissionMode.ACCEPT_EDITS,
+        PermissionMode.DEFAULT,
         PermissionMode.AUTO,
         PermissionMode.PLAN,
-        PermissionMode.DEFAULT,
+        PermissionMode.ASK,
     ]
 
 
@@ -101,7 +103,7 @@ async def test_remembering_an_edit_switches_to_accept_edits(tmp_path):
     user = User(REMEMBER)
     g = gate(tmp_path, callback=user)
     await g.check(WRITE, {}, "src/a.py")
-    assert g.mode == PermissionMode.ACCEPT_EDITS
+    assert g.mode == PermissionMode.DEFAULT
     assert (await g.check(WRITE, {}, "tests/b.py")).allow  # different dir, same tool family
     assert len(user.requests) == 1
 
@@ -115,7 +117,7 @@ async def test_remembering_an_outside_path_covers_that_directory(tmp_path_factor
     assert user.requests[0].remember_label == f"allow reading in {outside}/ for this session"
     d = await g.check(READ, {}, str(outside / "b.pdf"))
     assert d.allow and d.source == "rule"
-    assert g.mode == PermissionMode.DEFAULT  # outside paths never flip the mode
+    assert g.mode == PermissionMode.ASK  # outside paths never flip the mode
 
 
 async def test_plain_yes_is_not_remembered(tmp_path):
@@ -332,11 +334,11 @@ async def test_risky_changes_in_auto_mode_are_judged_one_at_a_time(tmp_path):
     ("session", "limit", "runs_in"),
     [
         ("auto", None, "auto"),  # no limit: the session's mode
-        ("auto", "acceptEdits", "acceptEdits"),  # a limit only ever makes it stricter...
-        ("default", "acceptEdits", "default"),  # ...never more permissive than the session
-        ("default", "bypassPermissions", "default"),
+        ("auto", "default", "default"),  # a limit only ever makes it stricter...
+        ("ask", "default", "ask"),  # ...never more permissive than the session
+        ("ask", "bypassPermissions", "ask"),
         ("plan", None, "plan"),
-        ("bypassPermissions", "acceptEdits", "acceptEdits"),
+        ("bypassPermissions", "default", "default"),
     ],
 )
 def test_a_subagent_runs_in_the_stricter_of_the_session_and_its_limit(tmp_path, session, limit, runs_in):
@@ -347,13 +349,13 @@ def test_a_subagent_runs_in_the_stricter_of_the_session_and_its_limit(tmp_path, 
 
 def test_switching_mode_reaches_subagents_already_running(tmp_path):
     """Switching to auto mid-run used to leave running subagents asking as before."""
-    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.DEFAULT)
-    free, capped = gate.child("general-purpose", None), gate.child("reviewer", PermissionMode.ACCEPT_EDITS)
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.ASK)
+    free, capped = gate.child("general-purpose", None), gate.child("reviewer", PermissionMode.DEFAULT)
     gate.set_mode(PermissionMode.AUTO)
     assert (gate.mode, free.mode, capped.mode) == (
         PermissionMode.AUTO,
         PermissionMode.AUTO,
-        PermissionMode.ACCEPT_EDITS,
+        PermissionMode.DEFAULT,
     )
 
 
@@ -363,12 +365,10 @@ async def test_allowing_all_edits_at_a_prompt_reaches_subagents_too(tmp_path):
     async def yes_dont_ask_again(request):
         return Decision(True, "ok", "user", remember=True)
 
-    gate = PermissionGate(
-        workspace=Workspace(tmp_path), mode=PermissionMode.DEFAULT, callback=yes_dont_ask_again
-    )
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.ASK, callback=yes_dont_ask_again)
     child = gate.child("general-purpose", None)
     await gate.check(EditTool(), {}, "src/app.py")  # "allow all edits in this project"
-    assert gate.mode == child.mode == PermissionMode.ACCEPT_EDITS
+    assert gate.mode == child.mode == PermissionMode.DEFAULT
 
 
 async def test_a_subagents_prompt_says_whose_it_is(tmp_path):
@@ -380,7 +380,7 @@ async def test_a_subagents_prompt_says_whose_it_is(tmp_path):
         asked.append(request)
         return Decision(True, "ok", "user")
 
-    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.DEFAULT, callback=user)
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.ASK, callback=user)
     await gate.child("general-purpose", None).check(EditTool(), {}, "src/app.py")
     assert asked[0].agent == "general-purpose"
 
@@ -435,3 +435,28 @@ async def test_other_tools_still_get_their_own_answer(tmp_path_factory):
     await g.check(READ, {}, str(outside / "a.txt"))
     await g.check(WRITE, {}, str(outside / "b.txt"))  # reading approval doesn't cover writing
     assert len(user.requests) == 2
+
+
+async def test_default_mode_works_inside_the_project_and_asks_beyond_it(tmp_path):
+    """The default mode doesn't ask for routine work: edits in the project and sandboxed
+    commands run. Leaving the boundary (another folder) still asks. `ask` is the strict mode,
+    and the earlier name `acceptEdits` means default."""
+    from tinyharness.tools.write import WriteTool
+
+    asked = []
+
+    async def user(request):
+        asked.append(request.tool)
+        return Decision(False, "no", "user")
+
+    inside = await gate(tmp_path, PermissionMode.DEFAULT, callback=user).check(
+        WriteTool(), {"path": "a.py", "content": "x"}, target_path=tmp_path / "a.py"
+    )
+    outside = await gate(tmp_path, PermissionMode.DEFAULT, callback=user).check(
+        WriteTool(), {"path": "/elsewhere/a.py", "content": "x"}, target_path=Path("/elsewhere/a.py")
+    )
+    strict = await gate(tmp_path, PermissionMode.ASK, callback=user).check(
+        WriteTool(), {"path": "a.py", "content": "x"}, target_path=tmp_path / "a.py"
+    )
+    assert inside.allow and not outside.allow and not strict.allow and asked == ["Write", "Write"]
+    assert PermissionMode.parse("acceptEdits") == PermissionMode.DEFAULT

@@ -81,8 +81,8 @@ _SAFE_WHILE_RUNNING = {
 }  # fmt: skip
 
 _MODE_ICON = {
-    PermissionMode.DEFAULT: "○",
-    PermissionMode.ACCEPT_EDITS: "⏵⏵",
+    PermissionMode.ASK: "○",
+    PermissionMode.DEFAULT: "⏵⏵",
     PermissionMode.PLAN: "⏸",
     PermissionMode.AUTO: "◑",
     PermissionMode.BYPASS: "⚠",

@@ -60,7 +60,7 @@ In the session, type `/` to autocomplete commands. The ones you'll use most:
 | `/key [provider]` | add or replace a provider's API key |
 
 Useful flags: `-c` (continue the latest conversation), `-r` (pick one), `-p "prompt"`
-(run one prompt and exit), `--model provider:model`, `--mode acceptEdits`, `--cwd <dir>`.
+(run one prompt and exit), `--model provider:model`, `--mode ask`, `--cwd <dir>`.
 
 ## Use it from Python
 
@@ -74,7 +74,7 @@ from tinyharness import AssistantText, Session, SessionOptions, ToolUse
 
 
 async def main():
-    async with Session(SessionOptions(permission_mode="acceptEdits")) as session:
+    async with Session(SessionOptions()) as session:
         async for event in session.run("write fib.py with a fib(n) function"):
             match event:
                 case AssistantText(text=text):
@@ -100,7 +100,7 @@ hooks, skills, and subagents on different models.
 | **Agent loop** | Streaming, parallel read-only tools, argument validation and repair, recovery from cut-off and empty replies, retries with backoff |
 | **Tools** | Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash`. Built-in extensions you turn on: `web` (WebSearch, WebFetch), `pdf`, `open`, `todo`, `agents` (Agent, Team) |
 | **Extensions** | One Python file with `setup(th)` adds tools, prompt sections, slash commands and event handlers ([docs/extension-api.md](docs/extension-api.md)); `/extensions on|off` |
-| **Permissions** | Reads never ask, edits ask with a diff; modes `default`, `acceptEdits`, `plan`, `auto` (an LLM classifier) and `bypassPermissions`; persistent allow/deny rules |
+| **Permissions** | Routine work in the project and the sandbox doesn't ask; anything beyond it asks, with a diff for edits. Modes `default`, `auto` (an LLM classifier for unclear cases), `plan`, `ask` (every edit and command) and `bypassPermissions`; persistent allow/deny rules |
 | **Sandbox** | Seatbelt on macOS: commands write only inside the project, can't read credential files, and reach only an allowlist of hosts (package registries, GitHub, CDNs) through a local proxy; `/sandbox` shows it |
 | **Context** | Cap oversized messages, stub old tool output, then summarize, without rebuilding the prompt cache every turn |
 | **Subagents and teams** | Isolated contexts on any model; `Team` runs a dependency graph of tasks, up to 4 teammates at once |
