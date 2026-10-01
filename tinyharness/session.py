@@ -140,7 +140,7 @@ class SessionOptions:
     allowed_tools: list[str] | None = None
     agents: list[AgentSpec] = field(default_factory=list)  # more subagents; same name replaces one
     extra_system: str = ""
-    max_steps: int = 50
+    max_steps: int = 200
 
     enable_skills: bool = True
     enable_subagents: bool = True  # load agents from files (built-in, ~/.tinyharness, project)

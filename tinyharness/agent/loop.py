@@ -108,15 +108,6 @@ _CHANGE_APPROACH = {
     "Bash": "Read the error and fix the command, or try a different command or tool.",
 }
 RETRY_IMAGE_SIDE = 1568  # px: what images shrink to after a provider rejects one (Anthropic's sweet spot)
-# Asked once a turn when it changed code and ran nothing since: finishing without checking
-# is the most common way agents fail (Anthropic's long-running harness post; LangChain's
-# pre-completion checklist). Docs and notes don't count as code.
-UNVERIFIED_NOTE = (
-    "[tinyharness] You changed {files} and haven't run anything since. Before you finish, run "
-    "what checks it (the tests for it, a build, the linter, or rendering a page and looking) if "
-    "there is something, and fix what fails. If nothing can check it, say so in your answer."
-)
-_NOT_CODE = (".md", ".txt", ".rst", ".csv", ".log")
 MAX_STOP_BLOCKS = 2  # a Stop hook can keep a turn going this many times
 # A reply ending in a tool call written as text that couldn't be read (seen live from Gemma 4:
 # a made-up tool, a command that didn't parse). Answered this many times per turn.
@@ -142,7 +133,7 @@ class LoopDeps:
     hooks: HookRunner | None = None
     allowed_tools: set[str] | None = None
     model: str | None = None  # override the client's default model (subagents)
-    max_steps: int = 50
+    max_steps: int = 200
     inbox: Callable[[], list[str]] | None = None  # messages that arrive mid-run (teammates)
     # Subagents running side by side share one: their calls that change things take turns,
     # so two never write at the same moment, while their model calls overlap freely.
@@ -187,8 +178,6 @@ async def run_agent_loop(
     stuck_once = False  # a reply got stuck this turn and the model was asked to carry on
     empty_replies = 0  # empty replies in a row
     failures = _Failures()
-    unverified: list[str] = []  # code files changed since the last command that could check them
-    asked_to_verify = False
     stop_blocks = 0
     unreadable_calls = 0
     for _ in range(deps.max_steps):
@@ -317,12 +306,6 @@ async def run_agent_loop(
             history.append(Message(role="user", content=CUT_OFF_NOTE))
             continue
         if not calls:
-            if unverified and not asked_to_verify and "Bash" in available:
-                asked_to_verify = True
-                note = UNVERIFIED_NOTE.format(files=", ".join(unverified[:5]))
-                deps.transcript.write("user", text=note)
-                history.append(Message(role="user", content=note))
-                continue
             stop = await _fire_hook(deps, "Stop", {})
             if stop and stop.get("decision") in ("block", "deny") and stop_blocks < MAX_STOP_BLOCKS:
                 stop_blocks += 1
@@ -381,8 +364,6 @@ async def run_agent_loop(
                 )
                 if after and after.get("reason"):
                     output += f"\n\n[hook] {after['reason']}"
-                if not is_error:
-                    _track_changes(unverified, item.tool.name, item.args)
                 output += failures.note(item.tool.name, output, is_error)
                 deps.transcript.write(
                     "tool_result", tool=item.tool.name, result=output[:TRANSCRIPT_RESULT_CHARS]
@@ -759,16 +740,6 @@ def _account(turn: _Turn, deps: LoopDeps) -> TokenUsage:
 
 async def _fire_hook(deps: LoopDeps, event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     return await deps.hooks.fire(event, payload) if deps.hooks is not None else None
-
-
-def _track_changes(unverified: list[str], tool: str, args: Any) -> None:
-    """Keep `unverified` as the code files changed since the last command that could check them."""
-    if tool == "Bash":
-        unverified.clear()
-    elif tool in ("Edit", "Write"):
-        path = str(getattr(args, "path", ""))
-        if path and not path.lower().endswith(_NOT_CODE) and path not in unverified:
-            unverified.append(path)
 
 
 def _config_key(deps: LoopDeps) -> dict[str, str]:

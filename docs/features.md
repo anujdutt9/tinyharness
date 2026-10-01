@@ -18,8 +18,7 @@ guarantees and why each exists):
   server's tool-call parser fails on them; malformed arguments are repaired.
 - Compaction starts from the provider's own token count and can summarize inside one
   long task; the summary keeps the tool calls, files changed and the todo list.
-- A model repeating a failing call is told to change approach, then stopped; one that
-  changed code and ran nothing since is asked to verify it before finishing.
+- A model repeating a failing call is told to change approach.
 - The session log records each turn's outcome, the provider's stop reason and, on
   OpenRouter, which upstream served the request.
 

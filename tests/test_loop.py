@@ -737,40 +737,19 @@ async def test_a_number_or_object_for_a_text_field_is_taken_as_text(tmp_path):
 # ---- finishing: checks before the turn ends ----
 
 
-async def test_changed_code_with_nothing_run_since_is_checked_once(tmp_path):
+async def test_a_turn_that_changed_code_ends_when_the_model_does(tmp_path):
+    """After any edit with no command run since, the turn was held open once to tell the
+    model "you haven't run anything": an extra model call on every such turn. The system
+    prompt already says to verify work."""
     from tinyharness.sandbox.policy import SandboxPolicy
     from tinyharness.tools.bash import BashTool
     from tinyharness.tools.write import WriteTool
 
     tools = [WriteTool(), BashTool(None, SandboxPolicy(write_roots=(tmp_path,)))]
-    llm = ScriptedLLM([[("Write", '{"path": "app.py", "content": "x = 1\\n"}')], "Done.", "Still done."])
+    llm = ScriptedLLM([[("Write", '{"path": "app.py", "content": "x = 1\\n"}')], "Done.", "never asked"])
     events, history = await run(tmp_path, llm, tools)
-    notes = [
-        m.content
-        for m in history.messages
-        if m.role == "user" and "haven't run anything" in (m.content or "")
-    ]
-    assert len(notes) == 1 and "app.py" in notes[0]
-    assert events[-1] == Done() and len(llm.requests) == 3
-
-
-async def test_docs_or_a_check_after_the_change_need_no_reminder(tmp_path):
-    from tinyharness.sandbox.policy import SandboxPolicy
-    from tinyharness.tools.bash import BashTool
-    from tinyharness.tools.write import WriteTool
-
-    tools = [WriteTool(), BashTool(None, SandboxPolicy(write_roots=(tmp_path,)))]
-    for turns in (
-        [[("Write", '{"path": "NOTES.md", "content": "hi"}')], "Done."],
-        [
-            [("Write", '{"path": "b.py", "content": "y = 2"}')],
-            [("Bash", '{"command": "python3 b.py"}')],
-            "Done.",
-        ],
-    ):
-        llm = ScriptedLLM(turns)
-        await run(tmp_path, llm, tools)
-        assert len(llm.requests) == len(turns)
+    assert events[-1] == Done() and len(llm.requests) == 2
+    assert not any("[tinyharness]" in (m.content or "") for m in history.messages if m.role == "user")
 
 
 async def test_a_stop_hook_can_keep_the_agent_going(tmp_path):

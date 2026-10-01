@@ -260,13 +260,12 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   pages by size and always says how to continue.
 - The system prompt states the OS (BSD tools on macOS), shell, Python command and git
   branch. Subagents get these and the project's AGENTS.md.
-- Finishing: once a turn, an agent that changed code and ran nothing since is asked to
-  check it. A Stop hook can hold the turn open (`command = "uv run pytest -q -x"`), and a
-  PostToolUse hook's reason reaches the model.
-- Teams: a teammate's answer is its last reply as kept; one that only answered a
-  teammate's message is asked for its report; TeamBoard waits for news instead of being
-  polled; a failed subagent hands back its last calls and words; the lead is told to check
-  a key claim before building on it.
+- Finishing: the turn ends when the model does (the system prompt asks it to verify its
+  work; an extra "you haven't run anything" round-trip after every edit was dropped), and
+  the main session's step limit is 200 (was 50). A Stop hook can hold the turn open
+  (`command = "uv run pytest -q -x"`), and a PostToolUse hook's reason reaches the model.
+- Teams: a teammate's answer is its last reply as kept; TeamBoard waits for news instead
+  of being polled; a failed subagent hands back its last calls and words.
 - The session log records how each turn ended (done, interrupted, or the error), the
   provider's stop reason, and OpenRouter's upstream route.
 - Earlier copies of a file are no longer rewritten as stale on every edit (that broke
