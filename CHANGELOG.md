@@ -198,6 +198,13 @@ First release.
   built the way a user would, awkward cases included; no unasked-for dependencies or
   renames; and give each subagent one job with a clear done condition.
 
+### Choosing a provider
+- With no provider or model named, a key set for this run (your shell, a `.env`, an IDE's
+  env file) wins over one only saved in `auth.json`: a stale saved Anthropic key used to
+  be picked over a fresh OpenRouter key, because Anthropic is first in the list.
+- `examples/06_subagent_models.py` uses the session's model for the second opinion unless
+  you pass another provider's model, so it runs on any one key.
+
 ### Tool-call format per model
 - How a model calls tools is measured once, not guessed: the first request to a new model
   offers it one tool. Native callers keep the API's tool interface; a model that writes

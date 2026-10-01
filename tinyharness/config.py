@@ -153,7 +153,11 @@ class Config(BaseModel):
         provider, model = self.parse_model(self.model) if self.model else (self.provider, "")
         auto = not provider
         if auto:
-            provider = next((n for n in self.providers if self.has_key(n)), next(iter(self.providers)))
+            # A key set for this run (the shell, a .env) says more about what you want now than
+            # one saved in auth.json long ago (seen: a stale saved key beating a fresh one).
+            with_key = [n for n in self.providers if self.has_key(n)]
+            fresh = [n for n in with_key if self.providers[n].api_key_env not in KEYS_FROM_AUTH]
+            provider = (fresh or with_key or list(self.providers))[0]
         self.provider = provider
         self.select(f"{provider}:{model}")
         self.auto_selected = auto
@@ -275,11 +279,17 @@ def read_auth(path: Path | None = None) -> dict[str, str]:
     return keys
 
 
+# Environment variables whose key came from auth.json rather than the shell or a .env.
+KEYS_FROM_AUTH: set[str] = set()
+
+
 def load_auth(providers: dict[str, Provider]) -> None:
     """Put auth.json's keys where providers read them. A key set in your shell wins."""
     for name, key in read_auth().items():
-        if (provider := providers.get(name)) is not None and provider.needs_key:
-            os.environ.setdefault(provider.api_key_env, key)
+        provider = providers.get(name)
+        if provider is not None and provider.needs_key and provider.api_key_env not in os.environ:
+            os.environ[provider.api_key_env] = key
+            KEYS_FROM_AUTH.add(provider.api_key_env)
 
 
 def save_key(provider: str, value: str, providers: dict[str, Provider]) -> Path:
