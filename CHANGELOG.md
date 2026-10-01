@@ -344,8 +344,8 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   names unique to their task (teammates overwrote each other's results) and never to make
   up data that's missing.
 - A tool failing the same way twice in a row (same tool, same kind of error) gets a note
-  telling the model not to repeat the call and what to try instead; at four, the turn
-  stops and says what kept failing (`RepeatedFailureError`; a teammate is restarted once).
+  telling the model not to repeat the call and what to try instead. The turn isn't
+  stopped for it (four unrelated failures used to end it); the step limit bounds a loop.
   Denials and rejections don't count. A model had made 11 failing edits in a row.
 - When a file changes (the agent edits or writes it, or a new Read shows it changed),
   earlier copies of it in the conversation become `[stale: …]` stubs, as they already did

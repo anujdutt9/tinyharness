@@ -49,7 +49,7 @@ from tinyharness.events import (
 from tinyharness.images import fit_image
 from tinyharness.llm.client import ContextOverflowError, ImageTooLargeError, ToolCallAccumulator
 from tinyharness.llm.textcalls import looks_like_a_call, recover_calls, repair_arguments
-from tinyharness.llm.types import LLMError, RepeatedFailureError, RunawayOutputError, StreamChunk
+from tinyharness.llm.types import LLMError, RunawayOutputError, StreamChunk
 from tinyharness.llm.usage import Usage
 from tinyharness.security import mask_secrets
 from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolOutput
@@ -99,10 +99,9 @@ STEP_LIMIT_NOTE = (
     "what is left unfinished."
 )
 STEP_LIMIT_RESULT = "(not run: the step limit was reached)"
-# A tool failing the same way again and again: the model is told to change approach after
-# NOTE_AT failures in a row, and the turn stops at STOP_AT (seen live: 11 failing edits).
+# A tool failing the same way again: the model is told to change approach after NOTE_AT
+# failures in a row. The turn isn't stopped for it; the step limit bounds a loop.
 REPEAT_NOTE_AT = 2
-REPEAT_STOP_AT = 4
 _CHANGE_APPROACH = {
     "Edit": "Read the file again and copy the lines to replace exactly as they are now (your "
     "earlier edits changed it), or edit a smaller block, or rewrite the file with Write.",
@@ -390,9 +389,6 @@ async def run_agent_loop(
 
         approved = batch.approved
         if not approved:
-            if failures.stuck:  # every call in the batch was rejected, the same way again
-                deps.transcript.write("stuck", reason="repeated tool failure", detail=failures.stuck)
-                raise RepeatedFailureError(failures.stuck)
             continue
 
         # 4. Run the approved calls. Read-only batches run concurrently.
@@ -436,9 +432,6 @@ async def run_agent_loop(
             for i, item in enumerate(approved):
                 if i in finished:
                     history.add_tool_result(item.call.id, *finished[i])
-        if failures.stuck:  # results are in the history first, so it stays valid
-            deps.transcript.write("stuck", reason="repeated tool failure", detail=failures.stuck)
-            raise RepeatedFailureError(failures.stuck)
 
     # Out of steps. One more reply, without running tools, so the work so far isn't lost:
     # a subagent's answer is its last text, and the caller sees nothing else.
@@ -483,7 +476,6 @@ class _Failures:
 
     def __init__(self) -> None:
         self.runs: dict[str, tuple[str, int]] = {}  # tool -> (kind of error, failures in a row)
-        self.stuck = ""  # why the turn must stop, once a run reaches REPEAT_STOP_AT
 
     def note(self, tool: str, output: str, is_error: bool) -> str:
         """Count this result; what to add to it for the model (usually nothing)."""
@@ -496,12 +488,6 @@ class _Failures:
         previous, count = self.runs.get(tool, ("", 0))
         count = count + 1 if previous == kind else 1
         self.runs[tool] = (kind, count)
-        if count >= REPEAT_STOP_AT:
-            self.stuck = (
-                f"{tool} failed {count} times in a row with the same error ({kind}), so the turn "
-                "was stopped. Tell the agent what to do differently, or try a stronger model."
-            )
-            return ""
         if count >= REPEAT_NOTE_AT:
             hint = _CHANGE_APPROACH.get(
                 tool, "Read the error, then change the arguments or use another tool."

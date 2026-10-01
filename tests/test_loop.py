@@ -22,7 +22,7 @@ from tinyharness.events import (
     ToolsDispatched,
     ToolUse,
 )
-from tinyharness.llm.types import LLMError, RepeatedFailureError, RunawayOutputError, StreamChunk
+from tinyharness.llm.types import LLMError, RunawayOutputError, StreamChunk
 from tinyharness.paths import state_dir
 from tinyharness.permissions import Decision, PermissionGate, PermissionMode
 from tinyharness.tools.base import Tool, ToolError, ToolInput
@@ -539,25 +539,14 @@ async def test_a_tool_failing_the_same_way_twice_gets_a_change_approach_note(tmp
     assert events[-1] == Done()
 
 
-async def test_the_turn_stops_when_a_tool_keeps_failing_the_same_way(tmp_path):
+async def test_a_tool_that_keeps_failing_doesnt_end_the_turn(tmp_path):
+    """Four failures used to stop the turn, even four unrelated "old_string not found"
+    errors on different files. The note stays; the model decides what to do next."""
     call = [("Edit", '{"seconds": 0}')]
-    with pytest.raises(RepeatedFailureError, match="Edit failed 4 times in a row"):
-        await run(tmp_path, ScriptedLLM([call] * 6), [failing_tool()])
-
-
-async def test_a_success_in_between_resets_the_count(tmp_path):
-    flaky = failing_tool()
-    ok = sleep_tool("Edit2", read_only=False)
-    fail, succeed = [("Edit", '{"seconds": 0}')], [("Edit2", '{"seconds": 0}')]
-    # Another tool succeeding doesn't reset Edit's count, so this still stops at 4 Edit failures...
-    with pytest.raises(RepeatedFailureError):
-        await run(tmp_path, ScriptedLLM([fail, succeed, fail, succeed, fail, succeed, fail]), [flaky, ok])
-
-
-async def test_invalid_arguments_repeated_count_too(tmp_path):
-    bad = [("Edit", '{"seconds": "not a number"}')]
-    with pytest.raises(RepeatedFailureError, match="invalid arguments"):
-        await run(tmp_path, ScriptedLLM([bad] * 5), [failing_tool()])
+    events, _ = await run(tmp_path, ScriptedLLM([call] * 5 + ["changed approach"]), [failing_tool()])
+    results = [e for e in events if isinstance(e, ToolResult)]
+    assert len(results) == 5 and all("failed" in r.output for r in results[1:])
+    assert events[-1] == Done()
 
 
 async def test_an_edit_keeps_earlier_reads_and_shows_the_file_as_it_is_now(tmp_path):
