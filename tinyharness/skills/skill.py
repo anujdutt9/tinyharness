@@ -79,7 +79,13 @@ class SkillRegistry:
 
 def build_skill_prompt(skill: Skill, args: str = "") -> str:
     """The instruction sent to the model when a skill is invoked."""
-    parts = [f"# Skill: {skill.name}\n{skill.description}\n\nFollow these instructions:\n\n{skill.body}"]
+    # Said outright: a model has read a loaded skill as the skill's help page, waited for it
+    # to "run", and loaded it again. Loading does no work; the model does the work.
+    parts = [
+        f"# Skill: {skill.name}\n{skill.description}\n\n"
+        "Skill loaded. Nothing has been done yet: these are instructions for you. Carry them "
+        f"out now with your own tools.\n\n{skill.body}"
+    ]
     if skill.directory is not None:
         parts.append(
             f"(Bundled files for this skill live in `{skill.directory}`. Read each one only "

@@ -10,7 +10,7 @@ from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
 
 class SkillInput(ToolInput):
     name: str = Field(description="Skill name from the list above")
-    args: str = Field(default="", description="Optional arguments for the skill")
+    args: str = Field(default="", description="Optional: what you'll use it for, shown with the instructions")
 
 
 class SkillTool(Tool[SkillInput]):
@@ -29,7 +29,8 @@ class SkillTool(Tool[SkillInput]):
         self.skills = skills
         listing = "\n".join(f"- {s.name}: {_brief(s.description)}" for s in skills.list()) or "(none)"
         self.description = (
-            "Load a skill: expert instructions for a kind of task, which you then follow. Before "
+            "Load a skill: expert instructions for a kind of task. Loading returns the instructions; "
+            "it does no work itself, so you then follow them with your other tools. Before "
             "specialized work (designing a page or interface, a slide deck, a document, a review), "
             "check this list and load the skill that matches; it beats improvising. Load it again "
             "in each subagent that needs it.\n\n"
