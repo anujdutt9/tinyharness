@@ -47,6 +47,7 @@ First release.
 - The input box grows only by the `/` menu entries it shows, not a fixed 6 rows.
 - `/btw <question>`: a side question answered from the conversation so far, without
   tools, even while the agent works; neither question nor answer joins the conversation.
+  The answer shows above the input box until Esc closes it; `/output` prints it.
   It reuses the agent's cached prefix (one short call). SDK: `Session.aside()`.
 - After each turn the empty input box suggests your likely next message (Tab takes it), as
   Claude Code does: one short call per turn, mostly cache reads. `prompt_suggestions =

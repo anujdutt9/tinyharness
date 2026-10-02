@@ -22,6 +22,7 @@ import signal
 import subprocess
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import DynamicStyle, Style, merge_styles
 from prompt_toolkit.utils import get_cwidth
-from rich.console import Console
+from rich.console import Console, RenderableType
 from rich.markup import escape
 from rich.padding import Padding
 from rich.panel import Panel
@@ -155,6 +156,14 @@ def is_command(line: str) -> bool:
     return bool(_COMMAND.match(line))
 
 
+@dataclass
+class Aside:
+    """A /btw question, and its answer once it arrives (None until then)."""
+
+    question: str
+    answer: str | None = None
+
+
 class _CompactPrompt(PromptSession[str]):
     """The input box, which stays up while the agent works.
 
@@ -218,7 +227,8 @@ class Repl:
         self._sending_now = False  # Esc stopped the turn to send the waiting messages
         self.suggestion = ""  # the likely next message, shown in the empty input box (Tab takes it)
         self._suggesting: asyncio.Task[None] | None = None
-        self._asides: set[asyncio.Task[None]] = set()  # /btw questions being answered
+        self.aside: Aside | None = None  # the /btw answer shown above the input box (Esc closes it)
+        self._answering: asyncio.Task[None] | None = None
 
     # -- input ----------------------------------------------------------------
 
@@ -295,8 +305,16 @@ class Repl:
                 buffer.apply_completion(buffer.complete_state.current_completion)
             buffer.validate_and_handle()
 
+        @keys.add("escape", filter=Condition(lambda: self.aside is not None))
+        def _close_aside(event: KeyPressEvent) -> None:
+            """Esc closes a /btw answer first (a second Esc then sends waiting messages)."""
+            self.close_aside()
+
         @keys.add(
-            "escape", filter=Condition(lambda: self.turn_running and bool(self.session.pending_steering))
+            "escape",
+            filter=Condition(
+                lambda: self.aside is None and self.turn_running and bool(self.session.pending_steering)
+            ),
         )
         def _send_now(event: KeyPressEvent) -> None:
             """Stop the agent's current step; the waiting messages go to it at once."""
@@ -380,6 +398,9 @@ class Repl:
             used = sum(part.count("\n") + 1 for part in parts if part)
             # Leave room for the input box and toolbar below (about 8 rows).
             parts.append(self._expansion_ansi(size.columns, max(size.rows - used - 8, 6)))
+        if self.aside is not None:
+            used = sum(part.count("\n") + 1 for part in parts if part)
+            parts.append(self._aside_ansi(self.aside, size.columns, max(size.rows - used - 8, 6)))
         return "\n".join(part for part in parts if part)
 
     def _has_expansion(self) -> bool:
@@ -449,30 +470,76 @@ class Repl:
     # -- side calls -------------------------------------------------------------
 
     def ask_aside(self, question: str) -> None:
-        """/btw: answered in the background, so the input box and a running turn carry on."""
+        """/btw: answered in the background, shown above the input box until Esc, so the
+        input box and a running turn carry on and nothing is left in the scrollback."""
+        self.close_aside()
+        aside = Aside(question)
+        if self._prompt is not None:
+            self.aside = aside
+        else:  # no input box to show it above: print it when it comes
+            self.console.print(Text("  ⎿ answering on the side…", style="subtle"))
 
         async def answer() -> None:
             try:
-                text = await self.session.aside(question)
+                aside.answer = await self.session.aside(question)
             except Exception as e:
+                if self.aside is aside:
+                    self.aside = None
                 report_error(self.console, e)
                 return
-            self.console.print(
-                Panel(
-                    render_markdown(text),
-                    title=Text(f"btw: {ellipsize(' '.join(question.split()), 60)}", style="bold"),
-                    title_align="left",
-                    subtitle=Text("not added to the conversation", style="subtle"),
-                    subtitle_align="right",
-                    border_style="subtle",
-                    padding=(0, 1),
-                )
-            )
+            if self._prompt is None:
+                self.console.print(self._aside_panel(aside, render_markdown(aside.answer), "not kept"))
+            elif self._prompt.app.is_running:
+                self._prompt.app.invalidate()
 
-        self.console.print(Text("  ⎿ answering on the side…", style="subtle"))
-        task = asyncio.create_task(answer())
-        self._asides.add(task)
-        task.add_done_callback(self._asides.discard)
+        self._answering = asyncio.create_task(answer())
+
+    def close_aside(self) -> None:
+        """Esc, or the next message: the /btw answer goes, unanswered or not."""
+        self.aside = None
+        if self._answering is not None and not self._answering.done():
+            self._answering.cancel()
+        self._answering = None
+
+    def show_aside(self) -> bool:
+        """/output while a /btw answer is open: print it in full, and close it."""
+        aside = self.aside
+        if aside is None or aside.answer is None:
+            return False
+        self.console.print(self._aside_panel(aside, render_markdown(aside.answer), "not kept"))
+        self.close_aside()
+        return True
+
+    def _aside_panel(self, aside: Aside, body: RenderableType, note: str) -> Panel:
+        return Panel(
+            body,
+            title=Text(f"btw: {ellipsize(' '.join(aside.question.split()), 60)}", style="bold"),
+            title_align="left",
+            subtitle=Text(note, style="subtle"),
+            subtitle_align="right",
+            border_style="subtle",
+            padding=(0, 1),
+        )
+
+    def _aside_ansi(self, aside: Aside, width: int, max_lines: int) -> str:
+        """The /btw panel above the input box, fitted to `max_lines` (its start kept)."""
+        if aside.answer is None:
+            body: RenderableType = Text("answering…", style="subtle")
+            note = "esc to cancel"
+        else:
+            with self.console.capture() as captured:
+                self.console.print(render_markdown(aside.answer), width=width - 4)
+            lines: list[Text] = list(Text.from_ansi(captured.get().rstrip("\n")).split("\n"))
+            room = max(max_lines - 2, 3)  # the panel's border takes two rows
+            if len(lines) > room:
+                lines = [*lines[: room - 1], Text(f"… {len(lines) - room + 1} more lines", style="subtle")]
+                note = "esc to close · /output prints it all"
+            else:
+                note = "esc to close · not added to the conversation"
+            body = Text("\n").join(lines)
+        with self.console.capture() as captured:
+            self.console.print(self._aside_panel(aside, body, note), width=width, highlight=False)
+        return without_links(captured.get().rstrip("\n"))
 
     def _suggest(self) -> None:
         """Once a turn ends: guess the next message, to show in the empty input box."""
@@ -572,14 +639,15 @@ class Repl:
                 self._turn.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._turn
-            for side in [self._suggesting, *self._asides]:
-                if side is not None:
-                    side.cancel()
+            self.close_aside()
+            self._forget_suggestion()
         self.console.print(Text("\n  bye 👋\n", style="muted"))
 
     async def handle(self, line: str) -> None:
         if not line.startswith("/btw"):
             self._forget_suggestion()
+            if not line.startswith("/output"):
+                self.close_aside()
         if self.turn_running:
             await self._while_running(line)
             return

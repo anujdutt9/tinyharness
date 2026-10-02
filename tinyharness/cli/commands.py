@@ -496,11 +496,12 @@ async def theme(repl: Repl, arg: str) -> None:
 
 @command(
     "/output",
-    "print the last tool call's full output, or a running subagent's calls (ctrl+o shows it above the input)",
+    "print the last tool call's full output, a running subagent's calls, or an open /btw answer",
     group="Session",
 )
 def output(repl: Repl, arg: str) -> None:
-    repl.show_last_output()
+    if not repl.show_aside():
+        repl.show_last_output()
 
 
 @command("/thinking", "show or hide the model's reasoning (also ctrl+t)", group="Model", usage="[on|off]")

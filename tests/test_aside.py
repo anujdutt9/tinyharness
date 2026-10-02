@@ -1,7 +1,10 @@
 """Side calls that stay out of the conversation: /btw questions and the next-message
 suggestion shown in the input box after a turn."""
 
+import asyncio
+import contextlib
 import io
+from types import SimpleNamespace
 
 import pytest
 from rich.console import Console
@@ -122,14 +125,62 @@ async def test_a_new_message_drops_the_suggestion(repl):
     assert repl.suggestion == ""
 
 
-async def test_btw_prints_the_answer_aside(repl):
+async def test_btw_without_an_input_box_prints_the_answer(repl):
     repl.llm.turns = ["Because it was simpler."]
     await repl.handle("/btw why that way?")
-    await next(iter(repl._asides))
+    await repl._answering
     out = repl.console.file.getvalue()
     assert "btw: why that way?" in out and "Because it was simpler." in out
-    assert "not added to the conversation" in out
     assert repl.session.history.messages == []
+
+
+@pytest.fixture
+def boxed(repl):
+    """The REPL as it runs: with the input box up, a /btw answer is shown above it."""
+    repl._prompt = SimpleNamespace(app=SimpleNamespace(is_running=False))
+    return repl
+
+
+async def test_btw_shows_above_the_input_box_until_esc(boxed):
+    boxed.llm.turns = ["Because it was simpler."]
+    await boxed.handle("/btw why that way?")
+    assert "answering…" in boxed._aside_ansi(boxed.aside, 80, 20)
+    await boxed._answering
+    shown = boxed._aside_ansi(boxed.aside, 80, 20)
+    assert "Because it was simpler." in shown and "esc to close" in shown
+    assert "Because" not in boxed.console.file.getvalue()  # nothing in the scrollback
+
+    boxed.close_aside()  # what Esc does
+    assert boxed.aside is None
+
+
+async def test_the_next_message_closes_the_answer_and_output_prints_it(boxed):
+    boxed.llm.turns = ["one", "two"]
+    await boxed.handle("/btw first?")
+    await boxed._answering
+    await boxed.handle("/cwd")
+    assert boxed.aside is None
+
+    await boxed.handle("/btw second?")
+    await boxed._answering
+    await boxed.handle("/output")
+    assert "two" in boxed.console.file.getvalue() and boxed.aside is None
+
+
+async def test_closing_an_unanswered_question_cancels_it(boxed):
+    boxed.llm.turns = ["slow"]
+    await boxed.handle("/btw anything?")
+    task = boxed._answering
+    boxed.close_aside()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_a_long_answer_is_cut_to_fit(boxed):
+    from tinyharness.cli.repl import Aside
+
+    shown = boxed._aside_ansi(Aside("q", "\n\n".join(f"line {i}" for i in range(40))), 80, 12)
+    assert shown.count("\n") < 12 and "more lines" in shown and "/output" in shown
 
 
 async def test_a_finished_turn_brings_a_suggestion(repl):
@@ -144,3 +195,36 @@ async def test_suggestions_can_be_turned_off(repl):
     repl.llm.turns = ["Done."]
     await repl._turn_in_background(repl.session.run("fix it"))
     assert repl._suggesting is None and len(repl.llm.requests) == 1
+
+
+async def test_esc_closes_the_answer_in_the_running_input_box(tmp_path):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    session, _ = scripted(tmp_path, ["Because it was simpler."])
+    console = Console(file=io.StringIO(), width=100, theme=THEME)
+    repl = Repl(session, console, Renderer(console))
+    with create_pipe_input() as keys, create_app_session(input=keys, output=DummyOutput()):
+        loop = asyncio.create_task(repl.loop())
+        try:
+            await asyncio.sleep(0.3)
+            keys.send_text("/btw why that way?\r")
+            for _ in range(30):
+                if repl.aside is not None and repl.aside.answer:
+                    break
+                await asyncio.sleep(0.1)
+            assert "Because it was simpler." in repl._live()
+            keys.send_text("\x1b")
+            for _ in range(30):
+                if repl.aside is None:
+                    break
+                await asyncio.sleep(0.1)
+            assert repl.aside is None and "Because" not in repl._live()
+            assert "Because" not in console.file.getvalue()
+        finally:
+            repl.running = False
+            keys.send_text("\x04")
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(loop, 3)
+    session.close()
