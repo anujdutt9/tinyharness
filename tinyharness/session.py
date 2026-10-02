@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import shutil
 import time
 import uuid
@@ -39,7 +40,7 @@ from tinyharness.agent.sessionlog import (
     replay,
 )
 from tinyharness.config import Config, dotenv_paths, load_auth, load_config, load_dotenv_files
-from tinyharness.events import Compacted, Done, Event, ToolResult, ToolUse
+from tinyharness.events import Compacted, Done, Event, SkillLoaded, ToolResult, ToolUse
 from tinyharness.ext import Command as ExtCommand
 from tinyharness.ext import Extension, LoadError, NeedsConsent, RunResult, load_extensions
 from tinyharness.hooks import Hook, HookRunner, load_hooks
@@ -66,7 +67,7 @@ from tinyharness.plugins import load_plugins
 from tinyharness.prompts import load_prompt
 from tinyharness.sandbox import Sandbox, SandboxPolicy, detect_sandbox
 from tinyharness.sandbox.proxy import AllowlistProxy
-from tinyharness.skills import SkillRegistry, build_skill_prompt, load_skills, skills_section
+from tinyharness.skills import Skill, SkillRegistry, build_skill_prompt, load_skills, skills_section
 from tinyharness.subagents import AgentSpec, load_agents
 from tinyharness.subagents.runner import run_subagent
 from tinyharness.tools.base import Tool, ToolContext, ToolError, file_version
@@ -707,7 +708,49 @@ class Session:
 
     async def run(self, prompt: str, images: Sequence[Image] = ()) -> AsyncGenerator[Event, None]:
         """Send a message and stream what happens. `images` are pictures for the model to
-        look at with it (screenshots, say): see `tinyharness.tools.read.load_image`."""
+        look at with it (screenshots, say): see `tinyharness.tools.read.load_image`.
+
+        A message with an installed skill's `/name` anywhere in it loads that skill with it,
+        unless it's already in the conversation: asked for that way, it shouldn't depend on
+        the model choosing to read the SKILL.md. A bare name doesn't count ("don't use the
+        claude-design-skill" names it too); the model sees those in the skills list."""
+        named = self.skills_named(prompt)
+        if named:
+            prompt = "\n\n".join([*(build_skill_prompt(s) for s in named), f"User message: {prompt}"])
+        for skill in named:
+            yield SkillLoaded(skill.name, count_tokens(build_skill_prompt(skill)), "named")
+        async for event in self._turn(prompt, images):
+            yield event
+
+    def skills_named(self, prompt: str) -> list[Skill]:
+        """Installed skills `prompt` asks for as `/name` that the conversation doesn't hold yet
+        (not part of a path: `~/.tinyharness/skills/x/SKILL.md` doesn't ask for x)."""
+        return [
+            skill
+            for skill in self.skills.list()
+            if re.search(rf"(?<![\w/.~-])/{re.escape(skill.name)}(?![\w/-])", prompt)
+            and not self._skill_in_context(skill)
+        ]
+
+    def _skill_in_context(self, skill: Skill) -> bool:
+        for m in self.history.messages:
+            if m.role == "user" and f"# Skill: {skill.name}\n" in (m.content or ""):
+                return True
+            if skill.source is not None and any(
+                c.name == "Read" and str(skill.source) in c.arguments for c in m.tool_calls
+            ):
+                return True
+        return False
+
+    def _skill_read(self, call: ToolUse) -> Skill | None:
+        """The skill whose SKILL.md this Read call reads, if any."""
+        path = call.args.get("path")
+        if call.name != "Read" or not isinstance(path, str) or not path.endswith("SKILL.md"):
+            return None
+        target = (self.workspace.root / Path(path).expanduser()).resolve()
+        return next((s for s in self.skills.list() if s.source and s.source.resolve() == target), None)
+
+    async def _turn(self, prompt: str, images: Sequence[Image] = ()) -> AsyncGenerator[Event, None]:
         if not self._started:
             await self.hooks.fire(
                 "SessionStart", {"session_id": self.id, "resumed": self.resume_report is not None}
@@ -732,13 +775,19 @@ class Session:
             max_steps=self.options.max_steps,
             inbox=self.take_steering,
         )
+        skill_reads: dict[str, Skill] = {}  # Read calls of a SKILL.md, by call id
         try:
             async for event in run_agent_loop(prompt, self.history, deps, images):
                 if isinstance(event, (ToolUse, ToolResult, Compacted, Done)):
                     self._sync()  # saved as it goes, so a crash loses at most one step
                 if isinstance(event, Done):
                     self.transcript.write("turn_end", reason=event.reason or "done")
+                if isinstance(event, ToolUse) and (skill := self._skill_read(event)):
+                    skill_reads[event.id] = skill
                 yield event
+                read = skill_reads.pop(event.id, None) if isinstance(event, ToolResult) else None
+                if read is not None and isinstance(event, ToolResult) and not event.is_error:
+                    yield SkillLoaded(read.name, count_tokens(event.output), "read")
         except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
             self.transcript.write("turn_end", reason="interrupted")
             raise
@@ -824,7 +873,9 @@ class Session:
         if skill is None:
             available = ", ".join(s.name for s in self.skills.list()) or "(none)"
             raise ValueError(f"unknown skill {name!r}; available: {available}")
-        async for event in self.run(build_skill_prompt(skill, args)):
+        prompt = build_skill_prompt(skill, args)
+        yield SkillLoaded(skill.name, count_tokens(prompt), "command")
+        async for event in self._turn(prompt):
             yield event
 
     def close(self) -> None:

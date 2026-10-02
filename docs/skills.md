@@ -57,8 +57,13 @@ Skills cost nothing until you use them:
 The system prompt lists each skill's name, the start of its description and where its
 SKILL.md is. When a task matches (a design skill for a web page, say), the model loads the
 skill by reading that file with Read; there is no separate tool. Subagents and teammates
-see the same list. You can also point it at one ("use the claude-design-skill") or run it
-yourself with `/<name>`. The list is about 80 tokens per skill, cached with the rest of
+see the same list. You can also run one yourself with `/<name>` at the start of a message,
+or write `/<name>` anywhere in it ("build the report and use /claude-design-skill for the
+layout"): either way the skill is sent with your message, so it doesn't depend on the
+model choosing to read it. A bare name ("use the claude-design-skill") is left to the
+model, since "don't use the claude-design-skill" names it too. The CLI shows each load,
+`⎿ skill claude-design-skill loaded · 9.2k tokens`, including when the model reads one
+itself. The list is about 80 tokens per skill, cached with the rest of
 the prompt. `skill_tool = false` in the config (or `--no-skill-tool`) leaves skills to
 `/<name>` only.
 

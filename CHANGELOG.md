@@ -45,6 +45,10 @@ First release.
   the session's total). Cost when the provider reports it (OpenRouter), its model list has
   prices, or `[pricing]` in the config sets them; otherwise tokens only, never a guess.
 - The input box grows only by the `/` menu entries it shows, not a fixed 6 rows.
+- Skills: `/<name>` anywhere in a message loads that skill with it (not only at the
+  start), unless it's already in the conversation. The CLI shows each load
+  (`⎿ skill x loaded · 9.2k tokens`), including the model reading a SKILL.md itself.
+  SDK: `SkillLoaded` events.
 - `/btw <question>`: a side question answered from the conversation so far, without
   tools, even while the agent works; neither question nor answer joins the conversation.
   The answer shows above the input box until Esc closes it; `/output` prints it.

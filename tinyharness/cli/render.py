@@ -66,6 +66,7 @@ from tinyharness.events import (
     ModelStuck,
     PermissionDecision,
     Reasoning,
+    SkillLoaded,
     SubagentUpdate,
     TodosUpdated,
     TokenUsage,
@@ -634,6 +635,13 @@ class Renderer:
                 self._finish_tool(result)
                 if not self._running:
                     self.wait(WAITING)
+            case SkillLoaded(name=name, tokens=n, how=how):
+                self._flush_text(everything=True)
+                why = {"command": "", "named": " · named in your message", "read": " · the model read it"}[
+                    how
+                ]
+                self._print(Text(f"  ⎿ skill {name} loaded · {tokens(n)} tokens{why}", style="subtle"))
+                self._last_was_row = False
             case TodosUpdated(todos=todos):
                 self._block(
                     Group(

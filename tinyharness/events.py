@@ -98,6 +98,17 @@ class ToolResult:
 
 
 @dataclass(frozen=True)
+class SkillLoaded:
+    """A skill's instructions joined the conversation: `how` is "command" (`/name` at the
+    start of the message), "named" (the message names it) or "read" (the model read its
+    SKILL.md). `tokens` is what it adds to the context."""
+
+    name: str
+    tokens: int
+    how: Literal["command", "named", "read"]
+
+
+@dataclass(frozen=True)
 class TodosUpdated:
     todos: list[dict[str, str]] = field(default_factory=list)
 
@@ -174,6 +185,7 @@ Event = (
     | PermissionDecision
     | ToolsDispatched
     | ToolResult
+    | SkillLoaded
     | TodosUpdated
     | Compacted
     | TokenUsage
