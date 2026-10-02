@@ -39,8 +39,10 @@ if TYPE_CHECKING:
 # Tools that start more agents: a subagent never gets them (one level of delegation).
 SPAWNING_TOOLS = frozenset({"Agent", "Team"})
 # The todo list is the main agent's plan, shown to the user; a subagent's TodoWrite would
-# replace it. A subagent's job is one piece of that plan, so it doesn't get one.
-MAIN_AGENT_ONLY = frozenset({"TodoWrite"})
+# replace it. A subagent's job is one piece of that plan, so it doesn't get one. Memory is
+# what the user and the main agent agree is worth keeping; a subagent sees too little of
+# the conversation to judge that.
+MAIN_AGENT_ONLY = frozenset({"TodoWrite", "Memory"})
 
 
 RECENT_CALLS = 3  # a subagent's latest tool calls, shown under it while it runs

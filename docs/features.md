@@ -33,7 +33,7 @@ Streaming, parallel dispatch of read-only tools, argument validation, Ctrl-C to 
 
 ## Tools
 
-Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash`; each one is a class plus a pydantic input model. The rest are built-in extensions, off until you turn them on (`[extensions] enabled = [...]` in config, or `/extensions on <name>`): `web` (`WebSearch`, `WebFetch`), `pdf` (`Pdf`), `open` (`Open`), `todo` (`TodoWrite`; `todo_list = true` also turns it on), `agents` (`Agent`, `Team`). Your own tools are extensions too: [extension-api.md](extension-api.md). `Read` shows the model images too, and image paths in your message (pasted screenshots) are attached to it. To look at a page it made, the model renders it with Playwright through Bash and Reads the PNG
+Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash`; each one is a class plus a pydantic input model. The rest are built-in extensions, off until you turn them on (`[extensions] enabled = [...]` in config, or `/extensions on <name>`): `web` (`WebSearch`, `WebFetch`), `pdf` (`Pdf`), `open` (`Open`), `todo` (`TodoWrite`; `todo_list = true` also turns it on), `agents` (`Agent`, `Team`), `memory` (`Memory`: notes about you and the project that every session starts with; `/memory` shows them). Your own tools are extensions too: [extension-api.md](extension-api.md). `Read` shows the model images too, and image paths in your message (pasted screenshots) are attached to it. To look at a page it made, the model renders it with Playwright through Bash and Reads the PNG
 
 ## Permissions
 

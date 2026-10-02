@@ -160,7 +160,7 @@ class PermissionGate:
                 return Decision(allow, verdict.get("reason", f"hook {verdict['decision']}"), "hook")
 
         site = f"{DOMAIN}{target_host.lower()}" if target_host else None
-        escape = tool.escapes(args) or self._protected(tool, path)
+        escape = tool.escapes(args) or self._protected(tool, path) or self._persists_outside(tool)
         match self.rules.check(tool.name, str(path) if path else site):
             case "deny":
                 return Decision(False, "blocked by a deny rule", "rule")
@@ -233,6 +233,13 @@ class PermissionGate:
                 return f"this changes {shown}, which can run code outside the sandbox (hooks, plugins or settings)"
         return None
 
+    def _persists_outside(self, tool: Tool[Any]) -> str | None:
+        """Why saving to memory needs the user now: outside content in the conversation
+        could be planting a note that every later session would read as context."""
+        if tool.persists and self.outside():
+            return "it saves a note that every later session reads"
+        return None
+
     async def _ask(self, request: PermissionRequest) -> Decision:
         if self.callback is None:
             return Decision(
@@ -247,6 +254,9 @@ class PermissionGate:
             return Decision(True, "bypassPermissions mode", "mode")
         if self.mode == PermissionMode.PLAN and not tool.read_only:
             return Decision(False, "plan mode blocks mutating tools", "mode")
+        # The agent's own notes; with outside content in the conversation, see _persists_outside.
+        if tool.persists and self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO):
+            return Decision(True, f"{self.mode.value}: the agent's memory", "mode")
         if tool.read_only and not tool.network and (path is None or trusted):
             return Decision(True, "read-only, inside the working directory", "mode")
         if self.mode == PermissionMode.DEFAULT and trusted:

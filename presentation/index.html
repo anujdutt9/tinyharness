@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>tinyharness — a readable agent harness</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   LAYOUT SYSTEM
+   Canvas: 1920x1080, scaled/letterboxed by deck-stage.js.
+   Type:   Space Grotesk   — headlines, big numbers (display)
+           IBM Plex Sans   — body copy, labels
+           IBM Plex Mono   — code, file paths, data/chart labels
+           (a dev-tool trio: geometric display + humanist body +
+           mono for anything that is "code" — chosen because the
+           subject is a CLI/SDK, not a default.)
+   Palette (3 + neutrals, oklch-derived teal):
+           --bg        near-black, cool            #101114
+           --bg-2      panel surface                #17181C
+           --bg-3      card surface                  #1C1F24
+           --line      hairline border          rgba(255,255,255,.09)
+           --text      off-white                     #E9EAED
+           --text-dim  secondary copy                 #9A9FA8
+           --text-faint tertiary / captions            #6B7078
+           --teal      primary accent (signal, CTA)     #4FD8B0
+           --teal-dim  accent wash (backgrounds)   rgba(79,216,176,.12)
+           --amber     secondary accent, used sparingly  #E8A33C
+           (amber reserved for callouts/warnings — never decorative)
+   Layouts used across the deck:
+     .cover     — title slide, centered, mono kicker, big Space Grotesk title
+     .section   — full-bleed teal-wash divider between acts, number + label
+     .content   — headline top-left + kicker, body area below (list / chart / diagram)
+     .split     — two-column: text left, chart/diagram right (or reverse)
+     .closing   — centered CTA, quickstart command, links
+   Footer: page number + section kicker, bottom-right, muted. No logo mark (none exists).
+   ============================================================ */
+
+:root{
+  --bg:#101114; --bg-2:#17181C; --bg-3:#1C1F24;
+  --line:rgba(255,255,255,.09); --line-strong:rgba(255,255,255,.16);
+  --text:#E9EAED; --text-dim:#9A9FA8; --text-faint:#6B7078;
+  --teal:#4FD8B0; --teal-dim:rgba(79,216,176,.12); --teal-line:rgba(79,216,176,.35);
+  --amber:#E8A33C; --amber-dim:rgba(232,163,60,.14);
+  --sp-xs:8px; --sp-sm:16px; --sp-md:24px; --sp-lg:40px; --sp-xl:64px; --sp-2xl:96px;
+  --radius:10px;
+  --deck-bg:#101114; --deck-letterbox:#07080a;
+}
+*{box-sizing:border-box; margin:0; padding:0;}
+html,body{background:#07080a;}
+body{font-family:'IBM Plex Sans',sans-serif; color:var(--text);}
+h1,h2,h3,.display{font-family:'Space Grotesk',sans-serif; font-weight:600; letter-spacing:-0.01em;}
+.mono{font-family:'IBM Plex Mono',monospace;}
+p{text-wrap:pretty;}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{animation-duration:.01ms!important; transition-duration:.01ms!important;}
+}
+
+deck-stage > section{
+  background:var(--bg);
+  padding:var(--sp-2xl) var(--sp-2xl) 88px var(--sp-2xl);
+  font-size:24px; line-height:1.5;
+}
+
+/* ---------- shared chrome ---------- */
+.kicker{
+  font-family:'IBM Plex Mono',monospace; font-size:18px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--teal); font-weight:500;
+}
+.slide-foot{
+  position:absolute; left:var(--sp-2xl); right:var(--sp-2xl); bottom:36px;
+  display:flex; justify-content:space-between; align-items:center;
+  font-family:'IBM Plex Mono',monospace; font-size:16px; color:var(--text-faint);
+  border-top:1px solid var(--line); padding-top:16px;
+}
+.slide-foot .brand{color:var(--text-dim);}
+
+/* ---------- cover ---------- */
+.cover{position:relative; height:100%;}
+deck-stage>section.cover[data-active]{display:flex; flex-direction:column; justify-content:center; align-items:flex-start;}
+.cover h1{font-size:108px; line-height:1.02; max-width:1200px;}
+.cover h1 .accent{color:var(--teal);}
+.cover .tagline{font-size:32px; color:var(--text-dim); margin-top:var(--sp-md); max-width:900px; font-weight:400;}
+.cover .meta-row{display:flex; gap:var(--sp-lg); margin-top:var(--sp-2xl);}
+.cover .meta-row .chip{
+  font-family:'IBM Plex Mono',monospace; font-size:17px; color:var(--text-dim);
+  border:1px solid var(--line); padding:9px 16px; border-radius:999px;
+}
+.cover .mascot{
+  position:absolute; right:106px; bottom:120px; height:620px; width:auto;
+  filter:drop-shadow(0 28px 48px rgba(0,0,0,.45));
+}
+.cover .mascot-glow{
+  position:absolute; right:-40px; bottom:-40px; width:760px; height:760px; border-radius:50%;
+  background:radial-gradient(circle, var(--teal-dim) 0%, rgba(79,216,176,0) 70%);
+}
+
+/* ---------- content layout ---------- */
+.content{position:relative; height:100%;}
+deck-stage>section.content[data-active]{display:flex; flex-direction:column;}
+.content .head{max-width:1500px; margin-bottom:var(--sp-xl); flex-shrink:0;}
+.content .head h2{font-size:56px; line-height:1.1; margin-top:14px;}
+.content .body{flex:1; min-height:0; display:flex; flex-direction:column; justify-content:center;}
+
+/* two-column split */
+.split{display:grid; grid-template-columns:720px 1fr; gap:var(--sp-xl); align-items:stretch;}
+.split.reverse{grid-template-columns:1fr 720px;}
+.split.reverse .text-col{order:2;}
+.split .text-col{display:flex; flex-direction:column; justify-content:flex-start; padding-top:4px;}
+.split .visual-col{display:flex; align-items:center; justify-content:center;}
+
+/* stat chips (used on slide 2) */
+.stat-row{display:flex; gap:var(--sp-lg); margin-top:var(--sp-xl);}
+.stat-card{
+  flex:1; background:var(--bg-2); border:1px solid var(--line); border-radius:var(--radius);
+  padding:var(--sp-lg) var(--sp-md); display:flex; flex-direction:column; gap:8px;
+}
+.stat-card .num{font-family:'Space Grotesk',sans-serif; font-size:64px; font-weight:700; color:var(--teal); line-height:1;}
+.stat-card .lbl{font-size:21px; color:var(--text-dim);}
+
+/* generic bullet list */
+ul.feature-list{list-style:none; display:flex; flex-direction:column; gap:var(--sp-md);}
+ul.feature-list li{display:flex; gap:18px; align-items:flex-start; font-size:27px; color:var(--text);}
+ul.feature-list li .bullet-dot{
+  flex-shrink:0; width:9px; height:9px; border-radius:50%; background:var(--teal); margin-top:13px;
+}
+ul.feature-list li b{color:var(--text); font-weight:600;}
+ul.feature-list li span.sub{color:var(--text-dim); font-size:23px;}
+ul.feature-list.numbered{counter-reset:step;}
+ul.feature-list.numbered li .bullet-dot{
+  width:34px; height:34px; border-radius:8px; background:var(--teal-dim); border:1px solid var(--teal-line);
+  color:var(--teal); font-family:'IBM Plex Mono',monospace; font-size:16px; font-weight:600;
+  display:flex; align-items:center; justify-content:center; margin-top:0;
+  counter-increment:step;
+}
+ul.feature-list.numbered li .bullet-dot::before{content:counter(step);}
+
+code.inline{
+  font-family:'IBM Plex Mono',monospace; background:var(--bg-3); border:1px solid var(--line);
+  padding:2px 9px; border-radius:6px; font-size:0.85em; color:var(--teal);
+}
+
+/* ---------- section divider ---------- */
+.section{
+  background:linear-gradient(180deg, var(--bg) 0%, #0d1f1a 140%);
+  position:relative; overflow:hidden; height:100%;
+}
+deck-stage>section.section[data-active]{display:flex; flex-direction:column; justify-content:center;}
+.section::after{
+  content:""; position:absolute; right:-120px; top:50%; width:720px; height:720px;
+  border-radius:50%; border:1px solid var(--teal-line); transform:translateY(-50%);
+}
+.section .num{font-family:'IBM Plex Mono',monospace; color:var(--teal); font-size:26px; letter-spacing:.1em;}
+.section h2{font-size:92px; margin-top:20px; max-width:1300px;}
+
+/* ---------- closing ---------- */
+.closing{height:100%;}
+deck-stage>section.closing[data-active]{display:flex; flex-direction:column; align-items:flex-start; justify-content:center;}
+.closing h2{font-size:80px; max-width:1300px;}
+.closing .cmd{
+  margin-top:var(--sp-xl); background:var(--bg-2); border:1px solid var(--line); border-radius:var(--radius);
+  padding:28px 32px; font-family:'IBM Plex Mono',monospace; font-size:26px; color:var(--teal);
+  display:flex; flex-direction:column; gap:10px;
+}
+.closing .cmd span{color:var(--text-faint);}
+.closing .links{display:flex; gap:var(--sp-lg); margin-top:var(--sp-xl); font-family:'IBM Plex Mono',monospace; font-size:20px;}
+.closing .links div{color:var(--text-dim); border:1px solid var(--line); padding:12px 20px; border-radius:999px;}
+
+/* =============== diagrams / charts =============== */
+
+/* architecture diagram */
+.arch{display:flex; flex-direction:column; gap:14px; width:100%; max-width:1540px;}
+.arch-row{display:flex; gap:14px; align-items:stretch;}
+.arch-box{
+  background:var(--bg-2); border:1px solid var(--line); border-radius:var(--radius);
+  padding:20px 22px; flex:1; display:flex; flex-direction:column; gap:4px;
+}
+.arch-box.emph{border-color:var(--teal-line); background:var(--teal-dim);}
+.arch-box .t{font-family:'IBM Plex Mono',monospace; font-size:19px; color:var(--text);}
+.arch-box.emph .t{color:var(--teal);}
+.arch-box .d{font-size:17px; color:var(--text-dim); line-height:1.35;}
+.arch-arrow{display:flex; align-items:center; justify-content:center; color:var(--text-faint); font-size:22px;}
+.arch-children{display:flex; gap:12px; flex:3;}
+
+/* loop steps */
+.loop-wrap{display:flex; align-items:center; gap:0; width:100%; flex-wrap:wrap;}
+.loop-step{
+  background:var(--bg-2); border:1px solid var(--line); border-radius:var(--radius);
+  padding:24px 26px; width:270px; min-height:190px; display:flex; flex-direction:column; gap:10px;
+}
+.loop-step .idx{font-family:'IBM Plex Mono',monospace; color:var(--teal); font-size:18px;}
+.loop-step .t{font-size:23px; font-weight:600; font-family:'Space Grotesk',sans-serif;}
+.loop-step .d{font-size:17px; color:var(--text-dim); line-height:1.4;}
+.loop-arrow{width:56px; display:flex; align-items:center; justify-content:center; color:var(--text-faint); font-size:26px;}
+
+/* bar chart (LOC by subsystem) */
+.barchart{width:100%; height:100%;}
+.bar-row{display:grid; grid-template-columns:200px 1fr 110px; align-items:center; gap:18px; height:48px;}
+.bar-row .name{font-family:'IBM Plex Mono',monospace; font-size:18px; color:var(--text-dim); text-align:right;}
+.bar-row .track{background:var(--bg-3); border-radius:6px; height:26px; overflow:hidden;}
+.bar-row .fill{height:100%; background:var(--teal); border-radius:6px;}
+.bar-row.cli .fill{background:var(--text-dim);}
+.bar-row .val{font-family:'IBM Plex Mono',monospace; font-size:18px; color:var(--text);}
+
+/* provider chips */
+.provider-grid{display:flex; flex-wrap:wrap; gap:12px; max-width:760px;}
+.provider-chip{
+  font-family:'IBM Plex Mono',monospace; font-size:19px; border:1px solid var(--line);
+  background:var(--bg-2); padding:12px 18px; border-radius:999px; color:var(--text);
+}
+.provider-chip.self-hosted{border-color:var(--teal-line); color:var(--teal); background:var(--teal-dim);}
+
+/* spectrum (permission modes) */
+.spectrum{width:100%;}
+.spectrum .track{
+  position:relative; height:10px; border-radius:6px;
+  background:linear-gradient(90deg, var(--teal) 0%, var(--bg-3) 50%, var(--amber) 100%);
+  margin:40px 0 26px;
+}
+.spectrum .points{display:flex; justify-content:space-between;}
+.spectrum .point{width:19%; display:flex; flex-direction:column; align-items:center; text-align:center; gap:8px;}
+.spectrum .point .dot{width:14px; height:14px; border-radius:50%; background:var(--text); border:3px solid var(--bg);}
+.spectrum .point .t{font-family:'IBM Plex Mono',monospace; font-size:18px; color:var(--text);}
+.spectrum .point .d{font-size:16px; color:var(--text-dim); max-width:220px;}
+.spectrum-labels{display:flex; justify-content:space-between; font-size:15px; color:var(--text-faint); font-family:'IBM Plex Mono',monospace;}
+
+/* two-card compare (tools) */
+.toolgroups{display:flex; gap:var(--sp-lg); width:100%;}
+.toolgroup{flex:1; background:var(--bg-2); border:1px solid var(--line); border-radius:var(--radius); padding:var(--sp-lg);}
+.toolgroup h3{font-size:24px; font-family:'IBM Plex Mono',monospace; color:var(--text-dim); margin-bottom:var(--sp-md); font-weight:500;}
+.toolgroup.core h3{color:var(--teal);}
+.toolchips{display:flex; flex-wrap:wrap; gap:10px;}
+.toolchip{font-family:'IBM Plex Mono',monospace; font-size:19px; background:var(--bg-3); border:1px solid var(--line); padding:9px 16px; border-radius:8px;}
+.toolgroup.core .toolchip{border-color:var(--teal-line); color:var(--teal);}
+
+/* sandbox diagram */
+.sandbox-diagram{display:flex; align-items:center; gap:28px; width:100%;}
+.sandbox-box{
+  border:1.5px dashed var(--line-strong); border-radius:20px; padding:32px; flex:1;
+  display:flex; flex-direction:column; gap:16px; min-height:420px;
+}
+.sandbox-box .label{font-family:'IBM Plex Mono',monospace; font-size:17px; color:var(--text-faint); text-transform:uppercase; letter-spacing:.08em;}
+.sandbox-inner{display:flex; flex-direction:column; gap:10px;}
+.sandbox-inner .chip{background:var(--bg-2); border:1px solid var(--line); border-radius:8px; padding:12px 16px; font-size:18px;}
+.allow-list{display:flex; flex-direction:column; gap:10px; width:280px;}
+.allow-list .chip{background:var(--teal-dim); border:1px solid var(--teal-line); color:var(--teal); font-family:'IBM Plex Mono',monospace; font-size:17px; padding:12px 16px; border-radius:8px; text-align:center;}
+
+/* reliability grid */
+.rel-grid{display:grid; grid-template-columns:1fr 1fr; gap:18px; width:100%;}
+.rel-card{background:var(--bg-2); border:1px solid var(--line); border-radius:var(--radius); padding:26px 28px; display:flex; flex-direction:column; gap:10px;}
+.rel-card .t{font-family:'Space Grotesk',sans-serif; font-size:24px; font-weight:600;}
+.rel-card .d{font-size:18px; color:var(--text-dim); line-height:1.45;}
+
+/* test donut + facts */
+.donut-wrap{display:flex; align-items:center; gap:52px;}
+.donut-facts{display:flex; flex-direction:column; gap:22px;}
+.donut-facts .num{font-family:'Space Grotesk',sans-serif; font-size:44px; font-weight:700; color:var(--text);}
+.donut-facts .lbl{font-size:18px; color:var(--text-dim);}
+
+/* reading order table */
+.read-table{width:100%; border-collapse:collapse;}
+.read-table tr{border-bottom:1px solid var(--line);}
+.read-table tr:first-child{border-top:1px solid var(--line);}
+.read-table td{padding:13px 10px; font-size:19px; vertical-align:top;}
+.read-table td.n{font-family:'IBM Plex Mono',monospace; color:var(--teal); width:40px;}
+.read-table td.f{font-family:'IBM Plex Mono',monospace; color:var(--text); width:260px;}
+.read-table td.w{color:var(--text-dim);}
+</style>
+</head>
+<body>
+
+<deck-stage width="1920" height="1080" deck-id="tinyharness-overview">
+
+<!-- 1 — COVER -->
+<section data-screen-label="01 Cover" class="cover">
+  <div class="kicker">Repository walkthrough</div>
+  <h1>tiny<span class="accent">harness</span></h1>
+  <p class="tagline">An agent harness you can read in an afternoon — a coding agent for your terminal, and a Python SDK to build your own.</p>
+  <div class="meta-row">
+    <div class="chip">pip install tinyharness</div>
+    <div class="chip">Python 3.11+</div>
+    <div class="chip">MIT licensed</div>
+  </div>
+  <div class="mascot-glow"></div>
+  <img class="mascot" src="assets/pip-wave.png" alt="Pip, the tinyharness mascot pony, wearing a yellow work harness, waving hello">
+  <div class="slide-foot">
+    <span class="brand">tinyharness</span>
+    <span>github.com/anujdutt9/tinyharness</span>
+  </div>
+</section>
+
+<!-- 2 — WHAT IT IS -->
+<section data-screen-label="02 What it is" class="content">
+  <div class="head">
+    <div class="kicker">What it is</div>
+    <h2>The loop that turns an LLM into an agent</h2>
+  </div>
+  <div class="body">
+    <ul class="feature-list" style="max-width:1500px;">
+      <li><div class="bullet-dot"></div><div>It reads, searches and edits your code, runs commands in a sandbox, asks before it changes things, and keeps long sessions inside the context window.</div></li>
+      <li><div class="bullet-dot"></div><div>No framework underneath — it's about <b>9,000 lines</b> of commented Python, built to be read, not just imported.</div></li>
+      <li><div class="bullet-dot"></div><div>Works two ways: as a <b>CLI</b> you run in your terminal, and as a <b>Python SDK</b> (<code class="inline">Session</code>, typed event stream) for building your own agent.</div></li>
+    </ul>
+    <div class="stat-row">
+      <div class="stat-card"><div class="num">9k</div><div class="lbl">lines — agent core, no framework</div></div>
+      <div class="stat-card"><div class="num">8+</div><div class="lbl">model providers, one key each</div></div>
+      <div class="stat-card"><div class="num">6</div><div class="lbl">core tools: Read Write Edit Glob Grep Bash</div></div>
+      <div class="stat-card"><div class="num">310</div><div class="lbl">tests, no API key required</div></div>
+    </div>
+  </div>
+  <div class="slide-foot"><span class="brand">tinyharness</span><span>02 / 12</span></div>
+</section>
+
+<!-- 3 — ARCHITECTURE -->
+<section data-screen-label="03 Architecture" class="content">
+  <div class="head">
+    <div class="kicker">How it fits together</div>
+    <h2>CLI and SDK share one core</h2>
+  </div>
+  <div class="body">
+    <div class="arch">
+      <div class="arch-row">
+        <div class="arch-box"><div class="t">CLI — cli/</div><div class="d">terminal REPL, slash commands</div></div>
+        <div class="arch-box"><div class="t">SDK — your code</div><div class="d">import Session directly</div></div>
+      </div>
+      <div class="arch-row" style="justify-content:center;"><div class="arch-arrow">↓ both wire through ↓</div></div>
+      <div class="arch-row">
+        <div class="arch-box emph"><div class="t">Session — session.py</div><div class="d">wires every component; state that persists between prompts</div></div>
+      </div>
+      <div class="arch-row" style="justify-content:center;"><div class="arch-arrow">↓</div></div>
+      <div class="arch-row">
+        <div class="arch-box emph" style="flex:1.4;"><div class="t">Agent loop — agent/loop.py</div><div class="d">stream → validate → gate → run → repeat</div></div>
+        <div class="arch-box"><div class="t">LLM — llm/client.py + adapters/</div><div class="d">retries, streaming, per-provider format</div></div>
+      </div>
+      <div class="arch-row">
+        <div class="arch-box"><div class="t">compaction</div><div class="d">agent/compaction.py — stays in context</div></div>
+        <div class="arch-box"><div class="t">permissions</div><div class="d">permissions/gate.py — asks before it acts</div></div>
+        <div class="arch-box"><div class="t">tools</div><div class="d">tools/*.py — sandbox + allowlist proxy</div></div>
+        <div class="arch-box"><div class="t">extensions</div><div class="d">ext.py — web, pdf, subagents, teams</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-foot"><span class="brand">tinyharness</span><span>03 / 12</span></div>
+</section>
+
+<!-- 4 — THE LOOP -->
+<section data-screen-label="04 The agent loop" class="content">
+  <div class="head">
+    <div class="kicker">agent/loop.py</div>
+    <h2>One loop, five steps, repeated</h2>
+  </div>
+  <div class="body" style="display:flex; align-items:center;">
+    <div class="loop-wrap">
+      <div class="loop-step"><div class="idx">01</div><div class="t">Stream</div><div class="d">call the model, stream tokens and tool calls as they arrive</div></div>
+      <div class="loop-arrow">→</div>
+      <div class="loop-step"><div class="idx">02</div><div class="t">Validate</div><div class="d">check and repair malformed or text-written tool calls</div></div>
+      <div class="loop-arrow">→</div>
+      <div class="loop-step"><div class="idx">03</div><div class="t">Gate</div><div class="d">the permission layer decides: run it, or ask a person</div></div>
+      <div class="loop-arrow">→</div>
+      <div class="loop-step"><div class="idx">04</div><div class="t">Run</div><div class="d">execute the tool; read-only tools run in parallel</div></div>
+      <div class="loop-arrow">→</div>
+      <div class="loop-step"><div class="idx">05</div><div class="t">Repeat</div><div class="d">feed the result back; compact history if it's getting long</div></div>
+    </div>
+  </div>
+  <div class="slide-foot"><span class="brand">tinyharness</span><span>04 / 12</span></div>
+</section>
+
+<!-- 5 — CODEBASE SIZE -->
+<section data-screen-label="05 Codebase size" class="content">
+  <div class="head">
+    <div class="kicker">Readable by design</div>
+    <h2>Small enough to read, not just trust</h2>
+  </div>
+  <div class="body">
+    <div class="split">
+    <div class="text-col">
+      <p style="color:var(--text-dim); font-size:24px; max-width:620px;">The agent core — loop, tools, permissions, sandbox, subagents — is about <b style="color:var(--text);">9,000 lines</b>. Add the terminal UI (rendering, REPL, theming) and the whole readable project is about <b style="color:var(--text);">12,600 lines</b>.</p>
+      <p style="color:var(--text-faint); font-size:19px; margin-top:20px;">Lines of Python per subsystem, largest first.</p>
+    </div>
+    <div class="visual-col" style="align-items:center;">
+      <div class="barchart">
+        <div class="bar-row cli"><div class="name">cli/</div><div class="track"><div class="fill" style="width:100%;"></div></div><div class="val">3,569</div></div>
+        <div class="bar-row"><div class="name">tools/</div><div class="track"><div class="fill" style="width:70%;"></div></div><div class="val">2,509</div></div>
+        <div class="bar-row"><div class="name">llm/</div><div class="track"><div class="fill" style="width:65%;"></div></div><div class="val">2,321</div></div>
+        <div class="bar-row"><div class="name">agent/</div><div class="track"><div class="fill" style="width:57%;"></div></div><div class="val">2,037</div></div>
+        <div class="bar-row"><div class="name">permissions/</div><div class="track"><div class="fill" style="width:16%;"></div></div><div class="val">556</div></div>
+        <div class="bar-row"><div class="name">sandbox/</div><div class="track"><div class="fill" style="width:13%;"></div></div><div class="val">464</div></div>
+        <div class="bar-row"><div class="name">subagents/</div><div class="track"><div class="fill" style="width:10%;"></div></div><div class="val">348</div></div>
+        <div class="bar-row"><div class="name">workspace/</div><div class="track"><div class="fill" style="width:7%;"></div></div><div class="val">243</div></div>
+        <div class="bar-row"><div class="name">skills/</div><div class="track"><div class="fill" style="width:7%;"></div></div><div class="val">250</div></div>
+        <div class="bar-row"><div class="name">hooks/</div><div class="track"><div class="fill" style="width:5%;"></div></div><div class="val">193</div></div>
+        <div class="bar-row"><div class="name">extensions/</div><div class="track"><div class="fill" style="width:3%;"></div></div><div class="val">112</div></div>
+      </div>
+    </div>
+    </div>
+  </div>
+  <div class="slide-foot"><span class="brand">tinyharness</span><span>05 / 12</span></div>
+</section>
+
+<!-- 6 — ANY MODEL -->
+<section data-screen-label="06 Any model" class="content">
+  <div class="head">
+    <div class="kicker">llm/adapters/</div>
+    <h2>Any model, even yours</h2>
+  </div>
+  <div class="body">
+    <div class="split" style="grid-template-columns:600px 1fr;">
+      <div class="text-col">
+        <p style="font-size:25px; color:var(--text-dim); line-height:1.5;">Five small adapters — one per wire format — sit between the loop and every provider. The rest of the code never sees a provider's format.</p>
+        <ul class="feature-list numbered" style="margin-top:28px;">
+          <li><div class="bullet-dot"></div><div><b>anthropic.py</b> <span class="sub">— Claude's native API</span></div></li>
+          <li><div class="bullet-dot"></div><div><b>gemini.py</b> <span class="sub">— Google's native API</span></div></li>
+          <li><div class="bullet-dot"></div><div><b>responses.py</b> <span class="sub">— OpenAI's Responses API</span></div></li>
+          <li><div class="bullet-dot"></div><div><b>chat.py</b> <span class="sub">— OpenAI-compatible chat completions</span></div></li>
+        </ul>
+      </div>
+      <div class="visual-col">
+        <div class="provider-grid">
+          <div class="provider-chip">Anthropic</div>
+          <div class="provider-chip">OpenAI</div>
+          <div class="provider-chip">Gemini</div>
+          <div class="provider-chip">xAI</div>
+          <div class="provider-chip">OpenRouter</div>
+          <div class="provider-chip">DeepSeek</div>
+          <div class="provider-chip">Mistral</div>
+          <div class="provider-chip">Groq</div>
+          <div class="provider-chip self-hosted">vLLM</div>
+          <div class="provider-chip self-hosted">Ollama</div>
+          <div class="provider-chip self-hosted">llama.cpp</div>
+          <div class="provider-chip self-hosted">SGLang</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-foot"><span class="brand">tinyharness</span><span>06 / 12</span></div>
+</section>
+
+<!-- 7 — TOOLS -->
+<section data-screen-label="07 Tools and extensions" class="content">
+  <div class="head">
+    <div class="kicker">tools/ · extensions/</div>
+    <h2>Six core tools. Everything else opts in.</h2>
+  </div>
+  <div class="body">
+    <div class="toolgroups">
+      <div class="toolgroup core">
+        <h3>core — always on</h3>
+        <div class="toolchips">
+          <div class="toolchip">Read</div><div class="toolchip">Write</div><div class="toolchip">Edit</div>
+          <div class="toolchip">Glob</div><div class="toolchip">Grep</div><div class="toolchip">Bash</div>
+        </div>
+        <p style="margin-top:22px; color:var(--text-dim); font-size:19px;">A short system prompt — about 3k tokens before your instructions — stays identical call to call, so the provider's cache hits.</p>
+      </div>
+      <div class="toolgroup">
+        <h3>extensions — turned on with /extensions</h3>
+        <div class="toolchips">
+          <div class="toolchip">WebSearch</div><div class="toolchip">WebFetch</div><div class="toolchip">PDF</div>
+          <div class="toolchip">Open</div><div class="toolchip">Todo</div><div class="toolchip">Agent</div><div class="toolchip">Team</div>
+        </div>
+        <p style="margin-top:22px; color:var(--text-dim); font-size:19px;">One Python file with <code class="inline">setup(th)</code> adds a tool, a prompt section, a slash command, or a hook — yours use the same API as the built-ins.</p>
+      </div>
+    </div>
+  </div>
+  <div class="slide-foot"><span class="brand">tinyharness</span><span>07 / 12</span></div>
+</section>
+
+<!-- 8 — SAFETY -->
+<section data-screen-label="08 Permissions and sandbox" class="content">
+  <div class="head">
+    <div class="kicker">permissions/ · sandbox/</div>
+    <h2>Safe without the friction</h2>
+  </div>
+  <div class="body">
+    <div class="spectrum" style="margin-bottom:46px;">
+      <div class="track"></div>
+      <div class="points">
+        <div class="point"><div class="dot" style="background:var(--teal);"></div><div class="t">bypassPermissions</div><div class="d">nothing asks — scripted runs</div></div>
+        <div class="point"><div class="dot"></div><div class="t">default</div><div class="d">routine work doesn't ask; the rest does</div></div>
+        <div class="point"><div class="dot"></div><div class="t">auto</div><div class="d">an LLM classifier judges unclear cases</div></div>
+        <div class="point"><div class="dot"></div><div class="t">plan</div><div class="d">read-only, until you approve a plan</div></div>
+        <div class="point"><div class="dot" style="background:var(--amber);"></div><div class="t">ask</div><div class="d">every edit and command, no exceptions</div></div>
+      </div>
+    </div>
+    <div class="sandbox-diagram">
+      <div class="sandbox-box">
+        <div class="label">Sandboxed command</div>
+        <div class="sandbox-inner">
+          <div class="chip">writes only inside the project</div>
+          <div class="chip">can't read credential files</div>
+          <div class="chip">API keys never reach the model</div>
+        </div>
+      </div>
+      <div class="arch-arrow" style="font-size:30px;">→</div>
+      <div class="allow-list">
+        <div class="chip">package registries</div>
+        <div class="chip">GitHub</div>
+        <div class="chip">common CDNs</div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-foot"><span class="brand">tinyharness</span><span>08 / 12</span></div>
+</section>
+
+<!-- 9 — RELIABILITY -->
+<section data-screen-label="09 Reliability" class="content">
+  <div class="head">
+    <div class="kicker">agent/runaway.py · agent/compaction.py</div>
+    <h2>Built for mid-size models too, not just the best ones</h2>
+  </div>
+  <div class="body">
+    <div class="rel-grid">
+      <div class="rel-card"><div class="t">Cut-off &amp; empty replies</div><div class="d">Recovered automatically — a reply cut off at the output limit never gets run as a tool call.</div></div>
+      <div class="rel-card"><div class="t">Tool calls written as text</div><div class="d">Small models sometimes write a call instead of emitting one; <code class="inline">llm/textcalls.py</code> repairs it.</div></div>
+      <div class="rel-card"><div class="t">Malformed arguments</div><div class="d">Arguments are validated and repaired before a tool ever runs.</div></div>
+      <div class="rel-card"><div class="t">Context that stays within budget</div><div class="d">Oversized messages are capped, old tool output is stubbed, then summarized — without rebuilding the prompt cache every turn.</div></div>
+    </div>
+  </div>
+  <div class="slide-foot"><span class="brand">tinyharness</span><span>09 / 12</span></div>
+</section>
+
+<!-- 10 — TESTED -->
+<section data-screen-label="10 Tested and typed" class="content">
+  <div class="head">
+    <div class="kicker">tests/ · ruff · mypy</div>
+    <h2>Tested against a scripted model, not a live API key</h2>
+  </div>
+  <div class="body" style="display:flex; align-items:center;">
+    <div class="donut-wrap">
+      <svg width="320" height="320" viewBox="0 0 320 320">
+        <circle cx="160" cy="160" r="128" fill="none" stroke="#1C1F24" stroke-width="34"/>
+        <circle cx="160" cy="160" r="128" fill="none" stroke="#4FD8B0" stroke-width="34"
+          stroke-dasharray="804" stroke-dashoffset="201" transform="rotate(-90 160 160)" stroke-linecap="round"/>
+        <text x="160" y="150" text-anchor="middle" fill="#E9EAED" font-family="Space Grotesk" font-size="52" font-weight="700">310</text>
+        <text x="160" y="190" text-anchor="middle" fill="#9A9FA8" font-family="IBM Plex Mono" font-size="18">tests</text>
+      </svg>
+      <div class="donut-facts">
+        <div><div class="num">36</div><div class="lbl">test files, covering adapters, sandbox, permissions, compaction, resume, skills, teams…</div></div>
+        <div><div class="num">~30s</div><div class="lbl"><code class="inline">uv run pytest -q</code> — the full suite, no network, no API key</div></div>
+        <div><div class="num">ruff + mypy</div><div class="lbl">lint, format and types checked on every change</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-foot"><span class="brand">tinyharness</span><span>10 / 12</span></div>
+</section>
+
+<!-- 11 — GETTING STARTED -->
+<section data-screen-label="11 Getting started" class="content">
+  <div class="head">
+    <div class="kicker">Suggested reading order</div>
+    <h2>Where to start reading</h2>
+  </div>
+  <div class="body">
+    <table class="read-table">
+      <tr><td class="n">1</td><td class="f">agent/loop.py</td><td class="w">The core loop: stream the model, validate calls, gate them, run them, repeat.</td></tr>
+      <tr><td class="n">2</td><td class="f">tools/base.py, read.py</td><td class="w">How tools are defined and exposed to the model.</td></tr>
+      <tr><td class="n">3</td><td class="f">permissions/gate.py</td><td class="w">The layered permission check.</td></tr>
+      <tr><td class="n">4</td><td class="f">agent/compaction.py</td><td class="w">Staying inside the context window without breaking the prompt cache.</td></tr>
+      <tr><td class="n">5</td><td class="f">agent/history.py</td><td class="w">The conversation, and the normalization every request goes through.</td></tr>
+      <tr><td class="n">6</td><td class="f">session.py</td><td class="w">Wiring it all together; state that persists between prompts.</td></tr>
+      <tr><td class="n">7</td><td class="f">llm/adapters/</td><td class="w">One small adapter per provider API.</td></tr>
+      <tr><td class="n">8</td><td class="f">ext.py, extensions/</td><td class="w">How a feature plugs in — built-ins use the same API as yours.</td></tr>
+    </table>
+  </div>
+  <div class="slide-foot"><span class="brand">tinyharness</span><span>11 / 12</span></div>
+</section>
+
+<!-- 12 — CLOSING -->
+<section data-screen-label="12 Closing" class="closing">
+  <div class="kicker">Try it</div>
+  <h2>Clone it, run it, read it in an afternoon</h2>
+  <div class="cmd">
+    <div><span>$</span> git clone https://github.com/anujdutt9/tinyharness &amp;&amp; cd tinyharness</div>
+    <div><span>$</span> uv sync &amp;&amp; uv run tinyharness</div>
+    <div><span>$</span> uv run pytest -q <span>&nbsp;&nbsp;# scripted model, no API key needed</span></div>
+  </div>
+  <div class="links">
+    <div>github.com/anujdutt9/tinyharness</div>
+    <div>pypi.org/project/tinyharness</div>
+    <div>MIT license</div>
+  </div>
+  <div class="slide-foot"><span class="brand">tinyharness</span><span>12 / 12</span></div>
+</section>
+
+</deck-stage>
+
+<script>
+/* ---- deck-stage: fixed-canvas slide shell (scaling, nav, counter) ---- */
+(() => {
+  'use strict';
+  const whenReady = fn => {
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn, { once: true });
+    else fn();
+  };
+  if (customElements.get('deck-stage')) return;
+
+  const CSS = `
+deck-stage{position:fixed;top:0;left:0;transform-origin:0 0;overflow:hidden;
+  background:var(--deck-bg,#fff);display:block}
+deck-stage>section{position:absolute;inset:0;overflow:hidden;display:none}
+deck-stage>section[data-active]{display:block}
+html.deck-host,body.deck-host{margin:0;padding:0;height:100%;overflow:hidden;
+  background:var(--deck-letterbox,#0a0a0a)}
+.deck-chrome{position:fixed;z-index:2147483000;font:500 13px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif;
+  color:#fff;-webkit-font-smoothing:antialiased}
+.deck-counter{right:16px;bottom:14px;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);
+  padding:6px 11px;border-radius:999px;font-variant-numeric:tabular-nums;opacity:.72;
+  transition:opacity .2s;pointer-events:none;letter-spacing:.02em}
+.deck-counter:hover{opacity:1}
+.deck-help{left:16px;bottom:14px;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);
+  padding:6px 11px;border-radius:999px;opacity:0;transition:opacity .2s;pointer-events:none}
+body.deck-idle-off .deck-help{opacity:.72}
+.deck-notes{left:0;right:0;bottom:0;max-height:38vh;overflow-y:auto;background:rgba(10,10,10,.94);
+  backdrop-filter:blur(12px);border-top:1px solid rgba(255,255,255,.14);padding:18px 22px 20px;
+  display:none;font:400 15px/1.6 ui-sans-serif,system-ui,sans-serif;color:rgba(255,255,255,.9)}
+body.deck-notes-on .deck-notes{display:block}
+.deck-notes b{display:block;font-size:11px;letter-spacing:.09em;text-transform:uppercase;
+  color:rgba(255,255,255,.45);margin-bottom:7px;font-weight:600}
+.deck-overview{position:fixed;inset:0;z-index:2147483100;background:var(--deck-overview-bg,#0b0b0b);
+  display:none;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:14px;
+  padding:22px;overflow-y:auto;align-content:start}
+body.deck-overview-on .deck-overview{display:grid}
+.deck-thumb{position:relative;aspect-ratio:var(--deck-ar,16/9);background:#fff;border-radius:5px;
+  overflow:hidden;cursor:pointer;border:2px solid transparent;transition:border-color .12s,transform .12s}
+.deck-thumb:hover{transform:translateY(-2px)}
+.deck-thumb[data-current]{border-color:#fff}
+.deck-thumb>.deck-thumb-inner{position:absolute;top:0;left:0;transform-origin:0 0;pointer-events:none}
+.deck-thumb>figcaption{position:absolute;left:0;right:0;bottom:0;background:rgba(0,0,0,.72);
+  color:#fff;font:500 11px/1.35 ui-sans-serif,system-ui,sans-serif;padding:5px 7px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media print{
+  html.deck-host,body.deck-host{overflow:visible;background:#fff;height:auto}
+  .deck-chrome,.deck-overview{display:none!important}
+  deck-stage{position:static;transform:none!important;width:auto;height:auto}
+  deck-stage>section{position:relative;display:block!important;break-after:page;
+    page-break-after:always;break-inside:avoid;page-break-inside:avoid}
+  deck-stage>section:last-child{break-after:auto;page-break-after:auto}
+}`;
+
+  class DeckStage extends HTMLElement {
+    connectedCallback() {
+      if (this._init) return;
+      this._init = true;
+      whenReady(() => this._boot());
+    }
+
+    _boot() {
+      this.W = +this.getAttribute('width') || 1920;
+      this.H = +this.getAttribute('height') || 1080;
+      this.key = 'deck:' + (this.getAttribute('deck-id') || document.title || 'untitled');
+      this.persist = !this.hasAttribute('no-persist');
+
+      document.documentElement.classList.add('deck-host');
+      document.body.classList.add('deck-host');
+      if (!document.getElementById('deck-stage-css')) {
+        const s = document.createElement('style');
+        s.id = 'deck-stage-css';
+        s.textContent = CSS;
+        document.head.appendChild(s);
+      }
+      this.style.width = this.W + 'px';
+      this.style.height = this.H + 'px';
+
+      const pg = document.createElement('style');
+      pg.textContent = `@page{size:${this.W}px ${this.H}px;margin:0}`;
+      document.head.appendChild(pg);
+
+      this.slides = [...this.children].filter(n => n.tagName === 'SECTION');
+      this.slides.forEach((s, i) => {
+        s.setAttribute('data-om-validate', 'slide');
+        s.setAttribute('data-slide-index', i + 1);
+        if (!s.hasAttribute('data-screen-label')) {
+          s.setAttribute('data-screen-label', String(i + 1).padStart(2, '0'));
+        }
+      });
+
+      this._buildChrome();
+      this._bind();
+
+      let start = 0;
+      if (this.persist) {
+        const saved = +localStorage.getItem(this.key);
+        if (saved > 0 && saved <= this.slides.length) start = saved - 1;
+      }
+      const hash = +location.hash.slice(1);
+      if (hash > 0 && hash <= this.slides.length) start = hash - 1;
+
+      this.go(start, true);
+      this.fit();
+      requestAnimationFrame(() => this._checkOverflow());
+    }
+
+    _buildChrome() {
+      const mk = (cls, html) => {
+        const d = document.createElement('div');
+        d.className = 'deck-chrome ' + cls;
+        if (html) d.innerHTML = html;
+        document.body.appendChild(d);
+        return d;
+      };
+      const hidden = this.hasAttribute('no-chrome');
+      this.counter = mk('deck-counter');
+      this.helpEl = mk('deck-help', '← → navigate · S notes · O overview · F fullscreen · P print');
+      this.notesEl = mk('deck-notes', '<b>Speaker notes</b><div></div>');
+      if (hidden) [this.counter, this.helpEl].forEach(e => e.style.display = 'none');
+
+      this.overview = document.createElement('div');
+      this.overview.className = 'deck-overview';
+      this.overview.style.setProperty('--deck-ar', `${this.W}/${this.H}`);
+      document.body.appendChild(this.overview);
+
+      let raw = null;
+      const tag = document.getElementById('speaker-notes');
+      if (tag) { try { raw = JSON.parse(tag.textContent); } catch (e) { console.warn('[deck-stage] speaker-notes is not valid JSON:', e.message); } }
+      this.notes = Array.isArray(raw) ? raw : null;
+    }
+
+    _bind() {
+      addEventListener('resize', () => this.fit());
+      addEventListener('hashchange', () => {
+        const n = +location.hash.slice(1);
+        if (n > 0 && n <= this.slides.length && n - 1 !== this.i) this.go(n - 1);
+      });
+
+      addEventListener('keydown', e => {
+        if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable) return;
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        const k = e.key;
+        if (k === 'ArrowRight' || k === 'ArrowDown' || k === ' ' || k === 'PageDown') { e.preventDefault(); this.next(); }
+        else if (k === 'ArrowLeft' || k === 'ArrowUp' || k === 'PageUp') { e.preventDefault(); this.prev(); }
+        else if (k === 'Home') { e.preventDefault(); this.go(0); }
+        else if (k === 'End') { e.preventDefault(); this.go(this.slides.length - 1); }
+        else if (k === 'Escape') { document.body.classList.remove('deck-overview-on'); }
+        else if (k === 'o' || k === 'O') { e.preventDefault(); this.toggleOverview(); }
+        else if (k === 's' || k === 'S') { document.body.classList.toggle('deck-notes-on'); this.fit(); }
+        else if (k === 'f' || k === 'F') {
+          if (document.fullscreenElement) document.exitFullscreen();
+          else document.documentElement.requestFullscreen?.();
+        }
+        else if (k === 'p' || k === 'P') { e.preventDefault(); print(); }
+      });
+
+      addEventListener('click', e => {
+        if (document.body.classList.contains('deck-overview-on')) return;
+        if (e.target.closest('a,button,input,select,textarea,label,[role="button"],[data-no-nav]')) return;
+        if (e.clientX > innerWidth * 0.35) this.next(); else this.prev();
+      });
+
+      let x0 = null;
+      addEventListener('touchstart', e => { x0 = e.changedTouches[0].clientX; }, { passive: true });
+      addEventListener('touchend', e => {
+        if (x0 === null) return;
+        const dx = e.changedTouches[0].clientX - x0;
+        if (Math.abs(dx) > 45) (dx < 0 ? this.next() : this.prev());
+        x0 = null;
+      }, { passive: true });
+
+      let t;
+      const wake = () => {
+        document.body.classList.add('deck-idle-off');
+        clearTimeout(t);
+        t = setTimeout(() => document.body.classList.remove('deck-idle-off'), 2200);
+      };
+      addEventListener('mousemove', wake, { passive: true });
+      addEventListener('keydown', wake);
+
+      addEventListener('beforeprint', () => this.slides.forEach(s => s.setAttribute('data-active', '')));
+      addEventListener('afterprint', () => this.go(this.i, true));
+    }
+
+    fit() {
+      const notesH = document.body.classList.contains('deck-notes-on') ? (this.notesEl.offsetHeight || 0) : 0;
+      const vw = innerWidth, vh = innerHeight - notesH;
+      const s = Math.min(vw / this.W, vh / this.H);
+      const tx = Math.round((vw - this.W * s) / 2), ty = Math.round((vh - this.H * s) / 2);
+      this.style.transform = `translate(${tx}px,${ty}px) scale(${s})`;
+      this._scale = s;
+      if (document.body.classList.contains('deck-overview-on')) this._renderOverview();
+    }
+
+    go(n, silent) {
+      n = Math.max(0, Math.min(this.slides.length - 1, n));
+      this.i = n;
+      this.slides.forEach((s, j) => j === n ? s.setAttribute('data-active', '') : s.removeAttribute('data-active'));
+      const label = this.slides[n]?.getAttribute('data-screen-label') || '';
+      this.counter.textContent = `${n + 1} / ${this.slides.length}`;
+      this.counter.title = label;
+      if (this.notes) {
+        this.notesEl.querySelector('div').textContent = this.notes[n] || '—';
+      } else {
+        this.notesEl.querySelector('div').textContent = 'No speaker notes for this deck.';
+      }
+      if (this.persist) { try { localStorage.setItem(this.key, n + 1); } catch (e) {} }
+      if (!silent) history.replaceState(null, '', '#' + (n + 1));
+      this.dispatchEvent(new CustomEvent('slidechange', { detail: { index: n + 1, label }, bubbles: true }));
+      return this;
+    }
+    next() { return this.go(this.i + 1); }
+    prev() { return this.go(this.i - 1); }
+
+    toggleOverview() {
+      const on = document.body.classList.toggle('deck-overview-on');
+      if (on) this._renderOverview();
+    }
+
+    _renderOverview() {
+      this.overview.textContent = '';
+      const probe = this.overview.getBoundingClientRect();
+      const cols = Math.max(1, Math.floor((probe.width - 44) / 246));
+      const tw = (probe.width - 44 - (cols - 1) * 14) / cols;
+      const k = tw / this.W;
+      this.slides.forEach((s, j) => {
+        const fig = document.createElement('figure');
+        fig.className = 'deck-thumb';
+        fig.style.margin = '0';
+        if (j === this.i) fig.setAttribute('data-current', '');
+        const inner = document.createElement('div');
+        inner.className = 'deck-thumb-inner';
+        inner.style.width = this.W + 'px';
+        inner.style.height = this.H + 'px';
+        inner.style.transform = `scale(${k})`;
+        const clone = s.cloneNode(true);
+        clone.setAttribute('data-active', '');
+        clone.style.position = 'absolute';
+        clone.style.inset = '0';
+        clone.style.display = 'block';
+        inner.appendChild(clone);
+        const cap = document.createElement('figcaption');
+        cap.textContent = `${j + 1}. ${s.getAttribute('data-screen-label') || ''}`;
+        fig.append(inner, cap);
+        fig.addEventListener('click', ev => {
+          ev.stopPropagation();
+          document.body.classList.remove('deck-overview-on');
+          this.go(j);
+        });
+        this.overview.appendChild(fig);
+      });
+    }
+
+    _checkOverflow() {
+      const bad = [];
+      this.slides.forEach((s, j) => {
+        const was = s.hasAttribute('data-active');
+        if (!was) { s.style.display = 'block'; s.style.visibility = 'hidden'; }
+        const oh = s.scrollHeight > this.H + 2, ow = s.scrollWidth > this.W + 2;
+        if (!was) { s.style.display = ''; s.style.visibility = ''; }
+        if (oh || ow) {
+          s.setAttribute('data-om-overflow', [oh && 'y', ow && 'x'].filter(Boolean).join('+'));
+          bad.push(`${j + 1} (${s.getAttribute('data-screen-label')})`);
+        } else s.removeAttribute('data-om-overflow');
+      });
+      if (bad.length) console.warn('[deck-stage] content overflows the slide canvas on:', bad.join(', '));
+      return bad;
+    }
+  }
+
+  customElements.define('deck-stage', DeckStage);
+  window.DeckStage = DeckStage;
+})();
+</script>
+</body>
+</html>

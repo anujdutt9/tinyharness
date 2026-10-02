@@ -266,6 +266,15 @@ First release.
 - The core is six tools: Read, Write, Edit, Glob, Grep, Bash. Web, Pdf, Open and TodoWrite
   are built-in extensions (`web`, `pdf`, `open`, `todo`), off until turned on, so a session
   that doesn't use them doesn't send their schemas with every request.
+- Memory across sessions, the `memory` extension (off until turned on): the agent keeps
+  short notes about you (`~/.tinyharness/memory.md`, every project) and about the project
+  (`~/.tinyharness/projects/<project>/memory.md`, never in the repository) with a Memory
+  tool, and every session starts with them in its prompt. Notes saved during a session
+  show from the next one, so the cached prompt stays the same. Each memory has a small
+  size limit (1,500 and 3,000 characters); when one is full the agent merges or drops
+  notes. Saving needs no prompt, except while content from the web is in the
+  conversation (it could be planting a note) or in `ask` mode. Notes that look like API
+  keys are refused. `/memory` shows both files; they're plain Markdown you can edit.
 - Agent and Team are the `agents` extension, built only on the public API
   (`th.run_agent`), with their briefing guidance as its prompt section.
 - The core system prompt is about 670 tokens (was about 2,300): how to work, safety, pages,

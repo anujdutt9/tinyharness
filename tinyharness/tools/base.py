@@ -138,6 +138,9 @@ class Tool(ABC, Generic[InputT]):
     read_only: ClassVar[bool] = False
     needs_permission: ClassVar[bool] = True
     network: ClassVar[bool] = False
+    # What it saves is read by every later session as context (the agent's memory), so
+    # instructions planted by outside content could outlive this conversation.
+    persists: ClassVar[bool] = False
 
     @abstractmethod
     async def run(self, args: InputT, ctx: ToolContext) -> str | ToolOutput: ...

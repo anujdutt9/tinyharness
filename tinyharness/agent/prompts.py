@@ -34,6 +34,11 @@ def agent_md_sources(working_dir: Path) -> list[Path]:
     ]
 
 
+def repo_root(working_dir: Path) -> Path:
+    """The git repository's root, or the working directory outside a repository."""
+    return _repo_folders(working_dir)[0]
+
+
 def _repo_folders(working_dir: Path) -> list[Path]:
     """The working directory and its parents up to the git repository's root, root first."""
     here = working_dir.resolve()
