@@ -47,6 +47,12 @@ _GEMMA = re.compile(
 _START = re.compile(r"^[ \t]*(<tool_call>|<call>|<function=|<\|tool_call>)", re.MULTILINE)
 MAX_CHARS = 200_000  # a reply longer than this isn't scanned
 _FENCE = re.compile(r"^```[\w-]*\s*\n?(.*?)\n?```$", re.DOTALL)
+# A whole reply that is a call's JSON, or the tail of one: `{"name": ..., "arguments": {...}}`
+# or `"arguments": {...}}`. The arguments object is what tells it from JSON the user asked for.
+MAX_BARE_CALL = 20_000  # chars: a longer reply is an answer, not a stray call
+_BARE_CALL = re.compile(
+    r'^(?:\{\s*"(?:name|tool|function)"\s*:.*|\{?\s*)"(?:arguments|parameters)"\s*:\s*\{.*\}$', re.DOTALL
+)
 
 
 def recover_calls(text: str, schema_of: Callable[[str], dict[str, Any] | None]) -> tuple[str, list[ToolCall]]:
@@ -123,7 +129,11 @@ def _quote_keys(fragment: str) -> str:
 def looks_like_a_call(text: str) -> bool:
     """Whether a reply ends in something shaped like a tool call (one `recover_calls`
     couldn't use: a tool that doesn't exist, arguments that don't parse), as opposed to
-    prose that mentions the format."""
+    prose that mentions the format. That includes a reply that is nothing but a call's
+    JSON with no tags: seen live (Qwen2.5 7B), ` "arguments": {"prompt": "..."}}` with
+    no tool name was shown as the turn's answer, twice."""
+    if len(text) <= MAX_BARE_CALL and _BARE_CALL.match(_FENCE.sub(r"\1", text.strip()).strip()):
+        return True
     start = _first_tag(text)
     return start >= 0 and not re.search(
         r"\n\s*\n\s*[A-Za-z]", _CLOSE.split(text[start:].split("<tool_call|>")[-1])[-1]
