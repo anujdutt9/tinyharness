@@ -79,7 +79,13 @@ class SkillRegistry:
 
 def build_skill_prompt(skill: Skill, args: str = "") -> str:
     """The instruction sent to the model when a skill is invoked."""
-    parts = [f"# Skill: {skill.name}\n{skill.description}\n\nFollow these instructions:\n\n{skill.body}"]
+    # Said outright: a model has read a loaded skill as the skill's help page, waited for it
+    # to "run", and loaded it again. Loading does no work; the model does the work.
+    parts = [
+        f"# Skill: {skill.name}\n{skill.description}\n\n"
+        "Skill loaded. Nothing has been done yet: these are instructions for you. Carry them "
+        f"out now with your own tools.\n\n{skill.body}"
+    ]
     if skill.directory is not None:
         parts.append(
             f"(Bundled files for this skill live in `{skill.directory}`. Read each one only "
@@ -88,3 +94,26 @@ def build_skill_prompt(skill: Skill, args: str = "") -> str:
     if args:
         parts.append(f"User arguments: {args}")
     return "\n\n".join(parts)
+
+
+BRIEF_CHARS = 240  # of each skill's description in the listing: enough to know when it applies
+
+
+def skills_section(skills: list[Skill]) -> str:
+    """The skills, as the model sees them in its system prompt: name, when to use it, and
+    where its SKILL.md is. The model loads one by reading that file; no tool is needed."""
+    listed = [s for s in skills if s.source is not None]
+    if not listed:
+        return ""
+    lines = [
+        "# Skills",
+        "Expert instructions for kinds of task. When a task matches one, Read its SKILL.md and "
+        "follow it; read the files next to it only when a step needs them.",
+    ]
+    lines += [f"- {s.name}: {_brief(s.description)} ({s.source})" for s in listed]
+    return "\n".join(lines)
+
+
+def _brief(description: str) -> str:
+    text = " ".join(description.split())
+    return text if len(text) <= BRIEF_CHARS else text[: BRIEF_CHARS - 1].rsplit(" ", 1)[0] + "…"

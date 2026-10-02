@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import io
+
 from pydantic import Field
 from pypdf import PdfReader
 
-from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
+from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput, mark_seen
 from tinyharness.tools.read import resolve_readable
+from tinyharness.workspace.files import read_bytes
 
 
 class PdfInput(ToolInput):
@@ -24,12 +27,13 @@ class PdfTool(Tool[PdfInput]):
     read_only = True
 
     async def run(self, args: PdfInput, ctx: ToolContext) -> str:
-        path = resolve_readable(args.path, ctx)
+        path = resolve_readable(args, args.path, ctx)
         if path.suffix.lower() != ".pdf":
             raise ToolError(f"not a PDF: {path.name}. Use Read for plain text files.")
 
         try:
-            reader = PdfReader(str(path))
+            # From bytes read without following symlinks, not a path pypdf would open itself.
+            reader = PdfReader(io.BytesIO(read_bytes(path)))
             if reader.is_encrypted:
                 reader.decrypt("")
         except Exception as e:
@@ -43,7 +47,7 @@ class PdfTool(Tool[PdfInput]):
         if start >= end:
             raise ToolError(f"empty page range {start}..{end} (PDF has {n} pages)")
 
-        ctx.read_paths.add(str(path))
+        mark_seen(ctx, path)
         out = [f"[PDF: {path.name}, {n} pages, extracting {start}..{end}]"]
         used = 0
         for i in range(start, end):

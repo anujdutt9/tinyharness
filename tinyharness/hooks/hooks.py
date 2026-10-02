@@ -3,12 +3,24 @@
 A hook is either a shell command (configured in hooks.toml) or a Python
 callable (passed via the SDK). It receives the event payload as JSON on stdin
 (or as arguments) and may return `{"decision": "allow"|"deny", "reason": ...}`.
+A shell command that exits non-zero denies, with its output as the reason.
+
+What a result does depends on the event:
+  PreToolUse   "deny" stops the call; the reason goes to the model
+  PostToolUse  a "reason" is added to the tool's result, for the model to act on
+  Stop         "block" (or "deny") keeps the agent going, with the reason as its next
+               instruction: a check that must pass before the turn ends (twice per turn at most)
 
     # ~/.tinyharness/hooks.toml or <project>/.tinyharness/hooks.toml
     [[hook]]
     event = "PreToolUse"
     matcher = { tool = "Write" }
     command = "./scripts/check-write.sh"
+
+    [[hook]]
+    event = "Stop"
+    command = "uv run pytest -q -x"
+    timeout = 300
 """
 
 from __future__ import annotations
@@ -25,7 +37,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from tinyharness.paths import search_dirs
-from tinyharness.security import sanitized_env
+from tinyharness.process import kill_group
+from tinyharness.security import redact_secrets, sanitized_env
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +57,7 @@ class Hook:
     command: str | None = None  # type="shell"
     callable: HookCallable | None = None  # type="python"
     name: str = ""
+    timeout: float | None = None  # seconds; None: the runner's default
 
     def matches(self, payload: dict[str, Any]) -> bool:
         return "tool" not in self.matcher or payload.get("tool") == self.matcher["tool"]
@@ -91,10 +105,12 @@ class HookRunner:
                 return None
             return res if isinstance(res, dict) else {"decision": str(res)}
         if hook.type == "shell" and hook.command:
-            return await self._run_shell(hook.command, event, payload)
+            return await self._run_shell(hook.command, event, payload, hook.timeout or self.timeout)
         return None
 
-    async def _run_shell(self, cmd: str, event: str, payload: dict[str, Any]) -> HookResult | None:
+    async def _run_shell(
+        self, cmd: str, event: str, payload: dict[str, Any], timeout: float
+    ) -> HookResult | None:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *shlex.split(cmd),
@@ -102,20 +118,27 @@ class HookRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.cwd,
-                env=sanitized_env(),  # hook scripts never see API keys
+                env=sanitized_env(),  # no credentials in the hook's environment
+                start_new_session=True,  # its own process group, so a timeout stops all of it
             )
         except FileNotFoundError as e:
             return {"decision": "ask", "reason": f"hook command not found: {e}"}
         try:
-            stdout, _ = await asyncio.wait_for(
-                proc.communicate(json.dumps({"event": event, **payload}).encode()),
-                timeout=self.timeout,
+            stdout, stderr = await asyncio.wait_for(
+                # Hooks may forward their input (to an audit log, a chat): no credentials in it.
+                proc.communicate(redact_secrets(json.dumps({"event": event, **payload})).encode()),
+                timeout=timeout,
             )
         except TimeoutError:
-            proc.kill()
-            return {"decision": "ask", "reason": "hook timed out"}
+            await kill_group(proc)
+            return {"decision": "ask", "reason": f"hook timed out after {timeout:g}s"}
         if proc.returncode != 0:
-            return {"decision": "deny", "reason": f"hook exited {proc.returncode}"}
+            # What it printed is the useful part (a failing test, a lint error), the end of it most.
+            said = (stdout + stderr).decode(errors="replace").strip()[-3000:]
+            return {
+                "decision": "deny",
+                "reason": f"`{cmd}` exited {proc.returncode}" + (f":\n{said}" if said else ""),
+            }
         out = stdout.decode(errors="replace").strip()
         if not out:
             return None
@@ -129,10 +152,21 @@ class HookRunner:
 def load_hooks_file(path: Path) -> list[Hook]:
     if not path.exists():
         return []
-    with path.open("rb") as f:
-        data = tomllib.load(f)
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        log.warning("skipping hooks in %s: %s", path, e)
+        return []
+    entries = data.get("hook") or []
+    if not isinstance(entries, list):
+        log.warning("skipping hooks in %s: `hook` must be a list of [[hook]] tables", path)
+        return []
     hooks = []
-    for entry in data.get("hook") or []:
+    for entry in entries:
+        if not isinstance(entry, dict):
+            log.warning("skipping hook entry %r in %s: expected a [[hook]] table", entry, path)
+            continue
         if entry.get("event") not in EVENTS:
             log.warning("skipping hook with unknown event %r in %s", entry.get("event"), path)
             continue
@@ -143,11 +177,14 @@ def load_hooks_file(path: Path) -> list[Hook]:
                 matcher=entry.get("matcher") or {},
                 command=entry.get("command"),
                 name=entry.get("name", path.stem),
+                timeout=float(entry["timeout"]) if isinstance(entry.get("timeout"), int | float) else None,
             )
         )
     return hooks
 
 
-def load_hooks(working_dir: Path) -> list[Hook]:
-    """Hooks from ~/.tinyharness/hooks.toml and <working-dir>/.tinyharness/hooks.toml."""
-    return [h for d in search_dirs(working_dir, "hooks.toml") for h in load_hooks_file(d)]
+def load_hooks(working_dir: Path, *, project: bool = True) -> list[Hook]:
+    """Hooks from ~/.tinyharness/hooks.toml and, if `project` (a trusted folder; see
+    tinyharness/trust.py), <working-dir>/.tinyharness/hooks.toml."""
+    dirs = search_dirs(working_dir, "hooks.toml")
+    return [h for d in (dirs if project else dirs[:1]) for h in load_hooks_file(d)]

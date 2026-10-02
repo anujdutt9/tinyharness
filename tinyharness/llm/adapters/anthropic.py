@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from tinyharness.agent.history import Image
 from tinyharness.llm.adapters.base import Adapter, StreamParser, parse_arguments
 from tinyharness.llm.types import LLMError, ModelInfo, Request, StreamChunk
 
@@ -102,7 +103,10 @@ def _messages(request: Request) -> list[dict[str, Any]]:
 
     for m in request.messages:
         if m.role == "tool":
-            user({"type": "tool_result", "tool_use_id": m.tool_call_id, "content": m.content or ""})
+            content: str | list[dict[str, Any]] = m.content or ""
+            if m.images:  # Anthropic takes pictures inside a tool result
+                content = [{"type": "text", "text": m.content or ""}, *map(_image, m.images)]
+            user({"type": "tool_result", "tool_use_id": m.tool_call_id, "content": content})
         elif m.role == "assistant":
             blocks = request.echo(m)
             if blocks is None:
@@ -114,13 +118,20 @@ def _messages(request: Request) -> list[dict[str, Any]]:
             out.append({"role": "assistant", "content": blocks})
         else:
             user({"type": "text", "text": m.content or ""})
+            for image in m.images:
+                user(_image(image))
     return out
+
+
+def _image(image: Image) -> dict[str, Any]:
+    return {"type": "image", "source": {"type": "base64", "media_type": image.media_type, "data": image.data}}
 
 
 class _AnthropicParser(StreamParser):
     def __init__(self) -> None:
         self.blocks: dict[int, dict[str, Any]] = {}
         self.json: dict[int, list[str]] = {}
+        self.stop_reason: str | None = None
 
     def feed(self, event: dict[str, Any]) -> list[StreamChunk]:
         match event.get("type"):
@@ -149,7 +160,10 @@ class _AnthropicParser(StreamParser):
                     block["input"] = parse_arguments("".join(self.json.get(event["index"], [])))
             case "message_delta":
                 if reason := (event.get("delta") or {}).get("stop_reason"):
+                    self.stop_reason = reason
                     return [StreamChunk(finish_reason=reason)]
+            case "message_stop" if self.stop_reason is None:  # the end, even without a reason
+                return [StreamChunk(finish_reason="end_turn")]
             case "error":
                 error = event.get("error") or {}
                 raise LLMError(f"LLM error: {error.get('message', json.dumps(error))}")
@@ -170,6 +184,7 @@ class _AnthropicParser(StreamParser):
                 ]
             case "thinking_delta":
                 block["thinking"] = block.get("thinking", "") + delta["thinking"]
+                return [StreamChunk(reasoning_text=delta["thinking"])]
             case "signature_delta":
                 block["signature"] = delta["signature"]
         return []

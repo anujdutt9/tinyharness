@@ -1,7 +1,7 @@
 """Prompt templates live next to this file as Markdown, so they can be read and
 diffed on their own.
 
-    load_prompt("system", working_dir="/repo", scratch_dir="/repo/.tinyharness/tmp/x")
+    load_prompt("system", model_name="Claude Sonnet 5", model_id="claude-sonnet-5", provider="Anthropic")
 
 Placeholders are `{name}` (lowercase identifiers only), so literal braces such as
 JSON examples need no escaping. A missing variable is an error, which keeps an

@@ -72,3 +72,7 @@ class PermissionRules:
     def add_allow(self, rule: Rule) -> None:
         if rule not in self.allow:
             self.allow.append(rule)
+
+    def remove_allow(self, rule: Rule) -> None:
+        if rule in self.allow:
+            self.allow.remove(rule)

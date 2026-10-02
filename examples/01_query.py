@@ -11,10 +11,12 @@ from tinyharness import AssistantText, Done, SessionOptions, ToolResult, ToolUse
 
 
 async def main() -> None:
-    prompt = sys.argv[1] if len(sys.argv) > 1 else "Create hello.py that prints 'hi', then read it back."
+    prompt = sys.argv[1] if len(sys.argv) > 1 else "Create hello.py that prints 'hi', then run it."
     options = SessionOptions(
         working_dir=tempfile.mkdtemp(prefix="tinyharness-"),
-        permission_mode="acceptEdits",  # file tools inside working_dir run without asking
+        # Edits inside working_dir, and commands in the sandbox, run without asking.
+        # Anything else is denied: a one-shot script has no one to ask.
+        permission_mode="default",
     )
 
     async for event in query(prompt, options):

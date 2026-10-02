@@ -1,4 +1,5 @@
 """A multi-turn conversation: the Session keeps history and permissions between prompts.
+(To pick a conversation up again later, see 07_resume.py.)
 
 uv run python examples/02_session.py
 """
@@ -22,12 +23,15 @@ async def ask(session: Session, prompt: str) -> None:
 
 async def main() -> None:
     session = Session(
-        SessionOptions(working_dir=tempfile.mkdtemp(prefix="tinyharness-"), permission_mode="acceptEdits")
+        SessionOptions(working_dir=tempfile.mkdtemp(prefix="tinyharness-"), permission_mode="default")
     )
     try:
         await ask(session, "Write fib.py with a function fib(n) that returns the nth Fibonacci number.")
-        await ask(session, "Now add a __main__ block that prints fib(10).")  # remembers fib.py
+        await ask(session, "Now add a __main__ block that prints fib(10), and run it.")  # remembers fib.py
         await ask(session, "What did we just build? One sentence.")
+        total = session.usage.total  # tokens across every call, subagents included
+        cost = f", ${session.usage.cost:.4f}" if session.usage.cost is not None else ""
+        print(f"\n[{total.tokens:,} tokens{cost}]")
     finally:
         session.close()
 

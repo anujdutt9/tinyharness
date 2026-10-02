@@ -1,0 +1,1 @@
+The user has a quick side question (asked with /btw) while the conversation goes on. Answer it briefly, from what is already in this conversation. You can't use tools for this answer, and this exchange won't be kept in the conversation. If answering properly needs a tool (reading a file, running a command, a search), say so in one sentence instead of guessing.

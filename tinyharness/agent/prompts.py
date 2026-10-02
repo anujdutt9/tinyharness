@@ -2,22 +2,52 @@
 
 from __future__ import annotations
 
+import datetime
+import platform
+import shutil
+import subprocess
 from pathlib import Path
 
 from tinyharness.paths import home_dir, project_dir
 from tinyharness.prompts import load_prompt
 
+# Instruction files in each folder, in the order they're read; later ones take precedence.
+INSTRUCTION_FILES = (
+    "AGENTS.md",  # the name most agents use (Codex, opencode, pi, Cursor, Amp, Gemini CLI)
+    "AGENT.md",
+    "CLAUDE.md",  # so repos set up for Claude Code work out of the box
+)
+
 
 def agent_md_sources(working_dir: Path) -> list[Path]:
-    """AGENT.md files, lowest precedence first: managed, user, project, local."""
+    """Instruction files, lowest precedence first: managed, user, then each folder from the
+    repository's root down to the working directory (as Codex does: a subfolder's rules
+    refine the root's, so launching in `src/` still gets the repo's AGENTS.md), then the
+    private per-project ones. Outside a git repository only the working directory counts,
+    so a stray AGENTS.md in a parent folder (your home) doesn't apply to everything."""
     return [
         Path("/etc/tinyharness/AGENT.md"),
         home_dir() / "AGENT.md",
-        working_dir / "AGENT.md",
-        working_dir / "CLAUDE.md",  # so repos set up for Claude Code work out of the box
+        *(folder / name for folder in _repo_folders(working_dir) for name in INSTRUCTION_FILES),
         project_dir(working_dir) / "AGENT.md",
         working_dir / "AGENT.local.md",
     ]
+
+
+def repo_root(working_dir: Path) -> Path:
+    """The git repository's root, or the working directory outside a repository."""
+    return _repo_folders(working_dir)[0]
+
+
+def _repo_folders(working_dir: Path) -> list[Path]:
+    """The working directory and its parents up to the git repository's root, root first."""
+    here = working_dir.resolve()
+    chain = [here]
+    for parent in here.parents:
+        if (chain[-1] / ".git").exists():  # a directory, or a file in a worktree or submodule
+            return chain[::-1]
+        chain.append(parent)
+    return [here]
 
 
 def load_agent_md(working_dir: Path) -> str:
@@ -37,6 +67,44 @@ def load_agent_md(working_dir: Path) -> str:
     return "\n\n---\n\n".join(chunks)
 
 
+def environment(working_dir: Path) -> str:
+    """Facts about the machine a model otherwise guesses wrong: which userland its commands
+    meet (BSD on macOS: `sed -i ''`, no `timeout`), which Python command exists, and whether
+    this is a git repository. Worked out once per session, so the prompt stays cacheable."""
+    lines = ["# Environment"]
+    system = platform.system()
+    if system == "Darwin":
+        lines.append(
+            f"- OS: macOS {platform.mac_ver()[0]}. Commands are the BSD versions: `sed -i ''` takes "
+            "a suffix argument, and there is no GNU `timeout` (the Bash tool's timeout limits a command)."
+        )
+    else:
+        lines.append(f"- OS: {system} {platform.release()}")
+    shell = shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+    lines.append(f"- Shell for Bash: {shell}")
+    if shutil.which("python3") and not shutil.which("python"):
+        lines.append("- Python: run `python3` (there is no `python` command)")
+    branch = _git(working_dir, "branch", "--show-current")
+    if branch is not None:
+        lines.append(f"- Git: the working directory is a repository, on branch `{branch or '(detached)'}`")
+    else:
+        lines.append("- Git: the working directory is not a git repository")
+    return "\n".join(lines)
+
+
+def _git(cwd: Path, *args: str) -> str | None:
+    try:
+        done = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout.strip() if done.returncode == 0 else None
+
+
+NO_INSTRUCTIONS = (
+    "This project has no instructions file (AGENTS.md, AGENT.md or CLAUDE.md); don't look for one."
+)
+
+
 def build_system_prompt(
     working_dir: Path,
     scratch_dir: Path,
@@ -46,18 +114,20 @@ def build_system_prompt(
     provider: str,
     extra: str = "",
 ) -> str:
-    parts = [
-        load_prompt(
-            "system",
-            working_dir=working_dir,
-            scratch_dir=scratch_dir,
-            model_name=model_name,
-            model_id=model_id,
-            provider=provider,
-        )
-    ]
+    # What stays the same comes first and what changes per session (the scratch folder,
+    # the date) last, so a new session reuses the provider's cached prefix of the old one.
+    parts = [load_prompt("system", model_name=model_name, model_id=model_id, provider=provider)]
+    parts.append(environment(working_dir))
     if context := load_agent_md(working_dir):
         parts.append(f"# User context (AGENT.md)\n\n{context}")
+    else:  # say so, or the model goes looking for one
+        parts.append(NO_INSTRUCTIONS)
     if extra:
         parts.append(extra)
+    parts.append(
+        "# This session\n"
+        f"Working directory: {working_dir} (files you create go here unless the user says otherwise)\n"
+        f"Scratch directory, deleted when the session ends: {scratch_dir}\n"
+        f"Today's date: {datetime.date.today().isoformat()}"
+    )
     return "\n\n".join(parts)

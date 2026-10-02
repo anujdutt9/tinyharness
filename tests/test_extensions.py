@@ -99,9 +99,67 @@ def test_plugin_bundles_skills_agents_and_hooks(isolated_home, project):
     assert [h.command for h in loaded.hooks] == ["x.sh"]
 
 
+@pytest.mark.parametrize("key", ["hooks_file", "skills_dir", "agents_dir"])
+def test_plugin_paths_stay_inside_the_plugin(isolated_home, project, key):
+    """Folder trust fingerprints the plugin's directory; nothing it loads may live outside it."""
+    plugin = isolated_home / "plugins" / "kit"
+    plugin.mkdir(parents=True)
+    (isolated_home / "plugins" / "hooks.toml").write_text('[[hook]]\nevent = "Stop"\ncommand = "x.sh"\n')
+    (plugin / "plugin.toml").write_text(f'name = "kit"\n{key} = "../hooks.toml"\n')
+    assert load_plugins(project) == []
+
+
+@pytest.mark.parametrize(
+    "manifest, hooks",
+    [
+        ("name = [", ""),  # not TOML
+        ("skills_dir = 5", ""),  # wrong type
+        ("", "[[hook]\n"),  # the plugin's hooks.toml isn't TOML
+        ("", "hook = 1"),  # nor the right shape
+        ("", "hook = [1]"),
+    ],
+)
+def test_a_broken_plugin_is_skipped_not_fatal(isolated_home, project, manifest, hooks):
+    broken = isolated_home / "plugins" / "broken"
+    broken.mkdir(parents=True)
+    (broken / "plugin.toml").write_text(manifest)
+    if hooks:
+        (broken / "hooks.toml").write_text(hooks)
+    fine = isolated_home / "plugins" / "fine"
+    fine.mkdir()
+    (fine / "plugin.toml").write_text('name = "fine"\n')
+    assert "fine" in [p.name for p in load_plugins(project)]
+    assert all(p.hooks == [] for p in load_plugins(project))
+
+
+def test_a_broken_hooks_file_is_skipped(isolated_home, project):
+    isolated_home.mkdir(parents=True)
+    (isolated_home / "hooks.toml").write_text("[[hook]\n")
+    assert load_hooks(project) == []
+
+
 def test_agent_md_layers(isolated_home, project):
     isolated_home.mkdir(parents=True)
     (isolated_home / "AGENT.md").write_text("user context")
     (project / "CLAUDE.md").write_text("project context")
     out = load_agent_md(project)
     assert out.index("user context") < out.index("project context")
+
+
+def test_instructions_are_read_from_the_repo_root_down_to_the_working_directory(isolated_home, tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "AGENTS.md").write_text("repo rules")
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "AGENTS.md").write_text("package rules")
+    (repo / "pkg" / "src").mkdir()
+    out = load_agent_md(repo / "pkg" / "src")
+    assert out.index("repo rules") < out.index("package rules")  # the deeper file comes last and wins
+
+
+def test_outside_a_repo_only_the_working_directory_counts(isolated_home, tmp_path):
+    (tmp_path / "AGENTS.md").write_text("some parent's rules")
+    (tmp_path / "project").mkdir()
+    (tmp_path / "project" / "AGENTS.md").write_text("project rules")
+    out = load_agent_md(tmp_path / "project")
+    assert "project rules" in out and "some parent's rules" not in out

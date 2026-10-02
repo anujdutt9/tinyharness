@@ -85,6 +85,58 @@ async def test_grep_skips_dependency_and_hidden_dirs(ctx, tmp_path):
     assert "x.js" not in out and "x.txt" not in out
 
 
+async def test_grep_on_a_named_file_still_refuses_secrets(ctx, tmp_path):
+    (tmp_path / ".env").write_text("API_KEY=hunter2")
+    with pytest.raises(ToolError, match="secret-shaped"):
+        await call(GrepTool(), {"pattern": ".*", "path": ".env", "output_mode": "content"}, ctx)
+
+
+async def test_grep_on_a_named_file_still_skips_binaries(ctx, tmp_path):
+    (tmp_path / "img.bin").write_bytes(b"\x00foo")
+    with pytest.raises(ToolError, match="not a text file"):
+        await call(GrepTool(), {"pattern": "foo", "path": "img.bin"}, ctx)
+
+
+async def test_grep_on_a_named_file(ctx, tmp_path):
+    (tmp_path / "a.py").write_text("foo")
+    assert "a.py" in await call(GrepTool(), {"pattern": "foo", "path": "a.py"}, ctx)
+
+
+@pytest.fixture
+def credentials(tmp_path_factory):
+    """A credentials file outside the project, as ~/.aws/credentials would be."""
+    home = tmp_path_factory.mktemp("home")
+    (home / ".aws").mkdir()
+    (home / ".aws" / "credentials").write_text("aws_secret_access_key = SECRET123\n")
+    return home / ".aws"
+
+
+@pytest.mark.parametrize("mode", ["content", "files_with_matches", "count"])
+async def test_grep_does_not_follow_a_symlink_to_a_secret(ctx, tmp_path, credentials, mode):
+    """The secret check sees the link's own name ("leak"), so following it would leak."""
+    (tmp_path / "leak").symlink_to(credentials / "credentials")
+    (tmp_path / "app.py").write_text("x = 1\n")
+    out = await call(GrepTool(), {"pattern": ".", "output_mode": mode}, ctx)
+    assert "SECRET123" not in out and "leak" not in out and "app.py" in out
+
+
+async def test_grep_does_not_walk_into_a_symlinked_directory(ctx, tmp_path, credentials):
+    (tmp_path / "config").symlink_to(credentials)
+    (tmp_path / "app.py").write_text("key = 1\n")
+    out = await call(GrepTool(), {"pattern": "SECRET|key", "output_mode": "content"}, ctx)
+    assert "SECRET123" not in out and "app.py" in out
+
+
+def test_a_file_swapped_for_a_symlink_after_listing_is_skipped(tmp_path, credentials):
+    from tinyharness.tools.grep import _iter_searchable, _load
+
+    (tmp_path / "notes.txt").write_text("fine\n")
+    [listed] = list(_iter_searchable(tmp_path.resolve(), None))
+    listed.unlink()
+    listed.symlink_to(credentials / "credentials")  # between the walk and the read
+    assert _load(listed) is None
+
+
 # ---- TodoWrite ----
 
 TODOS = [
@@ -119,14 +171,14 @@ def test_format_todos_empty():
 # ---- Registry / gate integration ----
 
 
-def test_default_registry_has_search_and_todo():
-    assert {"Grep", "Glob", "TodoWrite"} <= set(default_registry().names())
+def test_the_core_registry_is_the_file_tools():
+    """Everything else (web, pdf, open, todo, agents) is an extension you turn on."""
+    assert default_registry().names() == ["Read", "Write", "Edit", "Glob", "Grep"]
 
 
 def test_plan_mode_offers_only_read_only_tools():
     names = {t.name for t in default_registry().available(PermissionMode.PLAN)}
-    assert {"Read", "Pdf", "Grep", "Glob", "TodoWrite"} <= names
-    assert "Write" not in names and "Edit" not in names
+    assert names == {"Read", "Grep", "Glob"}
 
 
 async def test_todowrite_skips_the_gate(tmp_path):

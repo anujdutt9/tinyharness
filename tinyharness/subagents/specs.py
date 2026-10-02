@@ -6,16 +6,17 @@ Built-ins ship as Markdown in tinyharness/prompts/agents/. Users add their own i
     ---
     name: reviewer
     description: Reviews a diff for bugs.
-    tools: [Read, Grep, Glob]
-    permission_mode: acceptEdits
-    model: anthropic/claude-haiku-4-5
+    tools: [Read, Grep, Glob]          # leave out for every tool the session has
+    permission_mode: default
+    model: small                       # inherit | small | provider:model | model id
+    max_steps: 60                      # model calls before it must wrap up (default 40)
     ---
     You are a meticulous code reviewer...
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from tinyharness.frontmatter import read_frontmatter_file
@@ -26,13 +27,27 @@ from tinyharness.prompts import AGENTS_DIR
 
 @dataclass
 class AgentSpec:
+    """A subagent. From the SDK: `SessionOptions(agents=[AgentSpec(...)])`.
+
+    `description` is what the model reads to decide when to use it, so say what it's
+    for. `tools` limits what it can do; None means every tool the session has (subagents
+    never get Agent or Team). `model` is chosen here, by whoever defines the agent, not
+    by the model at run time: see Session.llm_for for the accepted forms."""
+
     name: str
     description: str
     system_prompt: str = ""
-    tools: list[str] = field(default_factory=lambda: ["Read", "Write", "Edit"])
-    permission_mode: PermissionMode = PermissionMode.DEFAULT
+    tools: list[str] | None = None
+    # A limit, not a mode: the agent runs in the session's mode, held to this if it's
+    # stricter (None: no limit). An agent can't be more permissive than the session.
+    permission_mode: PermissionMode | None = None
     model: str | None = None
-    source: Path | None = None
+    max_steps: int | None = None  # model calls before it must wrap up (None: SUBAGENT_MAX_STEPS)
+    source: Path | None = None  # the Markdown file it came from, if any
+
+    def __post_init__(self) -> None:
+        if self.permission_mode is not None:
+            self.permission_mode = PermissionMode.parse(self.permission_mode)  # accept "default"
 
 
 def parse_agent_md(path: Path) -> AgentSpec | None:
@@ -44,9 +59,12 @@ def parse_agent_md(path: Path) -> AgentSpec | None:
         name=str(meta.get("name") or path.stem),
         description=str(meta.get("description") or ""),
         system_prompt=body,
-        tools=list(meta.get("tools") or ["Read", "Write", "Edit"]),
-        permission_mode=PermissionMode.parse(meta.get("permission_mode") or "default"),
-        model=meta.get("model"),
+        tools=list(meta["tools"]) if meta.get("tools") is not None else None,
+        permission_mode=PermissionMode.parse(meta["permission_mode"])
+        if meta.get("permission_mode")
+        else None,
+        model=str(meta["model"]) if meta.get("model") else None,
+        max_steps=int(meta["max_steps"]) if meta.get("max_steps") else None,
         source=path,
     )
 

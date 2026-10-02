@@ -16,7 +16,7 @@
 #   api_key_env    environment variable holding the key
 #   key_url        where to create a key (shown when no key is set)
 #   default_model  used until you pick one with /model
-#   small_model    cheap, fast model for background work (the auto-mode classifier)
+#   small_model    cheap, fast model for background work (auto-mode classifier, WebSearch digests)
 #   extra_headers  sent with every request
 #   extra_body     merged into every request body
 #   effort_param   chat API only: where the reasoning effort goes in the request
@@ -53,7 +53,8 @@ key_url = "https://openrouter.ai/settings/keys"
 default_model = "anthropic/claude-sonnet-5"
 small_model = "anthropic/claude-haiku-4.5"
 effort_param = "reasoning.effort"
-extra_body = { cache_control = { type = "ephemeral" } }  # caching for models that need it asked for
+# caching for models that need it asked for; `usage` makes it report what each call cost
+extra_body = { cache_control = { type = "ephemeral" }, usage = { include = true } }
 web_search = { plugins = [{ id = "web" }] }
 
 [gemini]
@@ -93,6 +94,7 @@ api_key_env = "MISTRAL_API_KEY"
 key_url = "https://console.mistral.ai/api-keys"
 default_model = "mistral-medium-latest"
 small_model = "mistral-small-latest"
+tool_id_pattern = "[A-Za-z0-9]{9}"
 
 [groq]
 label = "Groq"

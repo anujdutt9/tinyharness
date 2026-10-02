@@ -1,14 +1,56 @@
 # Extending tinyharness
 
-There are five extension points: tools, hooks, subagents, plugins and skills
-(see [skills.md](skills.md)). User-global extensions live in `~/.tinyharness/`.
-Project ones live in `<project>/.tinyharness/`.
+The main way to add anything is an **extension**: one Python file with a `setup(th)`
+function that adds tools, prompt sections, slash commands and event handlers. The
+built-in features (web, pdf, open, todo, agents) are extensions too. The full contract is
+in [extension-api.md](extension-api.md); this page shows the common cases.
 
-## Tools
+Besides extensions there are hooks, subagents, plugins and skills (see
+[skills.md](skills.md)). Your own live in `~/.tinyharness/`; a project's live in
+`<project>/.tinyharness/` (its hooks, plugins and extensions load only once you trust
+the folder).
 
-A tool has three parts: a pydantic model for its arguments, a description for the
-model, and an async `run`. The argument model is turned into the JSON schema sent to
-the LLM, and incoming arguments are checked against it before `run` is called.
+## Extensions
+
+```python
+# ~/.tinyharness/extensions/wordcount.py
+"""Counts words in text files."""
+
+from tinyharness.ext import Extension
+from tinyharness.tools.base import ToolContext, ToolError
+
+
+def setup(th: Extension) -> None:
+    @th.tool(read_only=True)  # read-only: never asks, may run in parallel, allowed in plan mode
+    async def word_count(path: str, ctx: ToolContext) -> str:
+        """Count the words in a text file.
+
+        path: the file to count
+        """
+        file = ctx.workspace.resolve(path)
+        if file is None or not file.is_file():
+            raise ToolError(f"not a file: {path}")  # the model sees this and can recover
+        return f"{len(file.read_text().split())} words"
+```
+
+Turn it on in `~/.tinyharness/config.toml`, or for one session with
+`/extensions on wordcount`:
+
+```toml
+[extensions]
+enabled = ["wordcount"]
+```
+
+The docstring and type hints become the tool's description and schema; a parameter
+named `ctx` gets the tool context. `/extensions` lists what's loaded and how many tokens
+each one adds to every request. From the SDK, pass extensions in code:
+`SessionOptions(extensions=[wordcount])`, a module or a setup function.
+
+## Tools as classes
+
+For full control (custom permission checks, a label for the user, images in the result),
+write a `Tool` subclass and add it with `th.add_tool(...)` in an extension, or pass it in
+`SessionOptions(tools=[...])`:
 
 ```python
 from pydantic import Field
@@ -23,16 +65,16 @@ class WordCount(Tool[WordCountInput]):
     name = "WordCount"
     description = "Count the words in a text file."
     Input = WordCountInput
-    read_only = True  # allowed in plan mode; may run in parallel with other reads
+    read_only = True
 
     async def run(self, args: WordCountInput, ctx: ToolContext) -> str:
         path = ctx.workspace.resolve(args.path)
         if path is None or not path.is_file():
-            raise ToolError(f"not a file: {args.path}")  # the model sees this and can recover
+            raise ToolError(f"not a file: {args.path}")
         return f"{len(path.read_text().split())} words"
 
 
-session.tools.register(WordCount())
+SessionOptions(tools=[WordCount()])
 ```
 
 | Attribute | Effect |
@@ -47,26 +89,36 @@ session.tools.register(WordCount())
 Hooks run at lifecycle events. A `PreToolUse` hook can allow or deny a tool call,
 and it runs before the permission mode is applied.
 
-| Event | Payload |
-|---|---|
-| `SessionStart` | `session_id` |
-| `UserPromptSubmit` | `prompt` |
-| `PreToolUse` | `tool`, `args` |
-| `PostToolUse` | `tool`, `args`, `result` |
-| `Stop` | — |
+| Event | Payload | What a result does |
+|---|---|---|
+| `SessionStart` | `session_id` | nothing |
+| `UserPromptSubmit` | `prompt` | nothing |
+| `PreToolUse` | `tool`, `args` | `deny` stops the call; the reason goes to the model |
+| `PostToolUse` | `tool`, `args`, `result` | a `reason` is added to the tool's result |
+| `Stop` | — | `block` (or `deny`) keeps the agent going, with the reason as its next instruction (twice per turn at most) |
 
 **Shell hooks** go in `hooks.toml`. The payload arrives as JSON on stdin. Print
 `{"decision": "deny", "reason": "..."}` to block the call. A non-zero exit code also
-blocks it. Hook processes never see environment variables that look like credentials.
+denies, with what the command printed as the reason. Hook processes never see
+environment variables that look like credentials, and credentials are masked out of
+the JSON they receive. A hook gets 10 seconds unless it sets `timeout`.
 
 ```toml
 [[hook]]
 event = "PreToolUse"
 matcher = { tool = "Write" }
 command = "./scripts/no-generated-files.sh"
+
+# The turn can't end while the tests fail: their output goes back to the agent.
+[[hook]]
+event = "Stop"
+command = "uv run pytest -q -x"
+timeout = 300
 ```
 
-**Python hooks** are passed through the SDK:
+An extension reacts to the same events with `@th.on("tool_call")`, `"tool_result"`,
+`"user_prompt"` and `"turn_end"` (see [extension-api.md](extension-api.md#events)).
+**Python hooks** can also be passed through the SDK:
 
 ```python
 def guard(event, payload):
@@ -79,11 +131,13 @@ SessionOptions(hooks=[Hook(event="PreToolUse", type="python", callable=guard)])
 
 ## Subagents
 
-The `Agent` tool runs a task in a fresh context and returns only the final answer.
+Subagents and teams come with the `agents` extension (`/extensions on agents`). The
+`Agent` tool runs a task in a fresh context and returns only the final answer.
 The model uses it on its own when a job is big enough. It comes with four built-in
-agents: `explore`, `plan` and `researcher` (read-only; `researcher` searches the web)
-and `general-purpose`. Several read-only agents started in one reply run in
-parallel; agents that can write take turns. To add your own, put a Markdown file in
+agents: `explore`, `plan` and `researcher` (read-only; `researcher` searches the web when the `web` extension is on)
+and `general-purpose`. Several agents started in one reply run in parallel, writers
+included: their calls that change things (Bash, Edit, Write) take turns, so two never
+write at once, while their model calls overlap. To add your own, put a Markdown file in
 `agents/`:
 
 ```markdown
@@ -91,19 +145,21 @@ parallel; agents that can write take turns. To add your own, put a Markdown file
 name: reviewer
 description: Reviews a change for bugs and missing tests.
 tools: [Read, Grep, Glob]
-permission_mode: acceptEdits
+permission_mode: default   # optional: never more permissive than this
 ---
 You are a meticulous reviewer. Report concrete bugs with file:line references.
 ```
 
-Subagents have their own permission mode (plan mode and bypass carry over from the
-session) and can't start further subagents. Their transcripts go to
-`.tinyharness/sidechains/`, and their progress is shown live (SDK: `on_event`).
+Subagents run in the session's permission mode, and follow it when you switch (even
+mid-run). An agent's `permission_mode` is a limit: it can make the agent stricter than
+the session, never more permissive. A subagent's permission prompts say which agent is
+asking. Subagents can't start further subagents. Their transcripts go to
+`~/.tinyharness/projects/<project>/sidechains/`, and their progress is shown live (SDK: `on_event`).
 
 **Teams.** For a goal that splits into parts, the model can call `Team` with a list of
 tasks, each with an agent type and the tasks it depends on. A task starts when its
-dependencies are done and gets their results; independent read-only tasks run in
-parallel (up to 4 at a time), writers take turns. Teammates share a board
+dependencies are done and gets their results; independent tasks run in parallel (up
+to 4 at a time), and teammates' calls that change things take turns. Teammates share a board
 (`TeamBoard`) and can message each other (`TeamMessage`); if a task fails, the tasks
 that depend on it are skipped. The lead gets one report with every result.
 

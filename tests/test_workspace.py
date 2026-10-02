@@ -36,10 +36,11 @@ def test_read_roots_are_trusted(tmp_path_factory):
     assert not ws.is_trusted("/etc/passwd")
 
 
-def test_config_location_follows_xdg_config_home(tmp_path, monkeypatch):
-    from tinyharness.paths import default_config_path
+def test_everything_of_yours_is_in_one_folder(tmp_path, monkeypatch):
+    from tinyharness.paths import auth_path, default_config_path, home_dir, legacy_config_dir
 
+    assert default_config_path() == home_dir() / "config.toml"
+    assert auth_path() == home_dir() / "auth.json"
+    # Only for moving an earlier version's files in: it follows $XDG_CONFIG_HOME, as it did.
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
-    assert default_config_path() == tmp_path / "xdg" / "tinyharness" / "config.toml"
-    monkeypatch.delenv("XDG_CONFIG_HOME")
-    assert default_config_path().parts[-3:] == (".config", "tinyharness", "config.toml")
+    assert legacy_config_dir() == tmp_path / "xdg" / "tinyharness"

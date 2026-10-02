@@ -96,7 +96,74 @@ async def test_webfetch_errors_are_explained(tmp_path, response, error):
 )
 async def test_webfetch_refuses_local_and_private_addresses(url):
     with pytest.raises(ToolError):
-        await _check_url(url, resolve=False)
+        await _check_url(url)
+
+
+def resolving(*answers: list[str]):
+    """A resolver that gives each answer in turn, like DNS that changes between lookups."""
+    lookups = []
+
+    async def resolver(host, port):
+        lookups.append(host)
+        return answers[min(len(lookups), len(answers)) - 1]
+
+    resolver.lookups = lookups
+    return resolver
+
+
+async def test_webfetch_connects_to_the_address_it_checked(tmp_path, monkeypatch):
+    """DNS rebinding: a second lookup could point elsewhere, so there isn't one."""
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host, request.headers["host"], request.extensions.get("sni_hostname")))
+        return html("<p>hi</p>")
+
+    resolver = resolving(["93.184.216.34"], ["127.0.0.1"])
+    tool = WebFetchTool(transport=httpx.MockTransport(handler), resolver=resolver)
+    out = await call(tool, {"url": "https://example.com/page"}, make_ctx(tmp_path))
+    assert seen == [("93.184.216.34", "example.com", "example.com")]  # TLS still checks example.com
+    assert resolver.lookups == ["example.com"]  # the rebinding answer is never asked for
+    assert out.startswith("https://example.com/page")  # shown and linked by name, not address
+
+
+async def test_webfetch_refuses_a_name_that_resolves_to_a_private_address(tmp_path):
+    tool = WebFetchTool(
+        transport=httpx.MockTransport(lambda r: html("secret")), resolver=resolving(["10.0.0.5"])
+    )
+    with pytest.raises(ToolError, match="private network"):
+        await call(tool, {"url": "https://intranet.example.com/"}, make_ctx(tmp_path))
+
+
+async def test_webfetch_tries_the_next_address_when_one_is_down(tmp_path, monkeypatch):
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "2606:2800:220:1:248:1893:25c8:1946":
+            raise httpx.ConnectError("unreachable", request=request)
+        return html("<p>hi</p>")
+
+    resolver = resolving(["2606:2800:220:1:248:1893:25c8:1946", "93.184.216.34"])
+    tool = WebFetchTool(transport=httpx.MockTransport(handler), resolver=resolver)
+    assert "hi" in await call(tool, {"url": "https://example.com:8443/"}, make_ctx(tmp_path))
+
+
+async def test_webfetch_does_not_follow_a_redirect_to_another_site(tmp_path):
+    """Permission is per site: the other site gets asked about when the model fetches it."""
+    tool = serve(
+        {
+            "https://allowed.example/go": httpx.Response(
+                302, headers={"location": "https://denied.example/x"}
+            ),
+            "https://denied.example/x": html("<p>should not be read</p>"),
+        }
+    )
+    out = await call(tool, {"url": "https://allowed.example/go"}, make_ctx(tmp_path))
+    assert "redirects to https://denied.example/x" in out and "call WebFetch with that URL" in out
+    assert "should not be read" not in out
 
 
 # ---- permissions: WebFetch asks per site ----
@@ -109,7 +176,7 @@ async def test_webfetch_asks_once_per_site(tmp_path):
         asked.append(request.remember_label)
         return Decision(True, source="prompt", remember=True)
 
-    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.ACCEPT_EDITS, callback=callback)
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.ASK, callback=callback)
     tool = WebFetchTool()
 
     async def check(url):
@@ -122,6 +189,23 @@ async def test_webfetch_asks_once_per_site(tmp_path):
     assert len(asked) == 1  # remembered for that site
     await check("https://evil.example/")
     assert len(asked) == 2  # another site asks again
+
+
+async def test_default_mode_reads_public_pages_without_asking(tmp_path):
+    """Seen live: with the web extension on, WebSearch ran but every WebFetch asked, so a
+    one-shot run couldn't read the page it had just found. A URL with a query string,
+    which could carry data out, still asks."""
+    asked = []
+
+    async def callback(request):
+        asked.append(request.tool)
+        return Decision(False, source="prompt")
+
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.DEFAULT, callback=callback)
+    tool = WebFetchTool()
+    page = await gate.check(tool, {"url": "https://docs.python.org/3/"}, None, target_host="docs.python.org")
+    query = await gate.check(tool, {"url": "https://x.example/?q=secret"}, None, target_host="x.example")
+    assert page.allow and not query.allow and asked == ["WebFetch"]
 
 
 async def test_site_rules_from_the_config(tmp_path):
@@ -146,7 +230,7 @@ class FakeLLM:
     def supports_web_search(self):
         return bool(self.provider.web_search)
 
-    async def one_shot(self, prompt, **kwargs):
+    async def one_shot_small(self, prompt, **kwargs):
         self.calls.append((prompt, kwargs))
         return "Aero 14 is best [review](https://example.com/aero)"
 

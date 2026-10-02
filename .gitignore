@@ -17,7 +17,7 @@ dist/
 *.local.md
 
 # Editors / OS
-.claude/settings.local.json
+.claude/
 .idea/
 .vscode/
 .DS_Store
