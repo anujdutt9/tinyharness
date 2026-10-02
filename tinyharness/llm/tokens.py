@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-import json
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tinyharness.agent.history import Message
+
+# What one image costs, roughly: a screenshot-sized picture is ~1,600 tokens on most APIs.
+IMAGE_TOKENS = 1_600
 
 
 def _load_counter() -> Callable[[str], int]:
@@ -20,13 +25,12 @@ def _load_counter() -> Callable[[str], int]:
 count_tokens = _load_counter()
 
 
-def count_message_tokens(messages: list[dict[str, Any]]) -> int:
+def estimate_tokens(messages: Iterable[Message]) -> int:
+    """What these messages take up in the context: text, tool calls (a Write's content is
+    in its arguments) and images. The one estimate everything uses (compaction, /context)."""
     total = 0
     for m in messages:
-        total += 4  # per-message framing overhead
-        for v in m.values():
-            if isinstance(v, str):
-                total += count_tokens(v)
-            elif v is not None:
-                total += count_tokens(json.dumps(v, default=str))
+        total += 4 + count_tokens(m.content or "") + IMAGE_TOKENS * len(m.images)
+        for call in m.tool_calls:
+            total += count_tokens(call.name) + count_tokens(call.arguments)
     return total

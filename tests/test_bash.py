@@ -104,7 +104,7 @@ async def test_long_output_keeps_head_and_tail(tmp_path, monkeypatch):
 async def test_sandbox_denials_come_with_a_hint(tmp_path):
     tool = BashTool(FakeSandbox(), SandboxPolicy(write_roots=(tmp_path,)))
     out = await run(tool, "echo 'x: Operation not permitted'", tmp_path)
-    assert "the sandbox blocks" in out
+    assert "this ran in the sandbox" in out
 
 
 def test_description_matches_the_sandbox(tmp_path):
@@ -131,7 +131,7 @@ async def check(tmp_path, tool, mode, args=None):
     return decision, user.asked
 
 
-@pytest.mark.parametrize("mode", [PermissionMode.ACCEPT_EDITS, PermissionMode.AUTO])
+@pytest.mark.parametrize("mode", [PermissionMode.DEFAULT, PermissionMode.AUTO])
 async def test_sandboxed_commands_run_without_asking_when_edits_are_allowed(tmp_path, mode):
     tool = BashTool(FakeSandbox(), SandboxPolicy(write_roots=(tmp_path,)))
     decision, asked = await check(tmp_path, tool, mode)
@@ -140,11 +140,11 @@ async def test_sandboxed_commands_run_without_asking_when_edits_are_allowed(tmp_
 
 async def test_sandboxed_commands_still_ask_in_default_mode(tmp_path):
     tool = BashTool(FakeSandbox(), SandboxPolicy(write_roots=(tmp_path,)))
-    _, asked = await check(tmp_path, tool, PermissionMode.DEFAULT)
+    _, asked = await check(tmp_path, tool, PermissionMode.ASK)
     assert len(asked) == 1
 
 
-@pytest.mark.parametrize("mode", [PermissionMode.ACCEPT_EDITS, PermissionMode.AUTO])
+@pytest.mark.parametrize("mode", [PermissionMode.DEFAULT, PermissionMode.AUTO])
 async def test_unsandboxed_commands_always_ask(tmp_path, mode):
     _, [request] = await check(tmp_path, unsandboxed(tmp_path), mode)
     if mode == PermissionMode.AUTO:
@@ -174,7 +174,7 @@ def sandboxed_bash(tmp_path) -> BashTool:
 UNSANDBOXED = {"command": "pip install requests", "sandbox": False}
 
 
-@pytest.mark.parametrize("mode", [PermissionMode.DEFAULT, PermissionMode.ACCEPT_EDITS, PermissionMode.AUTO])
+@pytest.mark.parametrize("mode", [PermissionMode.ASK, PermissionMode.DEFAULT, PermissionMode.AUTO])
 @pytest.mark.parametrize("flag", [False, "false"])  # a string "false" parses the same way
 async def test_leaving_the_sandbox_always_asks_and_cannot_be_remembered(tmp_path, mode, flag):
     tool = sandboxed_bash(tmp_path)
@@ -229,7 +229,7 @@ async def test_without_a_sandbox_there_is_nothing_to_escape(tmp_path):
 # ---- Open ----
 
 
-@pytest.mark.parametrize("mode", [PermissionMode.ACCEPT_EDITS, PermissionMode.AUTO])
+@pytest.mark.parametrize("mode", [PermissionMode.DEFAULT, PermissionMode.AUTO])
 async def test_open_always_asks_even_for_project_files(tmp_path, mode):
     _, asked = await check(tmp_path, OpenTool(), mode, {"target": "report.html"})
     assert len(asked) == 1
@@ -255,14 +255,14 @@ async def gate_check(tmp_path, mode, target, *, allow=(), deny=(), remember=True
 
 @pytest.mark.parametrize("target", ["report.pdf", "report.html", "https://example.com/x"])
 async def test_saying_dont_ask_again_does_not_stop_open_asking(tmp_path, target):
-    _, asked, gate = await gate_check(tmp_path, PermissionMode.DEFAULT, target)
+    _, asked, gate = await gate_check(tmp_path, PermissionMode.ASK, target)
     assert asked[0].remember_label == ""  # not offered
-    _, asked_again, _ = await gate_check(tmp_path, PermissionMode.DEFAULT, target)
-    assert len(asked_again) == 1 and gate.mode == PermissionMode.DEFAULT
+    _, asked_again, _ = await gate_check(tmp_path, PermissionMode.ASK, target)
+    assert len(asked_again) == 1 and gate.mode == PermissionMode.ASK
 
 
 async def test_an_allow_rule_does_not_approve_open(tmp_path):
-    decision, asked, _ = await gate_check(tmp_path, PermissionMode.DEFAULT, "report.html", allow=["Open"])
+    decision, asked, _ = await gate_check(tmp_path, PermissionMode.ASK, "report.html", allow=["Open"])
     assert decision.allow and len(asked) == 1  # it still asked
 
 
@@ -271,7 +271,7 @@ async def test_an_allow_rule_does_not_approve_open(tmp_path):
     [("private/report.pdf", "Open(private/*)"), ("https://evil.example/x", "Open(domain:evil.example)")],
 )
 async def test_deny_rules_apply_to_open_by_path_and_site(tmp_path, target, deny):
-    decision, asked, _ = await gate_check(tmp_path, PermissionMode.DEFAULT, target, deny=[deny])
+    decision, asked, _ = await gate_check(tmp_path, PermissionMode.ASK, target, deny=[deny])
     assert not decision.allow and decision.source == "rule" and asked == []
 
 
@@ -309,3 +309,40 @@ async def test_open_hands_documents_to_the_system_opener(tmp_path, monkeypatch):
     out = await call(OpenTool(), {"target": "report.html"}, make_ctx(tmp_path))
     assert out == f"opened {tmp_path.resolve() / 'report.html'}"
     assert seen.read_text().strip() == str(tmp_path.resolve() / "report.html")
+
+
+@pytest.mark.parametrize(
+    ("command", "reads"),
+    [
+        ("ls -la", True),
+        ("cat a.txt | grep x | wc -l", True),
+        ("git log --oneline", True),
+        ("sqlite3 -readonly app.db 'SELECT 1'", True),
+        ("find . -name '*.py'", True),
+        ("sqlite3 app.db 'SELECT 1'", False),
+        ("sqlite3 -readonly app.db '.output x'", False),
+        ("git commit -m x", False),
+        ("cat a > b", False),
+        ("ls; rm x", False),
+        ("grep a f && rm f", False),
+        ("echo $(rm x)", False),
+        ("find . -delete", False),
+        ("python3 script.py", False),
+    ],
+)
+def test_only_commands_that_certainly_read_skip_the_write_lock(command, reads):
+    from tinyharness.tools.bash import only_reads
+
+    assert only_reads(command) is reads
+
+
+def test_commands_never_get_forced_color(monkeypatch):
+    """Seen live: FORCE_COLOR inherited from the terminal made Node print a NO_COLOR
+    warning on every command, and color codes are noise in what the model reads."""
+    from tinyharness.tools.bash import command_env
+
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("CLICOLOR_FORCE", "1")
+    env = command_env({"HTTPS_PROXY": "http://127.0.0.1:1"})
+    assert "FORCE_COLOR" not in env and "CLICOLOR_FORCE" not in env
+    assert env["NO_COLOR"] == "1" and env["HTTPS_PROXY"] == "http://127.0.0.1:1"

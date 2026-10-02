@@ -144,3 +144,22 @@ def test_agent_md_layers(isolated_home, project):
     (project / "CLAUDE.md").write_text("project context")
     out = load_agent_md(project)
     assert out.index("user context") < out.index("project context")
+
+
+def test_instructions_are_read_from_the_repo_root_down_to_the_working_directory(isolated_home, tmp_path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "AGENTS.md").write_text("repo rules")
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "AGENTS.md").write_text("package rules")
+    (repo / "pkg" / "src").mkdir()
+    out = load_agent_md(repo / "pkg" / "src")
+    assert out.index("repo rules") < out.index("package rules")  # the deeper file comes last and wins
+
+
+def test_outside_a_repo_only_the_working_directory_counts(isolated_home, tmp_path):
+    (tmp_path / "AGENTS.md").write_text("some parent's rules")
+    (tmp_path / "project").mkdir()
+    (tmp_path / "project" / "AGENTS.md").write_text("project rules")
+    out = load_agent_md(tmp_path / "project")
+    assert "project rules" in out and "some parent's rules" not in out

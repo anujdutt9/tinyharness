@@ -15,10 +15,11 @@ Here three agents each use a different form, and all three work on the same file
 
     reviewer        model="inherit"                     (AgentSpec, below)
     line-counter    model: small                        (Markdown file, below)
-    second-opinion  model="anthropic:claude-haiku-4-5"  (AgentSpec; override with argv[1])
+    second-opinion  model=<argv[1]>, e.g. another provider's model (AgentSpec; without an
+                    argument it uses the session's model, so the example runs on any key)
 
 uv run python examples/06_subagent_models.py
-uv run python examples/06_subagent_models.py openai:gpt-6-sol
+uv run python examples/06_subagent_models.py anthropic:claude-haiku-4-5
 """
 
 import asyncio
@@ -36,6 +37,7 @@ from tinyharness import (
     SubagentUpdate,
     ToolUse,
 )
+from tinyharness.extensions import agents as agents_extension
 
 # An agent can also be a Markdown file, in ~/.tinyharness/agents/ or
 # <project>/.tinyharness/agents/. The same `model` values work in its frontmatter.
@@ -84,7 +86,7 @@ def on_event(event: Event) -> None:
 
 
 async def main() -> None:
-    other_provider_model = sys.argv[1] if len(sys.argv) > 1 else "anthropic:claude-haiku-4-5"
+    other_provider_model = sys.argv[1] if len(sys.argv) > 1 else "inherit"
 
     work_dir = Path(tempfile.mkdtemp(prefix="tinyharness-"))
     (work_dir / "fib.py").write_text(
@@ -107,11 +109,15 @@ async def main() -> None:
             description="An independent review from a different model. Read-only.",
             system_prompt="You give a second, independent code review. Be brief.",
             tools=REVIEW_TOOLS,
-            model=other_provider_model,  # a model from another provider
+            model=other_provider_model,  # e.g. a model from another provider (argv[1])
         ),
     ]
 
-    session = Session(SessionOptions(working_dir=work_dir, agents=agents, on_event=on_event))
+    # Subagents come with the agents extension (in config: [extensions] enabled = ["agents"]).
+    options = SessionOptions(
+        working_dir=work_dir, agents=agents, extensions=[agents_extension], on_event=on_event
+    )
+    session = Session(options)
     try:
         # Show what each agent runs on. Session.llm_for resolves the `model` setting,
         # the same way the Agent tool does when it starts one.

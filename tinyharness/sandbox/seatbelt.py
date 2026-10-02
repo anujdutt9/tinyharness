@@ -49,6 +49,8 @@ class Seatbelt(Sandbox):
 
 def profile(policy: SandboxPolicy) -> str:
     lines = ["(version 1)", "(allow default)", "", "; network: none, or loopback only", "(deny network*)"]
+    if policy.proxy_port and not policy.allow_localhost:
+        lines.append(f'(allow network-outbound (remote ip "localhost:{policy.proxy_port}"))')
     if policy.allow_localhost:
         lines += [
             '(allow network-bind network-inbound (local ip "localhost:*"))',

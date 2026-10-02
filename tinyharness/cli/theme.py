@@ -98,32 +98,36 @@ def _is_light(choice: str) -> bool:
 THEME_SETTING, THEME_SOURCE = theme_setting()
 LIGHT = _is_light(THEME_SETTING)
 
+# "Field Notes": ink on paper, with a highlighter for what matters. BRAND is the ink,
+# BRAND_2 a second ink (keys, code), HIGHLIGHT the marker, used as a background only.
 if LIGHT:
-    BRAND, BRAND_2 = "#7c3aed", "#0f766e"
-    MUTED, SUBTLE = "#52525b", "#a1a1aa"
-    SUCCESS, WARNING, ERROR = "#15803d", "#b45309", "#b91c1c"
-    ADDED, REMOVED = "#15803d", "#b91c1c"
+    BRAND, BRAND_2, ON_BRAND = "#1f5f99", "#127a6a", "#ffffff"
+    HIGHLIGHT, ON_HIGHLIGHT = "#ffe15a", "#2a2300"
+    MUTED, SUBTLE = "#5b6876", "#9aa6b2"
+    SUCCESS, WARNING, ERROR = "#1d7a45", "#a86400", "#b42318"
+    ADDED, REMOVED = "#1d7a45", "#b42318"
     TOOL_COLORS = {
-        "read": "#0f766e",
-        "edit": "#7c3aed",
-        "run": "#c2410c",
-        "web": "#1d4ed8",
-        "agent": "#be185d",
+        "read": "#1f5f99",
+        "edit": "#8a5a00",
+        "run": "#b4532a",
+        "web": "#127a6a",
+        "agent": "#7a4bb5",
     }
-    MENU_BG, MENU_FG = "#f4f4f5", "#27272a"
+    MENU_BG, MENU_FG = "#eef2f6", "#17212c"
 else:
-    BRAND, BRAND_2 = "#a78bfa", "#5eead4"  # violet and mint: the wordmark's gradient
-    MUTED, SUBTLE = "#8b8fa3", "#5c6070"
-    SUCCESS, WARNING, ERROR = "#4ade80", "#fbbf24", "#f87171"
-    ADDED, REMOVED = "#86efac", "#fca5a5"
+    BRAND, BRAND_2, ON_BRAND = "#8ec2ec", "#8fd8c4", "#0b1016"
+    HIGHLIGHT, ON_HIGHLIGHT = "#e8c93e", "#1f1a00"
+    MUTED, SUBTLE = "#93a1af", "#5d6b78"
+    SUCCESS, WARNING, ERROR = "#79d29a", "#f2bd5c", "#ff8a7a"
+    ADDED, REMOVED = "#79d29a", "#ff8a7a"
     TOOL_COLORS = {
-        "read": "#5eead4",
-        "edit": "#c4b5fd",
-        "run": "#fdba74",
-        "web": "#7dd3fc",
-        "agent": "#f9a8d4",
+        "read": "#8ec2ec",
+        "edit": "#f2d16b",
+        "run": "#f0a37f",
+        "web": "#8fd8c4",
+        "agent": "#c9aaf0",
     }
-    MENU_BG, MENU_FG = "#1f2130", "#c9cbd6"
+    MENU_BG, MENU_FG = "#18212b", "#d6e0e9"
 
 # Each tool's family, which gives it its color: looking, changing, running, the web, agents.
 TOOL_KIND = {
@@ -140,7 +144,7 @@ TOOL_KIND = {
     "Team": "agent",
 }
 
-LOGO = "◆"
+LOGO = "◌"  # the agent loop: a circle with a gap (the README's mark)
 BULLET = "●"
 ELBOW = "⎿"
 PROMPT = "❯"
@@ -162,6 +166,7 @@ THEME = Theme(
         "diff.add": ADDED,
         "diff.del": REMOVED,
         "key": f"bold {BRAND_2}",
+        "highlight": f"{ON_HIGHLIGHT} on {HIGHLIGHT}",
         # Markdown tweaks for model output.
         "markdown.code": f"bold {BRAND_2}",
         "markdown.link": f"underline {BRAND_2}",
@@ -179,24 +184,24 @@ THEME = Theme(
 # -- permission modes -----------------------------------------------------------
 
 MODE_STYLE = {
-    PermissionMode.DEFAULT: MUTED,
-    PermissionMode.ACCEPT_EDITS: BRAND,
+    PermissionMode.ASK: MUTED,
+    PermissionMode.DEFAULT: BRAND,
     PermissionMode.PLAN: BRAND_2,
     PermissionMode.AUTO: WARNING,
     PermissionMode.BYPASS: ERROR,
 }
 
 MODE_LABEL = {
+    PermissionMode.ASK: "ask",
     PermissionMode.DEFAULT: "default",
-    PermissionMode.ACCEPT_EDITS: "accept edits",
     PermissionMode.PLAN: "plan",
     PermissionMode.AUTO: "auto",
     PermissionMode.BYPASS: "bypass",
 }
 
 MODE_HINT = {
-    PermissionMode.DEFAULT: "asks before edits",
-    PermissionMode.ACCEPT_EDITS: "edits in this project run without asking",
+    PermissionMode.ASK: "asks before every edit and command",
+    PermissionMode.DEFAULT: "works in this project and the sandbox; asks before anything else",
     PermissionMode.PLAN: "read-only: looks, doesn't touch",
     PermissionMode.AUTO: "works on its own; asks before risky actions",
     PermissionMode.BYPASS: "never asks",
@@ -218,15 +223,15 @@ PT_STYLE = Style.from_dict(
         "toolbar.err": ERROR,
         "toolbar.brand": BRAND_2,
         "completion-menu": f"bg:{MENU_BG} {MENU_FG}",
-        "completion-menu.completion.current": f"bg:{BRAND} #111111 bold",
+        "completion-menu.completion.current": f"bg:{BRAND} {ON_BRAND} bold",
         "completion-menu.meta.completion": f"bg:{MENU_BG} {MUTED}",
-        "completion-menu.meta.completion.current": f"bg:{BRAND} #111111",
+        "completion-menu.meta.completion.current": f"bg:{BRAND} {ON_BRAND}",
         # While typing a search: the rest of each name stays readable (prompt_toolkit's
         # default is a near-invisible #444444) and the typed letters stand out.
         "completion-menu.completion fuzzymatch.outside": MENU_FG,
         "completion-menu.completion fuzzymatch.inside": f"{BRAND_2} bold",
-        "completion-menu.completion.current fuzzymatch.outside": "#111111",
-        "completion-menu.completion.current fuzzymatch.inside": "#111111 bold",
+        "completion-menu.completion.current fuzzymatch.outside": ON_BRAND,
+        "completion-menu.completion.current fuzzymatch.inside": f"{ON_BRAND} bold",
         # The approval prompt (ChoiceInput).
         "selected-option": f"{BRAND} bold",
         "number": SUBTLE,
@@ -237,21 +242,12 @@ PT_STYLE = Style.from_dict(
 # -- helpers --------------------------------------------------------------------
 
 
-def gradient(text: str, start: str = BRAND, end: str = BRAND_2, bold: bool = True) -> Text:
-    """Color `text` with a left-to-right gradient between two hex colors."""
-    a, b = _rgb(start), _rgb(end)
-    out = Text()
-    steps = max(len(text) - 1, 1)
-    for i, char in enumerate(text):
-        t = i / steps
-        r, g, bl = (round(x + (y - x) * t) for x, y in zip(a, b, strict=True))
-        out.append(char, style=f"{'bold ' if bold else ''}#{r:02x}{g:02x}{bl:02x}")
-    return out
-
-
-def _rgb(color: str) -> tuple[int, int, int]:
-    h = color.lstrip("#")
-    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+def wordmark(text: str = "tinyharness") -> Text:
+    """The name as the README sets it: "tiny" under a highlighter, the rest in ink. Any
+    other text (a greeting) gets the ink alone."""
+    if text.startswith("tiny"):
+        return Text.assemble(("tiny", f"bold {ON_HIGHLIGHT} on {HIGHLIGHT}"), (text[4:], f"bold {BRAND}"))
+    return Text(text, style=f"bold {BRAND}")
 
 
 def percent(fraction: float) -> str:

@@ -245,14 +245,14 @@ def agent_file(directory, name, mode):
 
 def test_project_agents_cannot_bypass_permissions(work, isolated_home):
     agent_file(work / ".tinyharness" / "agents", "sneaky", "bypassPermissions")
-    agent_file(work / ".tinyharness" / "agents", "normal", "acceptEdits")
+    agent_file(work / ".tinyharness" / "agents", "normal", "default")
     agent_file(isolated_home / "agents", "mine", "bypassPermissions")
     mine_in_code = AgentSpec("coded", "d", permission_mode="bypassPermissions")
     session = Session(options(work, agents=[mine_in_code]))
     try:
         modes = {name: spec.permission_mode for name, spec in session.agents.items()}
-        assert modes["sneaky"] == PermissionMode.ACCEPT_EDITS  # capped
-        assert modes["normal"] == PermissionMode.ACCEPT_EDITS
+        assert modes["sneaky"] == PermissionMode.DEFAULT  # capped
+        assert modes["normal"] == PermissionMode.DEFAULT
         assert modes["mine"] == PermissionMode.BYPASS  # yours: as you wrote it
         assert modes["coded"] == PermissionMode.BYPASS
     finally:
@@ -264,7 +264,7 @@ def test_trusted_project_plugins_are_capped_too(work):
     agent_file(plugin / "agents", "plugged", "bypassPermissions")
     session = Session(options(work, trust_project=True))
     try:
-        assert session.agents["plugged"].permission_mode == PermissionMode.ACCEPT_EDITS
+        assert session.agents["plugged"].permission_mode == PermissionMode.DEFAULT
     finally:
         session.close()
 
@@ -284,7 +284,7 @@ class User:
 @pytest.fixture
 def session(work):
     user = User()
-    s = Session(options(work, permission_mode="acceptEdits", permission_callback=user))
+    s = Session(options(work, permission_mode="default", permission_callback=user))
     s.user = user
     yield s
     s.close()
@@ -299,7 +299,7 @@ async def test_changing_code_that_runs_outside_the_sandbox_always_asks(session, 
         assert decision.allow
     first, _ = session.user.asked
     assert "can run code outside the sandbox" in first.warning and first.remember_label == ""
-    assert session.gate.mode == PermissionMode.ACCEPT_EDITS  # the answer didn't widen anything
+    assert session.gate.mode == PermissionMode.DEFAULT  # the answer didn't widen anything
 
 
 async def test_user_level_settings_are_protected_too(session, isolated_home):

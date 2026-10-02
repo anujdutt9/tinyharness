@@ -29,7 +29,7 @@ You are a technical writer.
 | Frontmatter | Default | Meaning |
 |---|---|---|
 | `name` | directory name | the `/<name>` command |
-| `description` | — | one line shown by `/skills` (and to the model if `--expose-skills` is on) |
+| `description` | — | shown by `/skills`, and to the model (its first ~240 characters) so it knows when to use the skill |
 | `allowed-tools` | all | tools the skill expects; informational for now |
 | `model` | session model | reserved for per-skill model overrides |
 
@@ -54,8 +54,18 @@ Skills cost nothing until you use them:
 3. **Bundled files** are read one at a time, when the step that needs them comes up.
    The skill's directory is readable without permission prompts.
 
-Pass `--expose-skills` if you want the model to choose skills on its own. That adds a
-`Skill` tool whose description lists every skill, so it costs tokens on every turn.
+The system prompt lists each skill's name, the start of its description and where its
+SKILL.md is. When a task matches (a design skill for a web page, say), the model loads the
+skill by reading that file with Read; there is no separate tool. Subagents and teammates
+see the same list. You can also run one yourself with `/<name>` at the start of a message,
+or write `/<name>` anywhere in it ("build the report and use /claude-design-skill for the
+layout"): either way the skill is sent with your message, so it doesn't depend on the
+model choosing to read it. A bare name ("use the claude-design-skill") is left to the
+model, since "don't use the claude-design-skill" names it too. The CLI shows each load,
+`⎿ skill claude-design-skill loaded · 9.2k tokens`, including when the model reads one
+itself. The list is about 80 tokens per skill, cached with the rest of
+the prompt. `skill_tool = false` in the config (or `--no-skill-tool`) leaves skills to
+`/<name>` only.
 
 ## Running skills
 
@@ -67,7 +77,7 @@ Pass `--expose-skills` if you want the model to choose skills on its own. That a
 ```python
 from tinyharness import SessionOptions, invoke_skill
 
-async for event in invoke_skill("release-notes", "v1.2..v1.3", SessionOptions(permission_mode="acceptEdits")):
+async for event in invoke_skill("release-notes", "v1.2..v1.3", SessionOptions()):
     ...
 ```
 

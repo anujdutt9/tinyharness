@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from tinyharness.agent.history import Image
 from tinyharness.llm.adapters.base import Adapter, StreamParser, parse_arguments, tool_names
 from tinyharness.llm.types import LLMError, ModelInfo, Request, StreamChunk
 
@@ -26,8 +27,12 @@ class GeminiAdapter(Adapter):
     def payload(self, request: Request) -> dict[str, Any]:
         names = tool_names(request)
         steps: list[dict[str, Any]] = []
+        pending: list[Image] = []  # from tool results: sent as user input after them
         for m in request.messages:
+            if m.role != "tool":
+                _flush_images(steps, pending)
             if m.role == "tool":
+                pending += m.images
                 steps.append(
                     {
                         "type": "function_result",
@@ -51,7 +56,9 @@ class GeminiAdapter(Adapter):
                     for c in m.tool_calls
                 )
             else:
-                steps.append({"type": "user_input", "content": [{"type": "text", "text": m.content or ""}]})
+                content = [{"type": "text", "text": m.content or ""}, *map(_image_part, m.images)]
+                steps.append({"type": "user_input", "content": content})
+        _flush_images(steps, pending)
 
         payload: dict[str, Any] = {"model": request.model, "input": steps, "stream": True, "store": False}
         if request.system:
@@ -162,3 +169,16 @@ class _GeminiParser(StreamParser):
         """The reply's steps, kept only when there are signed thoughts to send back."""
         steps = [self.steps[i] for i in sorted(self.steps)]
         return steps if any(s.get("type") == "thought" for s in steps) else None
+
+
+def _image_part(image: Image) -> dict[str, Any]:
+    return {"type": "image", "data": image.data, "mime_type": image.media_type}
+
+
+def _flush_images(steps: list[dict[str, Any]], pending: list[Image]) -> None:
+    """Images from tool results, as user input after them."""
+    if pending:
+        names = ", ".join(image.name or "image" for image in pending)
+        text = {"type": "text", "text": f"The images from the tool results above: {names}"}
+        steps.append({"type": "user_input", "content": [text, *map(_image_part, pending)]})
+        pending.clear()

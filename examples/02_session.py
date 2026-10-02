@@ -23,7 +23,7 @@ async def ask(session: Session, prompt: str) -> None:
 
 async def main() -> None:
     session = Session(
-        SessionOptions(working_dir=tempfile.mkdtemp(prefix="tinyharness-"), permission_mode="acceptEdits")
+        SessionOptions(working_dir=tempfile.mkdtemp(prefix="tinyharness-"), permission_mode="default")
     )
     try:
         await ask(session, "Write fib.py with a function fib(n) that returns the nth Fibonacci number.")

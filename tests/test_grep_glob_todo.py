@@ -171,14 +171,14 @@ def test_format_todos_empty():
 # ---- Registry / gate integration ----
 
 
-def test_default_registry_has_search_and_todo():
-    assert {"Grep", "Glob", "TodoWrite"} <= set(default_registry().names())
+def test_the_core_registry_is_the_file_tools():
+    """Everything else (web, pdf, open, todo, agents) is an extension you turn on."""
+    assert default_registry().names() == ["Read", "Write", "Edit", "Glob", "Grep"]
 
 
 def test_plan_mode_offers_only_read_only_tools():
     names = {t.name for t in default_registry().available(PermissionMode.PLAN)}
-    assert {"Read", "Pdf", "Grep", "Glob", "TodoWrite"} <= names
-    assert "Write" not in names and "Edit" not in names
+    assert names == {"Read", "Grep", "Glob"}
 
 
 async def test_todowrite_skips_the_gate(tmp_path):

@@ -1,5 +1,6 @@
 # tinyharness config. Copy to ~/.tinyharness/config.toml.
-# Every key is optional. API keys never go here; put them in your environment or a .env file.
+# Every key is optional. API keys never go here: add them with `/key <provider>` (stored in
+# ~/.tinyharness/auth.json, readable only by you) or set them in your shell.
 #
 # Plain keys come first and [tables] last: in TOML, every key after a [table] header
 # belongs to that table.
@@ -12,14 +13,20 @@
 # model = "claude-sonnet-5"            # or "openai:gpt-6-sol" to name the provider too
 # effort = "high"                      # low | medium | high | max; default: the model's own
 # request_timeout = 1800               # seconds per model call
+# request_retries = 3                  # on 429/5xx (honoring Retry-After) or a refused connection
 
 # --- Workspace & permissions -------------------------------------------------
 # working_dir = "~/code/project"       # default: the directory you launch from
-# permission_mode = "default"          # plan | default | acceptEdits | auto | bypassPermissions
+# permission_mode = "default"          # default | auto | plan | ask | bypassPermissions
 
 # --- Terminal -----------------------------------------------------------------
 # theme = "system"                     # system (asks the terminal) | light | dark; also /theme
 # show_thinking = false                # show the model's reasoning; also ctrl+t or /thinking
+# prompt_suggestions = true            # after a turn, suggest your next message (Tab takes it)
+
+# --- Tool calls ---------------------------------------------------------------
+# tool_calls = "auto"                  # auto: probe each model once | native | text
+#                                      # (text: tools in the prompt, calls written as <call>)
 
 # --- Context management -------------------------------------------------------
 # context_window_tokens = 200000       # default: what the provider reports for the model
@@ -36,10 +43,17 @@
 # [providers.gateway]
 # label = "Company gateway"
 # base_url = "https://llm.internal.example.com/v1"
-# api_key_env = "GATEWAY_API_KEY"      # the variable's NAME; the key itself goes in .env
+# api_key_env = "GATEWAY_API_KEY"      # the variable's NAME (leave out if it needs no key)
 # default_model = "claude-sonnet-5"
 # models = ["claude-sonnet-5", { id = "gpt-6-sol", context = 1050000 }]  # if it has no model list
 # extra_headers = { "x-team" = "platform" }
+
+# A self-hosted OpenAI-compatible server (vLLM, Ollama, SGLang): no key needed. Models
+# and context windows come from its /v1/models. Agents pick one with `model: local:<id>`.
+# [providers.local]
+# label = "vLLM"
+# base_url = "http://127.0.0.1:8000/v1"
+# extra_body = { temperature = 0.2 }
 
 # --- Permission rules ---------------------------------------------------------
 # Rules are `Tool` or `Tool(glob)`; relative globs are inside working_dir and `*` also
@@ -50,12 +64,25 @@
 
 # --- Sandbox ------------------------------------------------------------------
 # Bash commands run in an OS sandbox (macOS: Seatbelt): they write only to the project,
-# scratch and temp dirs, can't read credential files, and have no network. Sandboxed
-# commands run without asking in acceptEdits and auto modes. Unsandboxed, every one asks.
+# scratch and temp dirs, can't read credential files, and reach only the allowed hosts,
+# through a local proxy. Sandboxed commands run without asking in default and auto
+# modes; a command run outside the sandbox (sandbox=false) asks every time. /sandbox
+# shows the limits.
 # [sandbox]
 # enabled = true
 # allow_write = ["~/code/other-repo"]  # more writable dirs (protected like the project)
 # allow_localhost = false              # true: tests may start and reach local servers
+# allow_hosts = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com",
+#                "*.github.com", "*.githubusercontent.com", "cdn.jsdelivr.net"]  # [] = no network
+
+# --- Extensions ---------------------------------------------------------------
+# Built-in: web (WebSearch, WebFetch), pdf, open, todo, agents (Agent, Team). Your own go
+# in ~/.tinyharness/extensions/<name>.py (docs/extension-api.md). Off unless listed;
+# /extensions shows what each adds to every request, /extensions on <name> for a session.
+# [extensions]
+# enabled = ["web", "agents"]
+# [extensions.myext]                   # settings an extension reads as th.config
+# greeting = "hi"
 
 # --- Cost ---------------------------------------------------------------------
 # Token counts are always shown. Dollars need a price: OpenRouter reports what each call

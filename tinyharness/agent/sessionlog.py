@@ -186,9 +186,13 @@ def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
 
 
 def _describe(path: Path) -> SessionInfo | None:
-    """None for logs with nothing to resume (older logs, or no prompt yet)."""
+    """None for logs with nothing to resume: older logs, no prompt yet, or emptied by a
+    /clear (logs from before /clear started a new conversation)."""
     title, count = "", 0
-    for r in _read_jsonl(path):
+    records = list(_read_jsonl(path))
+    if not replay(records).history.messages:
+        return None
+    for r in records:
         if r.get("event") == "msg":
             count += 1
             message = r.get("message", {})

@@ -183,3 +183,26 @@ async def test_links_cannot_write_outside(ws, tmp_path):
 async def test_cannot_hand_work_to_launchservices(ws):
     out = await sandboxed(ws, "/usr/bin/open -g -j -a Calculator && echo OPENED")
     assert "OPENED" not in out
+
+
+@needs_seatbelt
+async def test_tests_can_read_their_own_fake_secrets_and_nothing_else(tmp_path):
+    """A project's tests make fake auth.json and .env files in pytest's temp root and
+    must read them back; the same names anywhere else stay unreadable."""
+    import tempfile
+
+    (tmp_path / "auth.json").write_text('{"fake": "key-in-a-test"}')
+    elsewhere = Path(tempfile.mkdtemp(prefix="not-pytest-"))
+    try:
+        (elsewhere / "auth.json").write_text('{"real": "hunter2"}')
+        policy = SandboxPolicy.for_project(tmp_path, cache_dir=tmp_path / "c")
+        out = await call(
+            BashTool(Seatbelt(), policy),
+            {"command": f"cat {tmp_path / 'auth.json'}; cat {elsewhere / 'auth.json'}"},
+            make_ctx(tmp_path),
+        )
+        assert "key-in-a-test" in out
+        assert "hunter2" not in out
+    finally:
+        (elsewhere / "auth.json").unlink()
+        elsewhere.rmdir()

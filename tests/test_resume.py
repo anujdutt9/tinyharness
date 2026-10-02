@@ -46,14 +46,14 @@ def contents(session: Session) -> list[tuple[str, str | None]]:
 
 
 async def test_a_resumed_conversation_is_the_same_conversation(work):
-    (work / "notes.txt").write_text("x" * 10_000)  # longer than the audit log keeps
-    first = Session(options(work))
+    (work / "notes.txt").write_text(("x" * 50 + "\n") * 300)  # longer than the audit log keeps
+    first = Session(options(work, todo_list=True))
     await turn(first, "read notes", [("Read", '{"path": "notes.txt"}')], "It's all x.")
     await turn(first, "and now?", [("TodoWrite", json.dumps({"todos": [TODO]}))], "Planned.")
     before, todos = contents(first), first.ctx.todos
     first.close()
 
-    resumed = Session(options(work, resume="latest"))
+    resumed = Session(options(work, resume="latest", todo_list=True))
     try:
         assert resumed.id == first.id
         assert contents(resumed) == before
@@ -165,7 +165,7 @@ async def test_changed_files_are_flagged_and_their_old_contents_stubbed(work):
 
 async def test_the_agents_own_edits_are_not_changes(work):
     (work / "a.py").write_text("A = 1\n")
-    first = Session(options(work, permission_mode="acceptEdits"))
+    first = Session(options(work, permission_mode="default"))
     edit = json.dumps({"path": "a.py", "old_string": "A = 1", "new_string": "A = 2"})
     await turn(first, "bump A", [("Read", '{"path": "a.py"}')], [("Edit", edit)], "Done.")
     first.close()
@@ -336,3 +336,81 @@ def test_your_project_config_stays_put(work):
 def test_long_project_paths_get_short_unique_names(tmp_path):
     a, b = tmp_path / ("x" * 150) / "one", tmp_path / ("x" * 150) / "two"
     assert state_dir(a) != state_dir(b) and len(state_dir(a).name) <= 111
+
+
+# ---- /clear starts a new conversation ----
+
+
+async def test_clear_keeps_the_old_conversation_resumable(work):
+    """As in Claude Code: /clear moves on to a new conversation; the old one isn't lost."""
+    first = Session(options(work))
+    await turn(first, "build the deck", "Built it.")
+    old_id, before = first.id, contents(first)
+    first.clear()
+    assert first.id != old_id and contents(first) == []
+    await turn(first, "something else", "Sure.")
+    first.close()
+
+    latest = Session(options(work, resume="latest"))
+    try:
+        assert [c for _, c in contents(latest)] == ["something else", "Sure."]
+    finally:
+        latest.close()
+    old = Session(options(work, resume=old_id))
+    try:
+        assert contents(old) == before
+    finally:
+        old.close()
+
+
+async def test_continue_skips_a_conversation_emptied_by_clear(work):
+    """Logs from before: /clear emptied the conversation in place, and -c then found
+    "nothing to resume" instead of the conversation before it."""
+    kept = Session(options(work))
+    await turn(kept, "keep me", "Kept.")
+    kept_id = kept.id
+    kept.close()
+    emptied = Session(options(work))
+    await turn(emptied, "clear me", "Ok.")
+    emptied.history.reset()  # what /clear used to do
+    emptied._sync()
+    emptied.close()
+
+    resumed = Session(options(work, resume="latest"))
+    try:
+        assert resumed.id == kept_id
+    finally:
+        resumed.close()
+
+
+def test_clearing_an_empty_conversation_makes_no_new_one(work):
+    session = Session(options(work))
+    try:
+        before = session.id
+        session.clear()
+        assert session.id == before
+    finally:
+        session.close()
+
+
+async def test_after_resume_a_file_changed_by_the_user_must_be_read_again(work):
+    """Resume restored which files were read but not their versions, so a Write could
+    overwrite what the user changed after resuming without any error."""
+    (work / "plan.md").write_text("v1\n")
+    first = Session(options(work))
+    await turn(first, "read it", [("Read", '{"path": "plan.md"}')], "ok")
+    first.close()
+
+    resumed = Session(options(work, resume="latest", permission_mode="default"))
+    try:
+        (work / "plan.md").write_text("v2 from the user\n")  # after resuming
+        events = await turn(
+            resumed, "rewrite it", [("Write", '{"path": "plan.md", "content": "agent"}')], "done"
+        )
+        from tinyharness.events import ToolResult
+
+        result = next(e for e in events if isinstance(e, ToolResult))
+        assert result.is_error and "changed since you last read it" in result.output
+        assert (work / "plan.md").read_text() == "v2 from the user\n"
+    finally:
+        resumed.close()

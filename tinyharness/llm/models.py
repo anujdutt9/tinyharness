@@ -20,6 +20,7 @@ from tinyharness.llm.usage import Price
 log = logging.getLogger(__name__)
 
 MAX_AGE_SECONDS = 24 * 3600
+CACHE_VERSION = 2  # an older cache is refetched at once (2: ModelInfo.reasoning)
 
 
 class ModelDirectory:
@@ -35,7 +36,7 @@ class ModelDirectory:
             fetched_at, models = 0.0, {}
             try:
                 raw = json.loads(self._path(provider).read_text())
-                fetched_at = float(raw["fetched_at"])
+                fetched_at = float(raw["fetched_at"]) if raw.get("version") == CACHE_VERSION else 0.0
                 models = {m["id"]: _from_json(m) for m in raw["models"]}
             except (OSError, ValueError, KeyError, TypeError):
                 pass
@@ -56,7 +57,7 @@ class ModelDirectory:
         self._memory[provider] = (now, {m.id: m for m in models})
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            body = {"fetched_at": now, "models": [_to_json(m) for m in models]}
+            body = {"version": CACHE_VERSION, "fetched_at": now, "models": [_to_json(m) for m in models]}
             self._path(provider).write_text(json.dumps(body))
         except OSError as e:
             log.debug("could not cache the %s model list: %s", provider, e)

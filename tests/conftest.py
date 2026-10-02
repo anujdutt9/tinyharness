@@ -1,17 +1,38 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from tinyharness.agent.history import Message
 from tinyharness.config import Config
-from tinyharness.llm.client import StreamChunk
 from tinyharness.llm.providers import load_catalog
+from tinyharness.testing import ScriptedLLM as ScriptedLLM  # tests import it from here
 from tinyharness.tools.base import Tool, ToolContext
 from tinyharness.workspace import Workspace
+
+# ---- opt-in tests ----
+# `terminal` tests drive the real CLI in an emulated terminal (pyte). They're slower and
+# only matter when changing the screen layout, so they run only with `--terminal`.
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption("--terminal", action="store_true", help="also run the emulated-terminal tests")
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers", "terminal: drives the CLI in an emulated terminal (run with --terminal)"
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if config.getoption("--terminal"):
+        return
+    skip = pytest.mark.skip(reason="emulated-terminal test: run with --terminal")
+    for item in items:
+        if "terminal" in item.keywords:
+            item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +46,12 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for provider in load_catalog().values():
         monkeypatch.delenv(provider.api_key_env, raising=False)
     return home
+
+
+@pytest.fixture(autouse=True)
+def instant_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retried requests (429/5xx) don't wait in tests."""
+    monkeypatch.setattr("tinyharness.llm.client.RETRY_MAX_SECONDS", 0.0)
 
 
 def make_ctx(root: Path, workspace: Workspace | None = None) -> ToolContext:
@@ -41,35 +68,17 @@ async def call(tool: Tool[Any], args: dict[str, Any], ctx: ToolContext) -> str:
     return await tool.run(tool.parse(args), ctx)
 
 
-class ScriptedLLM:
-    """A fake LLM that replays a fixed list of turns.
+def png(width: int, height: int, *, noise: bool = False) -> bytes:
+    """A real PNG of that size (noise makes it photo-like: it doesn't compress)."""
+    import io
+    import os
 
-    Each turn is either a string (plain text reply) or a list of
-    (tool_name, arguments_json) tool calls.
-    """
+    from PIL import Image as PILImage
 
-    def __init__(self, turns: list[str | list[tuple[str, str]]]) -> None:
-        self.turns = list(turns)
-        self.requests: list[list[Message]] = []
-        self.model = "fake"
-
-    async def stream(
-        self, messages: list[Message], tools: Any = None, **_: Any
-    ) -> AsyncIterator[StreamChunk]:
-        self.requests.append(list(messages))
-        turn = self.turns.pop(0) if self.turns else "done"
-        if isinstance(turn, str):
-            yield StreamChunk(text=turn, finish_reason="stop")
-            return
-        for i, (name, arguments) in enumerate(turn):
-            yield StreamChunk(
-                tool_call_delta={
-                    "index": i,
-                    "id": f"call_{i}",
-                    "function": {"name": name, "arguments": arguments},
-                }
-            )
-        yield StreamChunk(finish_reason="tool_calls")
-
-    async def one_shot(self, prompt: str, **_: Any) -> str:
-        return "summary of prior conversation"
+    if noise:
+        picture = PILImage.frombytes("RGB", (width, height), os.urandom(width * height * 3))
+    else:
+        picture = PILImage.new("RGB", (width, height), (200, 30, 30))
+    buffer = io.BytesIO()
+    picture.save(buffer, "PNG")
+    return buffer.getvalue()

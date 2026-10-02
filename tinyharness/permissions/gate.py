@@ -10,7 +10,7 @@ Layers are checked in order and the first one with an opinion wins:
                 changes a file that runs code outside it (hooks, plugins, git hooks,
                 settings), skips allow rules and steps 5-6: it always asks, and can't
                 be remembered
-    5. mode     plan / bypass / reads-are-free / acceptEdits / sandboxed commands /
+    5. mode     plan / bypass / reads-are-free / project edits / sandboxed commands /
                 auto (see `_auto`)
     6. scratch  the agent's own scratch directory
     7. ask      the permission callback (interactive prompt or SDK policy)
@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import glob
 import re
+import weakref
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -49,6 +50,7 @@ class PermissionRequest:
     remember_label: str  # what "don't ask again" would cover, in plain words; "" = not offered
     reason: str = ""  # why auto mode is asking, when it is
     warning: str = ""  # something the user must know before answering (e.g. no sandbox)
+    agent: str = ""  # the subagent asking, if it isn't the main agent
 
 
 @dataclass
@@ -67,16 +69,56 @@ class Decision:
 PermissionCallback = Callable[[PermissionRequest], Awaitable[Decision]]
 
 
-@dataclass
+# Least to most permissive: a subagent runs in the less permissive of the session's mode
+# and its own `permission_mode` (see PermissionGate.child).
+_PERMISSIVENESS = (
+    PermissionMode.PLAN,
+    PermissionMode.ASK,
+    PermissionMode.DEFAULT,
+    PermissionMode.AUTO,
+    PermissionMode.BYPASS,
+)
+
+
+def stricter(mode: PermissionMode, limit: PermissionMode | None) -> PermissionMode:
+    """`mode`, held to `limit` if that's less permissive."""
+    if limit is None:
+        return mode
+    return min(mode, limit, key=_PERMISSIVENESS.index)
+
+
+@dataclass(eq=False)  # compared by identity: gates are tracked in a WeakSet
 class PermissionGate:
     workspace: Workspace
     mode: PermissionMode = PermissionMode.DEFAULT
     rules: PermissionRules = field(default_factory=PermissionRules)
     hooks: HookRunner | None = None
     classifier: AutoModeClassifier | None = None
+    # Where content from other machines in the conversation came from (ToolContext.outside).
+    # While there is any, calls that can send data out ask a person ("Rule of Two").
+    outside: Callable[[], list[str]] = field(default=lambda: [], repr=False)
     callback: PermissionCallback | None = None
     scratch: Scratch | None = None
     protected: tuple[Path, ...] = ()  # changing anything under these always asks (see `_protected`)
+    agent: str = ""  # a subagent's gate: whose (shown when it asks)
+    limit: PermissionMode | None = None  # a subagent's own permission_mode: never more permissive
+    _children: weakref.WeakSet[PermissionGate] = field(default_factory=weakref.WeakSet, repr=False)
+
+    def set_mode(self, mode: PermissionMode) -> None:
+        """Change mode, for this gate and every subagent gate made from it: the mode you
+        pick applies to all the work, including subagents already running."""
+        self.mode = stricter(mode, self.limit)
+        for child in list(self._children):
+            child.set_mode(mode)
+
+    def child(self, agent: str, limit: PermissionMode | None) -> PermissionGate:
+        """A subagent's gate: the same rules and prompts, the session's mode (held to the
+        agent's own `limit`), and it follows later mode changes (see `set_mode`)."""
+        gate = replace(
+            self, mode=stricter(self.mode, limit), agent=agent, limit=limit, _children=weakref.WeakSet()
+        )
+        self._children.add(gate)
+        return gate
 
     async def check(
         self,
@@ -118,7 +160,7 @@ class PermissionGate:
                 return Decision(allow, verdict.get("reason", f"hook {verdict['decision']}"), "hook")
 
         site = f"{DOMAIN}{target_host.lower()}" if target_host else None
-        escape = tool.escapes(args) or self._protected(tool, path)
+        escape = tool.escapes(args) or self._protected(tool, path) or self._persists_outside(tool)
         match self.rules.check(tool.name, str(path) if path else site):
             case "deny":
                 return Decision(False, "blocked by a deny rule", "rule")
@@ -131,12 +173,13 @@ class PermissionGate:
             if self.mode == PermissionMode.PLAN:
                 return Decision(False, "plan mode blocks mutating tools", "mode")
             request = PermissionRequest(
+                agent=self.agent,
                 tool=tool.name,
                 args=args,
                 summary=summary or tool.name,
                 path=str(path) if path else None,
                 remember_label="",
-                warning=escape,
+                warning=escape + self._outside_warning(),
             )
             return await self._ask(request)
 
@@ -150,23 +193,34 @@ class PermissionGate:
             return Decision(True, "agent scratch directory", "mode")
 
         # Auto mode asks about a risky change to a file case by case: a "don't ask again"
-        # there would stop it judging the next one (and used to switch to acceptEdits).
+        # there would stop it judging the next one (and used to switch modes).
         case_by_case = risk is not None and path is not None
         request = PermissionRequest(
+            agent=self.agent,
             tool=tool.name,
             args=args,
             summary=summary or tool.name,
             path=str(path) if path else None,
             remember_label="" if case_by_case else self._remember_label(tool, path, trusted, target_host),
             reason=risk or "",
+            warning=self._outside_warning().removeprefix("; ") if tool.network else "",
         )
         decision = await self._ask(request)
         if decision.allow and decision.remember and request.remember_label:
             self._remember(tool, path, trusted, site)
         elif decision.allow and tool.read_only and (site or path is not None):
             # A plain "yes" to reading something covers reading it again this session.
-            self.rules.add_allow(Rule(tool.name, site or glob.escape(str(path))))
+            for name in _readers(tool) if path is not None and not site else (tool.name,):
+                self.rules.add_allow(Rule(name, site or glob.escape(str(path))))
         return decision
+
+    def _outside_warning(self) -> str:
+        """Said when a call could send data out while outside content is in the conversation."""
+        sources = self.outside()
+        if not sources:
+            return ""
+        shown = ", ".join(sources[:3]) + (f" and {len(sources) - 3} more" if len(sources) > 3 else "")
+        return f"; content from outside ({shown}) is in this conversation and could be steering this"
 
     def _protected(self, tool: Tool[Any], path: Path | None) -> str | None:
         """Why changing `path` needs the user every time: it's read as code or settings
@@ -179,9 +233,18 @@ class PermissionGate:
                 return f"this changes {shown}, which can run code outside the sandbox (hooks, plugins or settings)"
         return None
 
+    def _persists_outside(self, tool: Tool[Any]) -> str | None:
+        """Why saving to memory needs the user now: outside content in the conversation
+        could be planting a note that every later session would read as context."""
+        if tool.persists and self.outside():
+            return "it saves a note that every later session reads"
+        return None
+
     async def _ask(self, request: PermissionRequest) -> Decision:
         if self.callback is None:
-            return Decision(False, "no permission handler available", "prompt")
+            return Decision(
+                False, "no one is here to approve it (a non-interactive run): do without it", "prompt"
+            )
         return await self.callback(request)
 
     async def _check_mode(
@@ -191,12 +254,20 @@ class PermissionGate:
             return Decision(True, "bypassPermissions mode", "mode")
         if self.mode == PermissionMode.PLAN and not tool.read_only:
             return Decision(False, "plan mode blocks mutating tools", "mode")
+        # The agent's own notes; with outside content in the conversation, see _persists_outside.
+        if tool.persists and self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO):
+            return Decision(True, f"{self.mode.value}: the agent's memory", "mode")
         if tool.read_only and not tool.network and (path is None or trusted):
             return Decision(True, "read-only, inside the working directory", "mode")
-        if self.mode == PermissionMode.ACCEPT_EDITS and trusted:
-            return Decision(True, "acceptEdits (inside the working directory)", "mode")
-        if self.mode in (PermissionMode.ACCEPT_EDITS, PermissionMode.AUTO) and tool.contained(args):
+        if self.mode == PermissionMode.DEFAULT and trusted:
+            return Decision(True, "default: inside the working directory", "mode")
+        if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO) and tool.contained(args):
             return Decision(True, f"{self.mode.value}: runs in the sandbox", "mode")
+        # Reading a public page is routine; a URL with a query string could carry data out.
+        if tool.network and self.outside():
+            return None  # outside content could be steering this: a person decides (see check)
+        if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO) and _public_read(tool, args):
+            return Decision(True, f"{self.mode.value}: reading a public web page", "mode")
         if self.mode == PermissionMode.AUTO:
             return await self._auto(tool, args, path, trusted, history_tail)
         return None
@@ -229,8 +300,6 @@ class PermissionGate:
             return Decision(True, "auto: routine work inside the project", "mode")
         if self._in_scratch(path):
             return Decision(True, "agent scratch directory", "mode")
-        if tool.network and not urlsplit(str(args.get("url", ""))).query:
-            return Decision(True, "auto: reading a public web page", "mode")
         if self.classifier is None:
             return None
         verdict = await self.classifier.classify(tool.name, args, history_tail=history_tail)
@@ -239,7 +308,7 @@ class PermissionGate:
         return Decision(verdict.decision == "allow", verdict.reason, "classifier")
 
     # -- "don't ask again" ------------------------------------------------------
-    # Edits inside the project switch the session to acceptEdits (visible in the
+    # In ask mode, edits inside the project switch the session to default (visible in the
     # mode indicator). Anything outside the project is remembered per directory.
 
     def _remember_label(
@@ -251,6 +320,8 @@ class PermissionGate:
             return f"don't ask again for {tool.name} this session"
         if trusted:
             return "allow all edits in this project for this session"
+        if tool.name in READING_TOOLS:
+            return f"allow reading in {_directory(path)}/ for this session"
         return f"allow {tool.name} in {_directory(path)}/ for this session"
 
     def _remember(self, tool: Tool[Any], path: Path | None, trusted: bool, site: str | None = None) -> None:
@@ -259,13 +330,30 @@ class PermissionGate:
         elif path is None:
             self.rules.add_allow(Rule(tool.name))
         elif trusted:
-            self.mode = PermissionMode.ACCEPT_EDITS
+            self.set_mode(PermissionMode.DEFAULT)
         else:
-            self.rules.add_allow(Rule(tool.name, f"{glob.escape(str(_directory(path)))}/*"))
+            folder = glob.escape(str(_directory(path)))
+            for name in _readers(tool):
+                self.rules.add_allow(Rule(name, f"{folder}/*"))
+                if name in READING_TOOLS:
+                    self.rules.add_allow(Rule(name, folder))  # Grep or Glob on the folder itself
 
 
 _GIT_INTERNALS = re.compile(r"(^|/)\.git(/|$)")
+# Tools that only look at files: an answer about one covers them all, so reading a folder
+# outside the project is one question, not one per tool (Read, then Grep, then Glob).
+READING_TOOLS = ("Read", "Grep", "Glob", "Pdf")
+
+
+def _readers(tool: Tool[Any]) -> tuple[str, ...]:
+    """The tools an approval for `tool` covers: every reading tool, if it is one."""
+    return READING_TOOLS if tool.name in READING_TOOLS else (tool.name,)
 
 
 def _directory(path: Path) -> Path:
     return path if path.is_dir() else path.parent
+
+
+def _public_read(tool: Tool[Any], args: dict[str, Any]) -> bool:
+    """A read-only network call to a URL without a query string (WebFetch of a page)."""
+    return tool.network and tool.read_only and not urlsplit(str(args.get("url", ""))).query

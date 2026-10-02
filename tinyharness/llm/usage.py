@@ -122,12 +122,14 @@ class UsageMeter:
         self.calls = 0
         self.unpriced = 0  # calls whose cost isn't known
         self.contexts: list[int] = []  # each call's input (new + cached), in order
+        self.last: Usage | None = None  # the latest call's usage, to see whether the cache is hitting
         self.cleared: tuple[Usage, int] | None = None  # (total, calls) at the last /clear
 
     def add(self, usage: Usage) -> None:
         self.total = self.total + usage
         self.calls += 1
         self.contexts.append(usage.input + usage.cached)
+        self.last = usage
         if usage.cost is None:
             self.unpriced += 1
 

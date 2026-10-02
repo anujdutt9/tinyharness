@@ -42,6 +42,7 @@ from tinyharness.llm.types import Effort
 from tinyharness.llm.usage import Price
 from tinyharness.paths import auth_path, default_config_path, home_dir, legacy_config_dir, source_checkout
 from tinyharness.permissions.modes import PermissionMode
+from tinyharness.sandbox.proxy import DEFAULT_ALLOWED_HOSTS
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +64,27 @@ class SandboxSettings(BaseModel):
     enabled: bool = True  # False: commands run unsandboxed, and every one asks first
     allow_write: list[Path] = Field(default_factory=list)  # more writable dirs, e.g. a second repo
     allow_localhost: bool = False  # let commands use loopback (tests that start a local server)
+    # Hosts commands may reach from inside the sandbox, through a local proxy: package
+    # registries, GitHub and script CDNs by default. `*.example.com` covers subdomains.
+    # [] turns the network off entirely. Anything else needs sandbox=false (it asks).
+    allow_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))
+
+
+class ExtensionSettings(BaseModel):
+    """`[extensions]`: which extensions to load, and a table of settings for each.
+
+    [extensions]
+    enabled = ["web", "agents"]
+    [extensions.web]
+    max_results = 5
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    enabled: list[str] = Field(default_factory=list)
+
+    def settings(self) -> dict[str, Any]:
+        return dict(self.model_extra or {})
 
 
 class Config(BaseModel):
@@ -73,8 +95,11 @@ class Config(BaseModel):
     model: str = ""  # "" = the provider's default; "provider:model" also picks the provider
     api_key: str = Field(default="", repr=False)  # literal key (SDK use); normally from the env
     providers: dict[str, Provider] = Field(default_factory=load_catalog)
-    effort: Effort | None = None  # reasoning effort: low | medium | high | max; None = the model's default
+    # Reasoning effort: none | low | medium | high | max. None: the model's own default, and
+    # medium for models whose reasoning is off unless asked for (Gemma 4, Qwen3 on OpenRouter).
+    effort: Effort | None = None
     request_timeout: float = 1800.0  # seconds; slow reasoning models can take minutes per turn
+    request_retries: int = 3  # on 429/5xx or a refused connection, before the reply starts
     # True when nothing named a provider or model and one was picked from the keys found
     # (an installed CLI then asks the user instead).
     auto_selected: bool = Field(default=False, exclude=True)
@@ -88,6 +113,7 @@ class Config(BaseModel):
     permission_mode: PermissionMode = PermissionMode.DEFAULT
     permissions: PermissionSettings = Field(default_factory=lambda: PermissionSettings())
     sandbox: SandboxSettings = Field(default_factory=lambda: SandboxSettings())
+    extensions: ExtensionSettings = Field(default_factory=lambda: ExtensionSettings())
     scratch_max_age_hours: int = 24
 
     # --- terminal ---
@@ -98,6 +124,26 @@ class Config(BaseModel):
     # Dollars per million tokens, by "provider:model" or model id, for providers that don't
     # report prices: pricing."anthropic:claude-sonnet-5" = { input = 3, output = 15, cached = 0.3 }
     pricing: dict[str, Price] = Field(default_factory=dict)
+
+    # --- planning ---
+    # Same as turning on the `todo` extension (the TodoWrite checklist); kept for older
+    # configs. TINYHARNESS_TODO_LIST=1 turns it on too.
+    todo_list: bool = False
+
+    # List installed skills (name, when to use it, where its SKILL.md is) in the system prompt,
+    # so the model can load one with Read when a task matches. False: skills run only by /name.
+    skill_tool: bool = True
+
+    # --- the CLI ---
+    # After each turn, suggest your likely next message in the input box (Tab takes it), as
+    # Claude Code does: one short extra model call per turn, mostly read from the cache.
+    prompt_suggestions: bool = True
+
+    # --- tool calls ---
+    # How models call tools: "native" (the API's tool-calling interface), "text" (written in
+    # the reply; some small and self-hosted models do much better), or "auto": the first time
+    # a model is used, one small request finds out, and the answer is cached per model.
+    tool_calls: Literal["auto", "native", "text"] = "auto"
 
     # --- context management ---
     context_window_tokens: int | None = None  # None = what the provider reports for the model
@@ -112,7 +158,11 @@ class Config(BaseModel):
         provider, model = self.parse_model(self.model) if self.model else (self.provider, "")
         auto = not provider
         if auto:
-            provider = next((n for n in self.providers if self.has_key(n)), next(iter(self.providers)))
+            # A key set for this run (the shell, a .env) says more about what you want now than
+            # one saved in auth.json long ago (seen: a stale saved key beating a fresh one).
+            with_key = [n for n in self.providers if self.has_key(n)]
+            fresh = [n for n in with_key if self.providers[n].api_key_env not in KEYS_FROM_AUTH]
+            provider = (fresh or with_key or list(self.providers))[0]
         self.provider = provider
         self.select(f"{provider}:{model}")
         self.auto_selected = auto
@@ -137,7 +187,7 @@ class Config(BaseModel):
 
     @property
     def small_model(self) -> str:
-        """Cheap model for background work, such as the auto-mode classifier."""
+        """Cheap model for background work: the auto-mode classifier and WebSearch digests."""
         return self.provider_info.small_model or self.model
 
     def price(self, provider: str, model: str) -> Price | None:
@@ -148,7 +198,7 @@ class Config(BaseModel):
         return self.api_key or self.provider_info.api_key
 
     def has_key(self, provider: str) -> bool:
-        return bool(self.providers[provider].api_key) or (provider == self.provider and bool(self.api_key))
+        return self.providers[provider].has_key or (provider == self.provider and bool(self.api_key))
 
     # -- switching ----------------------------------------------------------------------
 
@@ -234,11 +284,17 @@ def read_auth(path: Path | None = None) -> dict[str, str]:
     return keys
 
 
+# Environment variables whose key came from auth.json rather than the shell or a .env.
+KEYS_FROM_AUTH: set[str] = set()
+
+
 def load_auth(providers: dict[str, Provider]) -> None:
     """Put auth.json's keys where providers read them. A key set in your shell wins."""
     for name, key in read_auth().items():
-        if (provider := providers.get(name)) is not None:
-            os.environ.setdefault(provider.api_key_env, key)
+        provider = providers.get(name)
+        if provider is not None and provider.needs_key and provider.api_key_env not in os.environ:
+            os.environ[provider.api_key_env] = key
+            KEYS_FROM_AUTH.add(provider.api_key_env)
 
 
 def save_key(provider: str, value: str, providers: dict[str, Provider]) -> Path:
@@ -247,7 +303,8 @@ def save_key(provider: str, value: str, providers: dict[str, Provider]) -> Path:
     entry = data.get(provider)
     data[provider] = {**(entry if isinstance(entry, dict) else {}), "api_key": value}
     path = _write_auth_file(data)
-    os.environ[providers[provider].api_key_env] = value
+    if providers[provider].needs_key:
+        os.environ[providers[provider].api_key_env] = value
     return path
 
 
@@ -312,7 +369,7 @@ def migrate_legacy_keys(providers: dict[str, Provider]) -> None:
     if not old.is_file():
         return
     values = {k: v for k, v in parse_dotenv(old).items() if v}
-    provider_for = {p.api_key_env: name for name, p in providers.items()}
+    provider_for = {p.api_key_env: name for name, p in providers.items() if p.needs_key}
     stored = read_auth()
     moved = {
         provider_for[var]: key
@@ -474,11 +531,13 @@ def load_config(path: Path | None = None, *, use_last_model: bool = False) -> Co
     if unknown:
         log.warning("ignoring unknown config keys in %s: %s", path, ", ".join(sorted(unknown)))
 
+    if todo_env := os.environ.get("TINYHARNESS_TODO_LIST", "").strip():
+        data["todo_list"] = todo_env.lower() in ("1", "true", "yes", "on")
     if pinned := os.environ.get("TINYHARNESS_MODEL", "").strip():
         data["model"] = pinned
     elif use_last_model and "model" not in data and (last := _last_model()):
         name = last.partition(":")[0]
-        if name in providers and providers[name].api_key and data.get("provider", name) == name:
+        if name in providers and providers[name].has_key and data.get("provider", name) == name:
             data["model"] = last
 
     cfg = Config.model_validate({**data, "providers": providers})

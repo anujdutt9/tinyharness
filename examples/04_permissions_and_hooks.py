@@ -1,7 +1,9 @@
 """Headless safety policy: a permission callback plus a PreToolUse hook.
 
-The callback is asked whenever the gate would normally prompt a human.
-The hook runs before *every* tool call and can veto it, even in bypass mode.
+The callback is asked whenever the gate would normally prompt a human; in `ask` mode
+that's every edit and command, so the policy sees them all. (In the default mode, edits
+inside the project and sandboxed commands run without asking.) The hook runs before
+*every* tool call and can veto it, even in bypass mode.
 
 A request with a `warning` is one the harness wants a person to see every time: a
 command asking to run outside the sandbox, or a change to files that run code later
@@ -48,6 +50,7 @@ def no_python_writes(event: str, payload: dict[str, Any]) -> dict[str, str] | No
 async def main() -> None:
     options = SessionOptions(
         working_dir=tempfile.mkdtemp(prefix="tinyharness-"),
+        permission_mode="ask",  # every edit and command goes to the policy
         permission_callback=policy,
         hooks=[Hook(event="PreToolUse", type="python", callable=no_python_writes)],
     )

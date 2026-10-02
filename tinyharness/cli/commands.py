@@ -35,7 +35,7 @@ from tinyharness.cli.theme import (
 )
 from tinyharness.cli.widgets import ask, pick
 from tinyharness.config import RECENT_MODELS, forget_model, recent_models, remember_model, save_theme
-from tinyharness.llm.tokens import count_message_tokens
+from tinyharness.paths import pretty_path
 from tinyharness.permissions import PermissionMode
 from tinyharness.security import redact
 from tinyharness.session import MissingAPIKeyError
@@ -106,6 +106,11 @@ def help_(repl: Repl, arg: str) -> None:
     if len(repl.session.skills):
         skill = Command("/<skill>", "run a skill (see /skills)", help_, "[args]", "Tools & skills")
         groups["Tools & skills"].append(skill)
+    for ext in repl.session.extensions:
+        for c in ext.commands:
+            groups.setdefault("Extensions", []).append(
+                Command(f"/{c.name}", f"{c.help} [subtle]({ext.name})[/]", help_, c.usage, "Extensions")
+            )
 
     width = max(len(f"    {c.name} {c.usage}") for cmds in groups.values() for c in cmds)
     for group, cmds in groups.items():
@@ -142,6 +147,8 @@ def clear(repl: Repl, arg: str) -> None:
     repl.context_used = 0.0
     repl.console.clear()
     _ok(repl, f"Cleared {n} message{'s' if n != 1 else ''}. Fresh start.")
+    if n:
+        repl.console.print("  [muted]The previous conversation is saved: tinyharness -r picks it.[/]")
     meter = repl.session.ctx.usage
     if meter.calls:  # the status bar's totals stay: they're the session's, not the conversation's
         spent = f"{tokens(meter.total.output)} out" + (
@@ -152,7 +159,7 @@ def clear(repl: Repl, arg: str) -> None:
 
 @command("/context", "show how much of the context window is used", group="Session")
 def context(repl: Repl, arg: str) -> None:
-    used = count_message_tokens(repl.session.history.to_dicts())
+    used = repl.session.compactor.used(repl.session.history)
     window = repl.session.context_window
     fraction = min(used / window, 1.0)
     width = 30
@@ -182,6 +189,14 @@ def cost(repl: Repl, arg: str) -> None:
     rows.add_row("output", f"{total.output:,} tokens [muted](what the model wrote, reasoning included)[/]")
     cached = f" [muted]· {total.cached / sent:.0%} of it cache reads, billed at a fraction[/]" if sent else ""
     rows.add_row("input, all calls", f"{sent:,} tokens{cached}")
+    if (last := meter.last) is not None and (last_in := last.input + last.cached):
+        rows.add_row(
+            "latest call", f"{last.cached / last_in:.0%} of its {last_in:,} input tokens read from the cache"
+        )
+    rows.add_row(
+        "fixed prefix",
+        f"{repl.session.prefix_tokens():,} tokens [muted](system prompt and tools, sent with every call)[/]",
+    )
     if meter.cost is not None:
         note = (
             f" [muted]· {meter.unpriced} call(s) had no price and aren't included[/]"
@@ -204,10 +219,26 @@ def cost(repl: Repl, arg: str) -> None:
     )
 
 
+@command(
+    "/btw",
+    "ask a side question; the answer isn't added to the conversation",
+    group="Session",
+    usage="<question>",
+)
+def btw(repl: Repl, arg: str) -> None:
+    if not arg:
+        repl.console.print(
+            "  [muted]Usage: /btw <question>. It's answered from the conversation so far, without tools,\n"
+            "  and works while the agent is busy; neither the question nor the answer is kept.[/]"
+        )
+        return
+    repl.ask_aside(arg)
+
+
 @command("/compact", "summarize the conversation so far to free up context", group="Session")
 async def compact(repl: Repl, arg: str) -> None:
     session = repl.session
-    before = count_message_tokens(session.history.to_dicts())
+    before = session.compactor.used(session.history)
     try:
         with repl.console.status("[muted]Summarizing the conversation…[/]", spinner="dots"):
             done = await session.compact()
@@ -217,7 +248,7 @@ async def compact(repl: Repl, arg: str) -> None:
     if not done:
         repl.console.print("  [muted]Nothing to compact yet: the conversation is already short.[/]")
         return
-    after = count_message_tokens(session.history.to_dicts())
+    after = session.compactor.used(session.history)
     repl._measure_context()
     _ok(
         repl,
@@ -385,7 +416,14 @@ def whoami(repl: Repl, arg: str) -> None:
         ("model", cfg.model),
         ("context", f"{session.context_window:,} tokens"),
         ("effort", cfg.effort or "model default"),
-        ("key from", "api_key (config)" if cfg.api_key else f"${cfg.api_key_env}"),
+        (
+            "key from",
+            "api_key (config)"
+            if cfg.api_key
+            else f"${cfg.api_key_env}"
+            if cfg.api_key_env
+            else "(none needed)",
+        ),
         ("key", redact(cfg.resolve_api_key())),
     ]:
         table.add_row(f"  {label}", escape(str(value)))
@@ -403,7 +441,8 @@ async def ping(repl: Repl, arg: str) -> None:
 
 
 _EFFORT_HELP = {
-    "default": "whatever the model does on its own",
+    "default": "the model's own choice (medium where reasoning is opt-in)",
+    "none": "no reasoning: fastest",
     "low": "quick answers, least reasoning",
     "medium": "balanced",
     "high": "more reasoning for harder problems",
@@ -455,6 +494,16 @@ async def theme(repl: Repl, arg: str) -> None:
         repl.console.print(f"  [warn]{where} is set to {THEME_SETTING}, which takes priority.[/]")
 
 
+@command(
+    "/output",
+    "print the last tool call's full output, a running subagent's calls, or an open /btw answer",
+    group="Session",
+)
+def output(repl: Repl, arg: str) -> None:
+    if not repl.show_aside():
+        repl.show_last_output()
+
+
 @command("/thinking", "show or hide the model's reasoning (also ctrl+t)", group="Model", usage="[on|off]")
 def thinking(repl: Repl, arg: str) -> None:
     choice = arg.lower()
@@ -494,6 +543,99 @@ def tools(repl: Repl, arg: str) -> None:
         badge = "[subtle]read-only[/]" if tool.read_only else "[warn]asks[/]" if tool.needs_permission else ""
         table.add_row(f"  [bold default]{tool.name}[/]", f"{_short(tool.description, 64)}  {badge}")
     repl.console.print(table)
+
+
+@command("/sandbox", "what sandboxed commands can write, read and reach", group="Tools & skills")
+def sandbox(repl: Repl, arg: str) -> None:
+    session = repl.session
+    if session.sandbox is None:
+        repl.console.print("  [warn]No sandbox[/] [muted]· every command asks before it runs[/]")
+        return
+    policy = session.sandbox_policy
+    table = _grid(12)
+    table.add_row("  [bold default]writes[/]", ", ".join(pretty_path(p) for p in policy.write_roots[:4]))
+    table.add_row("  [bold default]reads[/]", "anything except credential files (.env, keys, auth.json)")
+    network = ", ".join(session.proxy.allowed) if session.proxy is not None else "none"
+    table.add_row("  [bold default]network[/]", network)
+    repl.console.print(table)
+    repl.console.print(
+        "  [muted]Anything else asks first (sandbox=false). Change the hosts with \\[sandbox] "
+        "allow_hosts in config.toml.[/]"
+    )
+    if session.ctx.outside:
+        repl.console.print(
+            f"  [warn]Outside content in this conversation:[/] {', '.join(session.ctx.outside[:5])} "
+            "[muted]· calls that could send data out ask first, until /clear[/]"
+        )
+    if session.proxy is not None and session.proxy.denied:
+        repl.console.print(
+            f"  [muted]Blocked this session:[/] {', '.join(dict.fromkeys(session.proxy.denied))}"
+        )
+
+
+@command(
+    "/extensions",
+    "list extensions, or turn one on or off",
+    group="Tools & skills",
+    usage="[on|off|allow name]",
+)
+def extensions(repl: Repl, arg: str) -> None:
+    from tinyharness.ext import builtin_names
+
+    session = repl.session
+    action, _, name = arg.partition(" ")
+    name = name.strip()
+    if action == "allow" and name:
+        try:
+            session.grant_needs(name)
+        except ValueError as e:
+            _fail(repl, str(e))
+            return
+        _ok(repl, f"{name} can now do what it needs [muted](remembered until it changes)[/]")
+        return
+    if action in ("on", "off") and name:
+        names = [n for n in session.config.extensions.enabled if n != name]
+        if action == "on":
+            names.append(name)
+        session.set_extensions(names)
+        if action == "on" and name not in [e.name for e in session.extensions]:
+            error = next((e.error for e in session.extension_errors if e.name == name), "not loaded")
+            _fail(repl, f"{name}: {error}")
+            return
+        _ok(
+            repl,
+            f"{name} turned {action} for this session [muted]· the next request rebuilds the "
+            f"prompt cache once. To keep it, list it under \\[extensions] enabled in config.toml[/]",
+        )
+        return
+    if arg:
+        _fail(repl, "usage: /extensions [on|off|allow name]")
+        return
+    table = _grid()
+    for ext in session.extensions:
+        cost = session.extension_tokens(ext)
+        what = ", ".join(t.name for t in ext.tools) or "no tools"
+        needs = ""
+        if ext.needs:
+            state = (
+                "[subtle]approved[/]"
+                if ext.granted
+                else f"[warn]not approved: /extensions allow {ext.name}[/]"
+            )
+            needs = f"  [muted]needs {', '.join(ext.needs)}[/] · {state}"
+        table.add_row(
+            f"  [bold default]{ext.name}[/]",
+            f"{_short(ext.description or what, 56)}  [subtle]+{cost:,} tokens per request[/]{needs}",
+        )
+    for err in session.extension_errors:
+        table.add_row(f"  [bold default]{err.name}[/]", f"[error]not loaded: {err.error}[/]")
+    if session.extensions or session.extension_errors:
+        repl.console.print(table)
+    off = [n for n in builtin_names() if n not in session.config.extensions.enabled]
+    if off:
+        repl.console.print(f"  [muted]Built in, off: {', '.join(off)} · /extensions on <name>[/]")
+    elif not session.extensions:
+        repl.console.print("  [muted]No extensions. Add one at[/] ~/.tinyharness/extensions/<name>.py")
 
 
 @command("/skills", "list skills", group="Tools & skills")

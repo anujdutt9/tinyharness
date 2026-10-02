@@ -118,3 +118,187 @@ async def test_the_input_box_grows_only_by_the_menu_it_shows(matches, rows):
             )
         height = prompt._get_default_buffer_control_height()
     assert (height.min, height.max) == (rows, rows)
+
+
+@pytest.mark.parametrize(
+    ("line", "command"),
+    [
+        ("/model", True),
+        ("/key anthropic", True),
+        ("/claude-design-skill make a deck", True),
+        ("/var/folders/w4/T/Screenshot\\ 2026-09-30.png  - This is slide 1", False),  # a pasted path
+        ("/Users/me/shot.png what's wrong here?", False),
+        ("fix /model's help text", False),
+    ],
+)
+def test_only_a_slash_and_a_name_is_a_command(line, command):
+    from tinyharness.cli.repl import is_command
+
+    assert is_command(line) is command
+
+
+# ---- attaching screenshots ----
+
+from conftest import png  # noqa: E402
+
+PNG = png(40, 20)
+
+
+def test_pasted_screenshot_paths_are_attached(tmp_path):
+    """As macOS pastes them: spaces escaped, a note after each."""
+    from tinyharness.cli.repl import attachments
+
+    shots = tmp_path / "NSIRD_screencaptureui_OZHpGn"
+    shots.mkdir()
+    for n in (1, 2):
+        (shots / f"Screenshot 2026-09-30 at 3.11.0{n} PM.png").write_bytes(PNG)
+    line = "\n".join(
+        f"{shots}/Screenshot\\ 2026-09-30\\ at\\ 3.11.0{n}\\ PM.png  - This is slide {n}" for n in (1, 2)
+    )
+    images, problems = attachments(line, tmp_path)
+    assert [i.name for i in images] == [
+        "Screenshot 2026-09-30 at 3.11.01 PM.png",
+        "Screenshot 2026-09-30 at 3.11.02 PM.png",
+    ]
+    assert problems == []
+
+
+def test_only_real_images_are_attached(tmp_path):
+    from tinyharness.cli.repl import attachments
+
+    (tmp_path / "fake.png").write_text("not an image")
+    (tmp_path / "broken.png").write_bytes(PNG[:20])
+    (tmp_path / "notes.txt").write_text("hi")
+    images, problems = attachments("look at fake.png broken.png notes.txt missing.png", tmp_path)
+    assert images == []
+    assert problems[0] == "fake.png isn't a PNG, JPEG, GIF or WebP image"
+    assert problems[1].startswith("broken.png: not a readable image")
+
+
+def test_a_pasted_retina_screenshot_is_shrunk(tmp_path):
+    """It used to go in at full size, and a provider rejected every later request."""
+    import base64
+    import io
+
+    from PIL import Image as PILImage
+
+    from tinyharness.cli.repl import attachments
+
+    (tmp_path / "shot.png").write_bytes(png(3024, 1964))
+    [image], _ = attachments("look at shot.png", tmp_path)
+    assert max(PILImage.open(io.BytesIO(base64.b64decode(image.data))).size) == 2000
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_pip_greets_you_on_every_launch_when_the_terminal_can_show_him(tmp_path, monkeypatch, compact):
+    import io
+
+    from rich.console import Console
+
+    from tinyharness import Session, SessionOptions
+    from tinyharness.cli.app import print_banner
+    from tinyharness.cli.theme import THEME
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    session = Session(SessionOptions(config_path=tmp_path / "none.toml", working_dir=tmp_path))
+    try:
+        color = Console(
+            file=io.StringIO(), force_terminal=True, color_system="truecolor", width=100, theme=THEME
+        )
+        print_banner(color, session, compact=compact)
+        assert "▀" in color.file.getvalue()  # Pip, in half-blocks
+        plain = Console(file=io.StringIO(), width=100, color_system=None, theme=THEME)
+        print_banner(plain, session, compact=compact)
+        assert "▀" not in plain.file.getvalue()  # no colors, no Pip
+    finally:
+        session.close()
+
+
+async def test_a_run_without_a_terminal_denies_approvals_instead_of_prompting(monkeypatch):
+    """Seen live: `tinyharness -p ...` from a script ended with "OSError: [Errno 22]" the
+    first time the model asked for something that needs approval (Bash sandbox=false):
+    the prompt tried to open a terminal that wasn't there. With no terminal there's no
+    one to ask: the gate denies it and tells the model why."""
+    import argparse
+    import io
+
+    from rich.console import Console
+
+    from tinyharness.cli import app
+
+    seen = {}
+
+    def fake_open(options, console, interactive):
+        seen["callback"], seen["interactive"] = options.permission_callback, interactive
+        return None
+
+    monkeypatch.setattr(app, "open_session", fake_open)
+    monkeypatch.setattr(app.sys, "stdin", io.StringIO(""))  # not a TTY
+    args = argparse.Namespace(
+        config=None, cwd=None, provider=None, model=None, mode=None, no_skill_tool=False,
+        prompt="hi", setup=False, resume_latest=False, resume=None,
+    )  # fmt: skip
+    await app.run(args, Console(file=io.StringIO()))
+    assert seen == {"callback": None, "interactive": False}
+
+
+def test_sandbox_and_extensions_commands_show_config_names_literally(tmp_path, monkeypatch):
+    """`[sandbox]` in a Rich string is markup and vanished from the hint."""
+    import io
+
+    from rich.console import Console
+
+    from tinyharness import Session, SessionOptions
+    from tinyharness.cli.commands import COMMANDS
+    from tinyharness.cli.theme import THEME
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    class Repl:
+        pass
+
+    repl = Repl()
+    repl.session = Session(SessionOptions(working_dir=tmp_path / "w", config_path=tmp_path / "c.toml"))
+    repl.console = Console(file=io.StringIO(), width=200, theme=THEME, color_system=None)
+    try:
+        COMMANDS["/sandbox"].handler(repl, "")
+        COMMANDS["/extensions"].handler(repl, "on todo")
+        repl.session.extensions[0].needs = ["network:api.example.com"]
+        COMMANDS["/extensions"].handler(repl, "")
+        out = repl.console.file.getvalue()
+        if repl.session.sandbox is not None:
+            assert "[sandbox] allow_hosts" in out and "pypi.org" in out
+        assert "[extensions] enabled" in out and "needs network:api.example.com" in out
+    finally:
+        repl.session.close()
+
+
+def test_cost_shows_the_latest_calls_cache_hits_and_the_fixed_prefix(tmp_path, monkeypatch):
+    """Whether the prompt cache is working shows on the latest call, not in a session total."""
+    import io
+
+    from rich.console import Console
+
+    from tinyharness import Session, SessionOptions
+    from tinyharness.cli.commands import COMMANDS
+    from tinyharness.cli.theme import THEME
+    from tinyharness.llm.usage import Usage
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    class Repl:
+        pass
+
+    repl = Repl()
+    repl.session = Session(SessionOptions(working_dir=tmp_path / "w", config_path=tmp_path / "c.toml"))
+    repl.console = Console(file=io.StringIO(), width=200, theme=THEME, color_system=None)
+    try:
+        repl.session.ctx.usage.add(Usage(input=9000, cached=0, output=100))
+        repl.session.ctx.usage.add(Usage(input=200, cached=9000, output=50))
+        COMMANDS["/cost"].handler(repl, "")
+        out = repl.console.file.getvalue()
+        assert "98% of its 9,200 input tokens read from the cache" in out
+        assert "fixed prefix" in out and "system prompt and tools" in out
+    finally:
+        repl.session.close()

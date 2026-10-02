@@ -329,6 +329,9 @@ class WebSearchInput(ToolInput):
 
 
 class WebSearchTool(Tool[WebSearchInput]):
+    """Not a network tool for permissions: its query goes to the model's own provider,
+    which already sees the conversation. Its results are outside content all the same."""
+
     name = "WebSearch"
     Input = WebSearchInput
     read_only = True
@@ -342,6 +345,9 @@ class WebSearchTool(Tool[WebSearchInput]):
         "(/model: Anthropic, OpenAI, Gemini, xAI or OpenRouter), or use WebFetch on a known URL."
     )
 
+    def outside_source(self, args: WebSearchInput) -> str | None:
+        return "WebSearch results"
+
     def __init__(self, llm: Callable[[], LLMClient]) -> None:
         self.llm = llm  # the current client: the model can change during a session
 
@@ -352,7 +358,7 @@ class WebSearchTool(Tool[WebSearchInput]):
         llm = self.llm()
         if not llm.supports_web_search:
             raise ToolError(self.unsupported.format(provider=llm.provider.label))
-        answer = await llm.one_shot(SEARCH_PROMPT.format(query=args.query), web_search=True)
+        answer = await llm.one_shot_small(SEARCH_PROMPT.format(query=args.query), web_search=True)
         if not answer.strip():
             raise ToolError("the search returned nothing")
         return f"Search results for {args.query!r}\n{UNTRUSTED}\n\n{answer.strip()}"

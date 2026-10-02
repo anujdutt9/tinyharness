@@ -27,7 +27,7 @@ from rich.console import Console, Group, RenderableType
 from rich.panel import Panel
 from rich.text import Text
 
-from tinyharness.cli.theme import BRAND, PROMPT, PT_STYLE, SUBTLE, split_summary
+from tinyharness.cli.theme import BRAND, PROMPT, PT_STYLE, SUBTLE, split_summary, tool_style
 from tinyharness.permissions import Decision, PermissionRequest
 
 Choice = Literal["yes", "remember", "no"]
@@ -60,6 +60,8 @@ def card(request: PermissionRequest, summary: str) -> RenderableType:
     """The tool call being asked about, framed so it stands out from the transcript."""
     name, detail = split_summary(summary)
     title = Text.assemble((name, "bold"), (f"  {detail}" if detail else "", "muted"))
+    if request.agent:  # a subagent is asking, not the agent you're talking to
+        title = Text.assemble((f"{request.agent} subagent", tool_style("Agent")), (" · ", "subtle"), title)
     body: list[RenderableType] = []
     if (diff := preview(request)) is not None:
         body.append(diff)

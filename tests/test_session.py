@@ -4,7 +4,6 @@ import pytest
 
 from tinyharness import MissingAPIKeyError, Session, SessionOptions
 from tinyharness.agent.history import Message
-from tinyharness.llm.tokens import count_message_tokens
 
 
 @pytest.fixture(autouse=True)
@@ -168,5 +167,110 @@ async def test_switching_models_keeps_the_context_reading(session, monkeypatch):
     await _switch(repl, "openai:some-model")
     assert repl.context_used > 0
     assert repl.context_used == pytest.approx(
-        count_message_tokens(session.history.to_dicts()) / session.context_window
+        session.compactor.used(session.history) / session.context_window
+    )
+
+
+def test_no_todo_list_by_default(session):
+    """Current models track multi-step work without one; its upkeep costs steps and tokens."""
+    assert "TodoWrite" not in session.tools.names()
+    assert "TodoWrite" not in session._system_prompt()
+
+
+@pytest.mark.parametrize("how", ["option", "env"])
+def test_the_todo_list_can_be_turned_on(tmp_path, monkeypatch, how):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    if how == "env":
+        monkeypatch.setenv("TINYHARNESS_TODO_LIST", "1")
+    options = SessionOptions(
+        config_path=tmp_path / "none.toml",
+        working_dir=tmp_path / "work",
+        todo_list=True if how == "option" else None,
+    )
+    s = Session(options)
+    try:
+        assert "TodoWrite" in s.tools.names()
+        assert "# Planning" in s._system_prompt()
+    finally:
+        s.close()
+
+
+async def test_a_session_closes_at_the_end_of_an_async_with(tmp_path, monkeypatch):
+    from tinyharness import Session, SessionOptions
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    async with Session(SessionOptions(config_path=tmp_path / "none.toml", working_dir=tmp_path)) as s:
+        scratch = s.scratch.dir
+        assert scratch.exists()
+    assert not scratch.exists()
+
+
+async def test_every_turn_records_how_it_ended(session):
+    """Failed turns used to leave no trace in the log, so a provider error, a stuck model
+    and the user pressing Ctrl+C all looked the same afterwards."""
+    import json
+
+    from conftest import ScriptedLLM
+    from tinyharness.llm.types import LLMError
+
+    session.llm.stream = ScriptedLLM(["hello"]).stream
+    [e async for e in session.run("hi")]
+
+    async def failing(*a, **k):
+        raise LLMError("LLM error 500: upstream exploded")
+        yield
+
+    session.llm.stream = failing
+    with pytest.raises(LLMError):
+        [e async for e in session.run("again")]
+    session.transcript.close()
+    records = [json.loads(line) for line in session.transcript.path.read_text().splitlines()]
+    ends = [r for r in records if r["event"] == "turn_end"]
+    assert [e["reason"] for e in ends] == ["stop", "error"]
+    assert "upstream exploded" in ends[1]["error"]
+
+
+def test_skills_are_listed_in_the_prompt_with_where_to_read_them(tmp_path, monkeypatch):
+    """No Skill tool: the prompt lists each skill's name, when to use it, and its SKILL.md,
+    which the model loads with Read."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    skills = tmp_path / "home" / "skills" / "frontend-design"
+    skills.mkdir(parents=True)
+    (skills / "SKILL.md").write_text(
+        "---\nname: frontend-design\ndescription: "
+        + "Design web pages well. " * 40
+        + "\n---\nDo it like this."
+    )
+    monkeypatch.setenv("TINYHARNESS_HOME", str(tmp_path / "home"))
+    on = Session(SessionOptions(config_path=tmp_path / "none.toml", working_dir=tmp_path / "work"))
+    off = Session(
+        SessionOptions(
+            config_path=tmp_path / "none.toml", working_dir=tmp_path / "work", expose_skill_tool=False
+        )
+    )
+    try:
+        prompt = on._system_prompt()
+        line = next(x for x in prompt.splitlines() if x.startswith("- frontend-design:"))
+        assert line.endswith(f"({skills / 'SKILL.md'})")
+        assert len(line) - len(str(skills)) < 300  # the description is cut short
+        assert "Skill" not in on.tools.names() and "# Skills" not in off._system_prompt()
+    finally:
+        on.close()
+        off.close()
+
+
+async def test_a_prompt_naming_a_skill_is_sent_as_typed(session):
+    """A note telling the model to load any skill the user named was appended to every
+    such prompt, even "don't use the claude-design-skill". The system prompt already says
+    a skill the user asks for isn't optional."""
+    from conftest import ScriptedLLM
+    from tinyharness.skills import Skill
+
+    session.skills.add(Skill("claude-design-skill", "Design.", "..."))
+    session.llm.stream = ScriptedLLM(["ok"]).stream
+    prompt = "Don't use the claude-design-skill for this one."
+    [e async for e in session.run(prompt)]
+    assert [m.content for m in session.history.messages if m.role == "user"] == [prompt]
+    assert "a skill, tool or approach they name isn't optional" in " ".join(
+        session.history.messages[0].content.split()
     )

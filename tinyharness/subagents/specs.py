@@ -7,8 +7,9 @@ Built-ins ship as Markdown in tinyharness/prompts/agents/. Users add their own i
     name: reviewer
     description: Reviews a diff for bugs.
     tools: [Read, Grep, Glob]          # leave out for every tool the session has
-    permission_mode: acceptEdits
+    permission_mode: default
     model: small                       # inherit | small | provider:model | model id
+    max_steps: 60                      # model calls before it must wrap up (default 40)
     ---
     You are a meticulous code reviewer...
 """
@@ -37,12 +38,16 @@ class AgentSpec:
     description: str
     system_prompt: str = ""
     tools: list[str] | None = None
-    permission_mode: PermissionMode = PermissionMode.DEFAULT
+    # A limit, not a mode: the agent runs in the session's mode, held to this if it's
+    # stricter (None: no limit). An agent can't be more permissive than the session.
+    permission_mode: PermissionMode | None = None
     model: str | None = None
+    max_steps: int | None = None  # model calls before it must wrap up (None: SUBAGENT_MAX_STEPS)
     source: Path | None = None  # the Markdown file it came from, if any
 
     def __post_init__(self) -> None:
-        self.permission_mode = PermissionMode.parse(self.permission_mode)  # accept "acceptEdits"
+        if self.permission_mode is not None:
+            self.permission_mode = PermissionMode.parse(self.permission_mode)  # accept "default"
 
 
 def parse_agent_md(path: Path) -> AgentSpec | None:
@@ -55,8 +60,11 @@ def parse_agent_md(path: Path) -> AgentSpec | None:
         description=str(meta.get("description") or ""),
         system_prompt=body,
         tools=list(meta["tools"]) if meta.get("tools") is not None else None,
-        permission_mode=PermissionMode.parse(meta.get("permission_mode") or "default"),
+        permission_mode=PermissionMode.parse(meta["permission_mode"])
+        if meta.get("permission_mode")
+        else None,
         model=str(meta["model"]) if meta.get("model") else None,
+        max_steps=int(meta["max_steps"]) if meta.get("max_steps") else None,
         source=path,
     )
 

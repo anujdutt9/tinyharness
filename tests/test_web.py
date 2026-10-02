@@ -176,7 +176,7 @@ async def test_webfetch_asks_once_per_site(tmp_path):
         asked.append(request.remember_label)
         return Decision(True, source="prompt", remember=True)
 
-    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.ACCEPT_EDITS, callback=callback)
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.ASK, callback=callback)
     tool = WebFetchTool()
 
     async def check(url):
@@ -189,6 +189,23 @@ async def test_webfetch_asks_once_per_site(tmp_path):
     assert len(asked) == 1  # remembered for that site
     await check("https://evil.example/")
     assert len(asked) == 2  # another site asks again
+
+
+async def test_default_mode_reads_public_pages_without_asking(tmp_path):
+    """Seen live: with the web extension on, WebSearch ran but every WebFetch asked, so a
+    one-shot run couldn't read the page it had just found. A URL with a query string,
+    which could carry data out, still asks."""
+    asked = []
+
+    async def callback(request):
+        asked.append(request.tool)
+        return Decision(False, source="prompt")
+
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.DEFAULT, callback=callback)
+    tool = WebFetchTool()
+    page = await gate.check(tool, {"url": "https://docs.python.org/3/"}, None, target_host="docs.python.org")
+    query = await gate.check(tool, {"url": "https://x.example/?q=secret"}, None, target_host="x.example")
+    assert page.allow and not query.allow and asked == ["WebFetch"]
 
 
 async def test_site_rules_from_the_config(tmp_path):
@@ -213,7 +230,7 @@ class FakeLLM:
     def supports_web_search(self):
         return bool(self.provider.web_search)
 
-    async def one_shot(self, prompt, **kwargs):
+    async def one_shot_small(self, prompt, **kwargs):
         self.calls.append((prompt, kwargs))
         return "Aero 14 is best [review](https://example.com/aero)"
 

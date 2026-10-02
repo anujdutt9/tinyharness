@@ -301,3 +301,26 @@ def test_permission_rules_in_config(tmp_path):
 def test_typo_in_permissions_section_is_an_error(tmp_path):
     with pytest.raises(ValueError):
         load_config(write_config(tmp_path, '[permissions]\nalow = ["Edit"]\n'))
+
+
+def test_a_providers_tables_merge_with_the_built_in_ones():
+    """Adding OpenRouter routing preferences used to replace the whole built-in extra_body,
+    silently dropping prompt caching and cost reporting."""
+    from tinyharness.llm.providers import load_catalog
+
+    body = load_catalog({"openrouter": {"extra_body": {"provider": {"ignore": ["Novita"]}}}})[
+        "openrouter"
+    ].extra_body
+    assert body["provider"] == {"ignore": ["Novita"]}
+    assert body["usage"] == {"include": True} and "cache_control" in body
+
+
+def test_a_key_set_for_this_run_beats_one_only_saved(no_keys, tmp_path, monkeypatch):
+    """Seen live: with OPENROUTER_API_KEY in the run's .env and a stale Anthropic key in
+    auth.json, Anthropic (first in the provider list) was picked and failed with a 401."""
+    from tinyharness import config
+
+    monkeypatch.setattr(config, "KEYS_FROM_AUTH", set())
+    write_auth({"anthropic": {"api_key": "sk-ant-stale"}})
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-fresh")
+    assert load_config(write_config(tmp_path)).provider == "openrouter"

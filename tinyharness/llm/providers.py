@@ -10,6 +10,9 @@ a built-in one with a `[providers.<name>]` table:
     api_key_env = "GATEWAY_KEY"
     default_model = "claude-sonnet-5"
 
+    [providers.local]              # a self-hosted server (vLLM, Ollama...) that needs no key
+    base_url = "http://127.0.0.1:8000/v1"
+
     [providers.openrouter]         # built-ins merge: this only changes one field
     small_model = "google/gemini-3.5-flash-lite"
 """
@@ -36,10 +39,10 @@ class Provider(BaseModel):
     label: str = ""
     api: Api = "chat"  # wire format; see tinyharness/llm/adapters
     base_url: str
-    api_key_env: str
+    api_key_env: str = ""  # empty: the endpoint needs no key (a local vLLM or Ollama)
     key_url: str = ""
     default_model: str = ""
-    small_model: str = ""  # cheap model for background work (the auto-mode classifier)
+    small_model: str = ""  # cheap model for background work (classifier, WebSearch digests)
     extra_headers: dict[str, str] = Field(default_factory=dict)
     extra_body: dict[str, Any] = Field(default_factory=dict)  # merged into every request
     effort_param: str = "reasoning_effort"  # chat API only: where the reasoning effort goes
@@ -47,6 +50,9 @@ class Provider(BaseModel):
     # merged into the request for chat providers that switch it on another way, false: none.
     web_search: bool | dict[str, Any] = False
     models: list[ModelInfo] = Field(default_factory=list)  # for endpoints without a model list
+    # Tool-call ids this API accepts; ids that don't match (another provider's, after a
+    # model switch) are replaced in requests. The default is what Anthropic requires.
+    tool_id_pattern: str = r"[A-Za-z0-9_-]{1,64}"
 
     @field_validator("models", mode="before")
     @classmethod
@@ -57,7 +63,7 @@ class Provider(BaseModel):
     @field_validator("api_key_env")
     @classmethod
     def _looks_like_a_variable_name(cls, v: str) -> str:
-        if not v.replace("_", "").isalnum():
+        if v and not v.replace("_", "").isalnum():
             raise ValueError(
                 "api_key_env is the NAME of an environment variable (e.g. MY_API_KEY), "
                 "not the key itself. Put the key in your environment or a .env file."
@@ -76,17 +82,36 @@ class Provider(BaseModel):
 
     @property
     def api_key(self) -> str:
-        return os.environ.get(self.api_key_env, "")
+        return os.environ.get(self.api_key_env, "") if self.api_key_env else ""
+
+    @property
+    def needs_key(self) -> bool:
+        return bool(self.api_key_env)
+
+    @property
+    def has_key(self) -> bool:
+        """Ready to use: its key is set, or it needs none."""
+        return not self.needs_key or bool(self.api_key)
 
 
 def load_catalog(overrides: dict[str, dict[str, Any]] | None = None) -> dict[str, Provider]:
     """Built-in providers merged with the user's `[providers.*]` tables.
 
-    For a built-in, the user's fields replace the catalog's. A new name defines a
-    new provider (it needs at least `base_url` and `api_key_env`).
+    For a built-in, the user's fields replace the catalog's, except tables (`extra_body`,
+    `extra_headers`), which are merged key by key: adding OpenRouter routing preferences
+    mustn't drop the built-in caching and cost settings. A new name defines a new provider
+    (it needs at least `base_url`; `api_key_env` too unless it needs no key).
     """
     with CATALOG_PATH.open("rb") as f:
         raw: dict[str, dict[str, Any]] = tomllib.load(f)
     for name, fields in (overrides or {}).items():
-        raw.setdefault(name, {}).update(fields)
+        _merge(raw.setdefault(name, {}), fields)
     return {name: Provider(name=name, **fields) for name, fields in raw.items()}
+
+
+def _merge(base: dict[str, Any], extra: dict[str, Any]) -> None:
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge(base[key], value)
+        else:
+            base[key] = value
