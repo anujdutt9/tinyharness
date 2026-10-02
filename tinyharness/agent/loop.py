@@ -48,7 +48,13 @@ from tinyharness.events import (
 )
 from tinyharness.images import fit_image
 from tinyharness.llm.client import ContextOverflowError, ImageTooLargeError, ToolCallAccumulator
-from tinyharness.llm.textcalls import looks_like_a_call, recover_calls, repair_arguments
+from tinyharness.llm.textcalls import (
+    call_start,
+    looks_like_a_call,
+    may_start_a_call,
+    recover_calls,
+    repair_arguments,
+)
 from tinyharness.llm.types import LLMError, RunawayOutputError, StreamChunk
 from tinyharness.llm.usage import Usage
 from tinyharness.security import mask_secrets
@@ -166,6 +172,8 @@ class _Turn:
     finish_reason: str | None = None  # normalized: see llm/types.py FinishReason
     finish_detail: str = ""  # the provider's own word for it
     route: str = ""
+    shown: int = 0  # chars of text sent as AssistantText; -1 once a call written as text began
+    held_from: int = 0  # where that call began
 
 
 async def run_agent_loop(
@@ -264,6 +272,8 @@ async def run_agent_loop(
                 history.append(Message(role="assistant", content=text))
                 history.append(Message(role="user", content=note))
                 continue
+        if not calls and (rest := _held(turn)):  # held back as a possible call: it's the answer
+            yield AssistantText(rest)
         if not calls and not text.strip():
             # Nothing to show or do. That isn't "finished": ask the model to carry on, and
             # stop the turn if it happens again straight away.
@@ -592,7 +602,8 @@ def _take(chunk: StreamChunk, turn: _Turn) -> list[Event]:
         events.append(Reasoning(chunk.reasoning_text))
     if chunk.text:
         turn.text.append(chunk.text)
-        events.append(AssistantText(chunk.text))
+        if visible := _visible(turn):
+            events.append(AssistantText(visible))
     if chunk.tool_call_delta:
         turn.calls.add(chunk.tool_call_delta)
         if (progress := _streaming(turn, chunk.tool_call_delta.get("index", 0))) is not None:
@@ -606,6 +617,31 @@ def _take(chunk: StreamChunk, turn: _Turn) -> list[Event]:
     if chunk.usage is not None:
         turn.usage = chunk.usage
     return events
+
+
+def _visible(turn: _Turn) -> str:
+    """The streamed text that's safe to show now. A tool call the server's parser missed
+    arrives as text (`<function=Read>...`, seen live from Qwen3-Coder) and is run once the
+    reply ends: it isn't shown, so the text from a line that starts like one is held back
+    until it's clear whether it is one (`_held`)."""
+    text = "".join(turn.text)
+    if turn.shown < 0:
+        return ""  # a call started: nothing more until the reply ends
+    if (start := call_start(text)) >= 0:
+        visible, turn.shown = text[turn.shown : start], -1
+        turn.held_from = start
+        return visible
+    end = text.rfind("\n") + 1
+    if not may_start_a_call(text[end:]):
+        end = len(text)
+    visible, turn.shown = text[turn.shown : max(end, turn.shown)], max(end, turn.shown)
+    return visible
+
+
+def _held(turn: _Turn) -> str:
+    """Text held back while the reply streamed, for when it turned out not to be a call."""
+    start = turn.held_from if turn.shown < 0 else turn.shown
+    return "".join(turn.text)[start:]
 
 
 async def _compact(history: History, deps: LoopDeps) -> AsyncGenerator[Event, None]:

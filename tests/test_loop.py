@@ -942,3 +942,32 @@ async def test_a_reply_that_mentions_a_teammate_message_is_kept(tmp_path):
     answer = "The board wraps each message in `<teammate-message from=...>` tags."
     events, history = await run(tmp_path, ScriptedLLM([answer]), [], inbox=lambda: [])
     assert events == [AssistantText(answer), Done()] and history.messages[-1].content == answer
+
+
+def _chunks(*texts):
+    return [*(StreamChunk(text=t) for t in texts), StreamChunk(finish_reason="stop")]
+
+
+async def test_a_call_written_as_text_runs_without_being_shown(tmp_path):
+    """Seen live (Qwen3-Coder via SiliconFlow): `<function=Read> <parameter=path>...` was
+    printed as part of the answer, then run. The call is run, not shown."""
+    reply = _chunks(
+        "Let me read it.\n<func", "tion=Read><parameter=seconds>1</parameter>", "</function></tool_call>"
+    )
+    events, _ = await run(tmp_path, ScriptedLLM([reply, "done"]), [Echo()])
+    shown = "".join(e.text for e in events if isinstance(e, AssistantText))
+    assert shown == "Let me read it.\ndone"
+    assert [e.output for e in events if isinstance(e, ToolResult)] == ["read 1.0"]
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        ("Compare a and b:\n<fun", "ction is a word, not a tag"),  # looked like a tag, wasn't
+        ("Use the format\n```\n<call>{...}</call>\n```\n", "in your prompt."),  # inside a code block
+        ("The answer is 42.\n<", "3 is less than 4"),
+    ],
+)
+async def test_text_that_only_looked_like_a_call_is_shown_in_full(tmp_path, parts):
+    events, _ = await run(tmp_path, ScriptedLLM([_chunks(*parts)]), [Echo()])
+    assert "".join(e.text for e in events if isinstance(e, AssistantText)) == "".join(parts)

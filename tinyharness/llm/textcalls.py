@@ -140,6 +140,21 @@ def looks_like_a_call(text: str) -> bool:
     )
 
 
+TAGS = ("<tool_call>", "<call>", "<function=", "<|tool_call>")
+
+
+def call_start(text: str) -> int:
+    """Where a call written as text starts in `text` (so far), or -1. While a reply streams,
+    text from here on is held back: shown only if it turns out not to be a call."""
+    return _first_tag(text)
+
+
+def may_start_a_call(line: str) -> bool:
+    """Whether a line still being written could turn out to be a call's opening tag."""
+    line = line.lstrip(" \t")
+    return bool(line) and any(tag.startswith(line) for tag in TAGS)
+
+
 def _first_tag(text: str) -> int:
     """Where the first call starts: at the start of a line, outside any code block."""
     if len(text) > MAX_CHARS:
