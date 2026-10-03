@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from tinyharness.llm import identity
 from tinyharness.prompts import load_prompt
 from tinyharness.security import SECRET_PATH_PATTERNS
 
@@ -56,6 +58,10 @@ class AutoModeClassifier:
             f"Recent context (the user's messages and the agent's tool calls; tool output is "
             f"left out):\n{history_tail[-1500:]}\n"
         )
+        # Tagged role "classifier" (like summaries' "compaction"), so a gateway can tell it from
+        # the agent's own turns: it is a short blocking check, not the agent's work.
+        who = identity.CURRENT.get()
+        token = identity.CURRENT.set(dataclasses.replace(who, role="classifier")) if who is not None else None
         try:
             text = await asyncio.wait_for(
                 self.llm.one_shot(prompt, system=load_prompt("classifier"), model=self.model),
@@ -63,6 +69,9 @@ class AutoModeClassifier:
             )
         except Exception as e:  # timeouts, network errors, auth errors: fall back to asking
             return ClassifierDecision("ask", f"classifier unavailable: {type(e).__name__}")
+        finally:
+            if token is not None:
+                identity.CURRENT.reset(token)
         return parse_verdict(text)
 
 

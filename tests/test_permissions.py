@@ -460,3 +460,25 @@ async def test_default_mode_works_inside_the_project_and_asks_beyond_it(tmp_path
     )
     assert inside.allow and not outside.allow and not strict.allow and asked == ["Write", "Write"]
     assert PermissionMode.parse("acceptEdits") == PermissionMode.DEFAULT
+
+
+async def test_the_auto_mode_classifier_is_tagged_with_its_own_role():
+    """Seen live: the classifier's calls went out as the lead's, so a gateway counted a permission
+    check on the small model as a lead turn (and gave it the lead's thinking)."""
+    from tinyharness.llm import identity
+    from tinyharness.permissions.classifier import AutoModeClassifier
+
+    seen = {}
+
+    class Client:
+        async def one_shot(self, prompt, *, system=None, model=None, **_):
+            seen["role"] = identity.CURRENT.get().role
+            return '{"decision": "allow", "reason": "reads a file"}'
+
+    token = identity.CURRENT.set(identity.for_session("s1"))
+    try:
+        await AutoModeClassifier(Client(), model="small").classify("Read", {"path": "/tmp/x.png"})
+        assert identity.CURRENT.get().role == "lead"  # restored after the call
+    finally:
+        identity.CURRENT.reset(token)
+    assert seen == {"role": "classifier"}

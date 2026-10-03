@@ -406,6 +406,8 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   keeps only the last ~2k tokens word for word, so the retry fits.
 - Without `compaction_model`, a subagent's summaries are written on its own model; one on
   another model of the session's provider used the session's model.
+- `auto` mode's permission classifier sends its calls as role `classifier` (`X-Agent-Role`), as
+  summaries are `compaction`, so a gateway can tell them from the agent's turns.
 - A Team saves every member's result to a file and names it, short ones too, so a lead
   never goes looking for a file that isn't there.
 - A model's tokenizer (`tokenizer` in a `models` entry) is read from the local Hugging Face
