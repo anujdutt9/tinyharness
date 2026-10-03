@@ -5,8 +5,18 @@ Three tiers, cheapest first, run before every model call:
   1. budget_cap    cap any single oversized message (e.g. a huge file read)
   2. microcompact  replace old, large tool results with a one-line stub, and trim the
                    long strings in old tool calls (a Write's content is on disk already)
-  3. summarize     when the whole history nears the window, have the model
-                   summarize everything but the recent tail
+  3. summarize     when the history leaves less room than the model's output needs,
+                   have the model summarize everything but the recent tail
+
+When to summarize and how much to keep follow opencode (session/overflow.ts,
+session/compaction.ts), sized from the model, not fixed:
+
+  - usable = window − reserve, where reserve is the model's output limit (at most
+    OUTPUT_TOKEN_MAX), or `reserved` from the config. Summarize once the history
+    reaches `usable`, so the reply always has its room.
+  - The recent tail kept word for word is `preserve_recent_tokens`, by default a quarter
+    of `usable` between TAIL_MIN and TAIL_MAX tokens: whole turns from the end, and part
+    of the turn that doesn't fit (never starting at a tool result).
 
 How full the window is comes from the provider's own count for the last request,
 plus an estimate for what was added since (`used`).
@@ -57,7 +67,10 @@ SUMMARY_MARK = "[prior conversation summary]"
 # Starts the user message that repeats the request when a summary cuts into the middle of
 # a task (the kept messages begin with the agent's work, and APIs want a user message first).
 CONTINUING = "[continuing after a summary] The request being worked on:"
-TAIL_SHARE = 0.3  # of the window: the most a summary keeps word for word to end at a user message
+# opencode's defaults (provider/transform.ts OUTPUT_TOKEN_MAX, session/compaction.ts)
+OUTPUT_TOKEN_MAX = 32_000  # the most of the window held back for the reply
+TAIL_SHARE = 0.25  # of `usable`: the recent tail kept word for word ...
+TAIL_MIN, TAIL_MAX = 2_000, 15_000  # ... within these bounds
 LONG_STRING = 500  # chars: tool-call strings longer than this are trimmed in old calls
 
 # Results that are instructions or delegated work: expensive to redo, cheap to keep.
@@ -82,7 +95,10 @@ class Compactor:
         llm: LLMClient,
         *,
         context_window: int | Callable[[], int] = 200_000,
-        threshold: float = 0.90,
+        max_output: int | Callable[[], int | None] | None = None,
+        reserved: int | None = None,
+        preserve_recent_tokens: int | None = None,
+        threshold: float | None = None,
         max_message_tokens: int = 16_000,
         stub_tool_results_over: int = 6_000,
         keep_tail_messages: int = 12,
@@ -96,7 +112,10 @@ class Compactor:
         self.llm = llm
         self.model = model  # the model summaries are written on; None = the agent's own
         self._context_window = context_window
-        self.threshold = threshold
+        self._max_output = max_output  # the model's output limit; None = unknown
+        self.reserved = reserved  # tokens held back for the reply, overriding the model's output limit
+        self.preserve_recent_tokens = preserve_recent_tokens
+        self.threshold = threshold  # a fraction of the window instead of `usable` (old setting)
         self.max_message_tokens = max_message_tokens
         self.stub_tool_results_over = stub_tool_results_over
         self.keep_tail = keep_tail_messages
@@ -109,12 +128,36 @@ class Compactor:
         # The provider's token count for the history up to a message: (message count, last
         # message's id, tokens). Dropped when history is rewritten in place.
         self._baseline: tuple[int, str, int] | None = None
+        # The prompt the provider counted on the first call after a summary: what a summary
+        # can't remove (system prompt, tools, the summary, the kept tail). None: not known yet.
+        self._floor: int | None = None
+        self._floor_pending = False
 
     @property
     def context_window(self) -> int:
         """May be a callable: the window is only known once the provider's model list is."""
         window = self._context_window
         return window() if callable(window) else window
+
+    @property
+    def usable(self) -> int:
+        """How much of the window the history may fill and still leave the reply its room
+        (opencode's `usable`): the window less the model's output limit, at most
+        OUTPUT_TOKEN_MAX. Unlike opencode, at most half the window is held back: model lists
+        often give the output limit as the whole window (or it is unknown on a 32K model),
+        which would summarize on every call."""
+        window = self.context_window
+        if self.reserved is not None:
+            return max(0, window - self.reserved)
+        output = self._max_output() if callable(self._max_output) else self._max_output
+        return window - min(output or OUTPUT_TOKEN_MAX, OUTPUT_TOKEN_MAX, window // 2)
+
+    @property
+    def tail_budget(self) -> int:
+        """Tokens of recent history a summary keeps word for word."""
+        if self.preserve_recent_tokens is not None:
+            return self.preserve_recent_tokens
+        return min(TAIL_MAX, max(TAIL_MIN, int(self.usable * TAIL_SHARE)))
 
     def mark_call(self) -> None:
         """Record a model call: the provider's cache for this prefix is fresh from now."""
@@ -133,6 +176,8 @@ class Compactor:
         tokens = usage.input + usage.cached + usage.output
         if tokens and history.messages:
             self._baseline = (len(history.messages), history.messages[-1].id, tokens)
+        if self._floor_pending and usage.input + usage.cached:
+            self._floor, self._floor_pending = usage.input + usage.cached, False
 
     def used(self, history: History) -> int:
         """Tokens the history takes up in the context window."""
@@ -215,12 +260,21 @@ class Compactor:
         return len(batch)
 
     def needs_summary(self, history: History) -> bool:
-        return self.used(history) >= self.context_window * self.threshold
+        """Past the limit, and (after a summary) with at least a tail's worth of new history
+        to fold in: when the system prompt, tools, summary and tail alone sit near the limit
+        (a small window), summarizing again every step would only shrink the summary. A real
+        overflow is still caught from the provider's error."""
+        limit = self.context_window * self.threshold if self.threshold is not None else self.usable
+        used = self.used(history)
+        if used < limit:
+            return False
+        return self._floor is None or used - self._floor >= self.tail_budget
 
     async def summarize(self, history: History, *, keep_tail: int | None = None, notes: str = "") -> bool:
         """Replace everything before the recent tail with an LLM-written summary.
-        `keep_tail` overrides how many recent messages stay (more, if that would start the
-        tail at a tool result). `notes`: current state worth keeping (the todo list).
+        The tail is `tail_budget` tokens of the latest turns; `keep_tail` keeps that many
+        messages instead (more, if that would start the tail at a tool result). `notes`:
+        current state worth keeping (the todo list).
 
         The tail can start mid-task, even inside one long agentic turn: never at a tool
         result, so a tool call is never separated from its result. When it doesn't start
@@ -233,7 +287,7 @@ class Compactor:
         ]
         body = messages[len(system) :]
 
-        cut = self._cut(body, self.keep_tail if keep_tail is None else keep_tail)
+        cut = self._cut_tokens(body, self.tail_budget) if keep_tail is None else self._cut(body, keep_tail)
         if cut == 0:
             return False
         head, tail = body[:cut], body[cut:]
@@ -257,22 +311,56 @@ class Compactor:
             log.warning("compaction: the model returned an empty summary; history kept")
             return False
         kept = [*system, Message(role="system", content=f"{SUMMARY_MARK}\n{summary}")]
-        if tail[0].role != "user":
+        if not tail or tail[0].role != "user":
             request = next((r for m in reversed(head) if (r := _request(m))), "")
             kept.append(Message(role="user", content=f"{CONTINUING}\n{request}"))
         history.messages = [*kept, *tail]
         self._baseline = None
+        self._floor, self._floor_pending = None, True
         return True
 
+    def _summary_window(self) -> int:
+        """The window of the model that writes the summary (`model` may be smaller than the agent's)."""
+        info = self.llm.model_info(self.model) if self.model and hasattr(self.llm, "model_info") else None
+        return info.context if info is not None and info.context else self.context_window
+
+    def _cut_tokens(self, body: list[Message], budget: int) -> int:
+        """Where the kept tail starts, for a tail of at most `budget` tokens (opencode's
+        `select`): whole turns from the end (a turn starts at a user message), then the
+        latest part of the turn that doesn't fit whole, never starting at a tool result.
+        len(body): everything is summarized and the request repeated after the summary,
+        when not even the last step fits, or when everything does (as opencode: the
+        provider's count, which an overflow reports, can exceed this estimate)."""
+        if len(body) <= 1:
+            return 0  # a lone request: nothing to summarize
+        sizes = [estimate_tokens([m]) for m in body]
+        after = [0] * (len(body) + 1)  # after[i]: tokens from message i to the end
+        for i in range(len(body) - 1, -1, -1):
+            after[i] = after[i + 1] + sizes[i]
+        if after[0] <= budget:
+            return len(body)
+        starts = [i for i, m in enumerate(body) if m.role == "user"] or [0]
+        keep = len(body)
+        for start in reversed(starts):
+            if after[start] <= budget:
+                keep = start
+                continue
+            # Part of this turn: the earliest step that fits, after the turn's user message.
+            return next(
+                (i for i in range(start + 1, keep) if body[i].role != "tool" and after[i] <= budget), keep
+            )
+        return keep
+
     def _cut(self, body: list[Message], keep: int) -> int:
-        """Where the kept tail starts. Preferably at a user message, so the whole latest
-        exchange stays as it is; but if that leaves too much (one long task: the user's
-        message is far back), at the latest point that isn't a tool result."""
+        """Where the kept tail starts, for the last `keep` messages. Preferably at a user
+        message, so the whole latest exchange stays as it is; but if that leaves more than
+        `tail_budget` (one long task: the user's message is far back), at the latest point
+        that isn't a tool result."""
         start = max(0, len(body) - keep)
         at_user = start
         while at_user > 0 and body[at_user].role != "user":
             at_user -= 1
-        if at_user > 0 and estimate_tokens(body[at_user:]) <= self.context_window * TAIL_SHARE:
+        if at_user > 0 and estimate_tokens(body[at_user:]) <= self.tail_budget:
             return at_user
         while start > 0 and body[start].role == "tool":
             start -= 1
@@ -289,7 +377,7 @@ class Compactor:
                 if m.role == "tool" and m.meta.get("path") and not m.meta.get("content")
             }
         )
-        budget = self.context_window * 2  # chars: ~half the window at ~4 chars per token
+        budget = self._summary_window() * 2  # chars: ~half the summary model's window at ~4 chars per token
         for cap in (4000, 2000, 800, 300):
             parts: list[str] = []
             for m in head:

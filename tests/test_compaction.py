@@ -370,3 +370,95 @@ async def test_the_summary_runs_on_the_compaction_model_as_role_compaction():
     finally:
         identity.CURRENT.reset(token)
     assert seen == {"role": "compaction", "model": "qwen-9b"}
+
+
+# ---- when to summarize and how much to keep: from the model (opencode's rules) ----
+
+
+def test_usable_is_the_window_less_the_models_output():
+    assert compactor(context_window=200_000, max_output=8_192).usable == 200_000 - 8_192
+    assert compactor(context_window=200_000, max_output=128_000).usable == 200_000 - 32_000  # at most 32K held back
+    assert compactor(context_window=200_000).usable == 200_000 - 32_000  # unknown output: 32K
+    assert compactor(context_window=65_536, max_output=lambda: 8_192).usable == 65_536 - 8_192  # read when asked
+    assert compactor(context_window=65_536, reserved=17_000).usable == 65_536 - 17_000  # the config's own
+
+
+def test_a_small_window_holds_back_at_most_half():
+    """Model lists often give the output limit as the whole window; held back in full, every
+    call would summarize."""
+    assert compactor(context_window=32_768, max_output=32_768).usable == 16_384
+    assert compactor(context_window=16_384).usable == 8_192  # unknown output
+
+
+def test_summarizes_at_usable_unless_a_threshold_is_set():
+    h = history(user("x"))
+    c = compactor(context_window=100_000, max_output=20_000)
+    c._baseline = (1, h.messages[0].id, 79_000)
+    assert not c.needs_summary(h)
+    c._baseline = (1, h.messages[0].id, 80_000)
+    assert c.needs_summary(h)
+    c.threshold = 0.9  # the old fraction still overrides
+    assert not c.needs_summary(h)
+
+
+def test_the_tail_budget_scales_with_the_window():
+    assert compactor(context_window=65_536, max_output=32_768).tail_budget == int((65_536 - 32_000) * 0.25)
+    assert compactor(context_window=8_000).tail_budget == 2_000  # floor
+    assert compactor(context_window=1_000_000).tail_budget == 15_000  # cap
+    assert compactor(preserve_recent_tokens=500).tail_budget == 500
+
+
+def big_turns(n: int, words: int) -> History:
+    """n user turns, each a Read whose result is `words` words."""
+    out = [Message(role="system", content="sys")]
+    for i in range(n):
+        out += [user(f"q{i}"), assistant("", f"r{i}"), tool(f"r{i}", "word " * words), assistant(f"a{i}")]
+    return history(*out)
+
+
+async def test_the_kept_tail_is_a_token_budget_not_a_message_count():
+    """Exp-1A: the last 12 messages were large tool results, so the summary saved ~2K tokens."""
+    h = big_turns(12, 4_000)
+    c = compactor(preserve_recent_tokens=10_000)
+    assert await c.summarize(h)
+    kept = [m for m in h.messages if not (m.content or "").startswith((SUMMARY_MARK, "sys"))]
+    from tinyharness.llm.tokens import estimate_tokens
+
+    assert estimate_tokens(kept) <= 10_000
+    assert kept[0].role == "user"  # whole turns: this one fit
+    calls = {c.id for m in kept for c in m.tool_calls}
+    assert calls == {m.tool_call_id for m in kept if m.role == "tool"}  # no call without its result
+
+
+async def test_a_turn_too_big_to_keep_whole_keeps_its_latest_steps():
+    h = one_long_task(30, "word " * 2_000)
+    assert await compactor(preserve_recent_tokens=6_000).summarize(h)  # each result ~2,500 tokens: two fit
+    after = h.messages
+    assert after[2].role == "user" and after[2].content.endswith("build the report from data.db")
+    assert after[3].role == "assistant"  # never a tool result first
+    assert sum(m.role == "tool" for m in after) == 2
+
+
+async def test_when_not_even_the_last_step_fits_everything_is_summarized():
+    h = one_long_task(3, "word " * 20_000)
+    assert await compactor(preserve_recent_tokens=1_000).summarize(h)
+    assert [m.role for m in h.messages] == ["system", "system", "user"]  # sys, summary, the request
+    assert h.messages[2].content.endswith("build the report from data.db")
+
+
+async def test_a_lone_request_is_not_summarized():
+    assert not await compactor(preserve_recent_tokens=0).summarize(history(Message(role="system", content="s"), user("go")))
+
+
+async def test_after_a_summary_it_waits_for_new_history_before_summarizing_again():
+    """A small window where the system prompt, tools, summary and tail alone sit past the limit:
+    summarizing again each step would only shrink the summary."""
+    from tinyharness.llm.usage import Usage
+
+    c = compactor(context_window=20_000, preserve_recent_tokens=2_000)  # usable 10,000
+    h = big_turns(6, 1_500)
+    assert c.needs_summary(h) and await c.summarize(h)
+    c.observe(h, Usage(input=11_000, output=100))  # the provider: still over, after the summary
+    assert not c.needs_summary(h)
+    h.messages += [assistant("", "z"), tool("z", "word " * 2_500)]  # a tail's worth more
+    assert c.needs_summary(h)

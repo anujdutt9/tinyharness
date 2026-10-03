@@ -151,7 +151,15 @@ class Config(BaseModel):
 
     # --- context management ---
     context_window_tokens: int | None = None  # None = what the provider reports for the model
-    auto_compact_threshold: float = Field(default=0.90, gt=0, le=1)
+    # When to summarize, as opencode does: once the history leaves less room than the model's
+    # output limit (at most 32,000 tokens; the provider's model list or `max_output` in a
+    # provider's `models` entry). `compaction_reserved` sets that room instead, in tokens;
+    # `auto_compact_threshold` (a fraction of the window) overrides both.
+    auto_compact_threshold: float | None = Field(default=None, gt=0, le=1)
+    compaction_reserved: int | None = Field(default=None, ge=0)
+    # Recent history a summary keeps word for word; None = a quarter of the usable window,
+    # between 2,000 and 15,000 tokens.
+    compaction_preserve_recent_tokens: int | None = Field(default=None, ge=0)
     # The one model every compaction summary uses (lead and subagents alike), e.g. a provider's
     # cheaper model; None = the agent's own model.
     compaction_model: str | None = None

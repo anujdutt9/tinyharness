@@ -380,6 +380,9 @@ class Session:
         self.compactor = Compactor(
             self.llm,
             context_window=lambda: self.context_window,
+            max_output=lambda: (info := self.llm.model_info()) and info.max_output,
+            reserved=cfg.compaction_reserved,
+            preserve_recent_tokens=cfg.compaction_preserve_recent_tokens,
             threshold=cfg.auto_compact_threshold,
             model=cfg.compaction_model,
         )

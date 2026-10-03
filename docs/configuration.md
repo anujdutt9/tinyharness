@@ -45,7 +45,9 @@ api = "chat"   # or "responses", "anthropic", "gemini"
 **Self-hosted models (vLLM, Ollama, llama.cpp, SGLang).** Any OpenAI-compatible
 server is a provider; leave out `api_key_env` when it needs no key. tinyharness reads the
 served models and their context windows from `/v1/models` (vLLM's `max_model_len`), so
-compaction triggers at the server's real limit. Agents can run on different servers:
+compaction triggers at the server's real limit: once the history leaves less room than the
+model's output limit (`max_output` in a `models` entry, else what the server lists, else
+32,000 tokens; at most half the window). Agents can run on different servers:
 
 ```toml
 model = "local:planner"

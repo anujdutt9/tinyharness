@@ -159,6 +159,9 @@ async def run_subagent(
             compactor=Compactor(
                 llm,
                 context_window=_context_window(llm, model),
+                max_output=_max_output(llm, model),
+                reserved=ctx.config.compaction_reserved,
+                preserve_recent_tokens=ctx.config.compaction_preserve_recent_tokens,
                 threshold=ctx.config.auto_compact_threshold,
                 model=ctx.config.compaction_model,
             ),
@@ -252,6 +255,12 @@ def subagent_system_prompt(spec: AgentSpec, ctx: ToolContext) -> str:
     if instructions := load_agent_md(ctx.workspace.root):
         parts.append(f"# Project instructions (AGENTS.md)\n\n{instructions}")
     return "\n\n".join(parts)
+
+
+def _max_output(llm: Any, model: str | None) -> int | None:
+    """The subagent's model's output limit, if the provider or the config says."""
+    info = llm.model_info(model) if hasattr(llm, "model_info") else None
+    return info.max_output if info is not None else None
 
 
 def _context_window(llm: Any, model: str | None) -> int:

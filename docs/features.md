@@ -23,6 +23,12 @@ guarantees and why each exists):
   server's tool-call parser fails on them; malformed arguments are repaired.
 - Compaction starts from the provider's own token count and can summarize inside one
   long task; the summary keeps the tool calls, files changed and the todo list.
+- When to summarize comes from the model, as in opencode: once the history leaves less
+  room than the model's output limit (at most 32,000 tokens, at most half the window).
+  The recent tail kept word for word is a quarter of that usable room (2,000–15,000
+  tokens), whole turns first. `compaction_reserved` and
+  `compaction_preserve_recent_tokens` override them; `auto_compact_threshold` (a fraction
+  of the window) still works.
 - A model repeating a failing call is told to change approach.
 - The session log records each turn's outcome, the provider's stop reason and, on
   OpenRouter, which upstream served the request.
