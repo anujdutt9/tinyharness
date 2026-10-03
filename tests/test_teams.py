@@ -972,3 +972,26 @@ async def test_a_subagent_compacts_at_the_configured_threshold(tmp_path, monkeyp
     gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
     await run_subagent(READER, "x", ctx=ctx, llm=ScriptedLLM([]), tools=default_registry(), gate=gate)
     assert seen["threshold"] == 0.7
+
+
+async def test_a_subagent_summarizes_on_its_own_model_unless_one_is_configured(tmp_path, monkeypatch):
+    """A subagent on another model of the session's provider shares the session's client, whose
+    default is the session's model: its summaries went there, not to its own model."""
+    seen = []
+
+    async def fake_loop(task, history, deps):
+        seen.append(deps.compactor.model)
+        return
+        yield
+
+    monkeypatch.setattr("tinyharness.subagents.runner.run_agent_loop", fake_loop)
+    from tinyharness.config import Config
+    from tinyharness.tools.base import ToolContext
+
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
+    for compaction_model in (None, "big"):
+        ctx = ToolContext(workspace=Workspace(tmp_path), config=Config(working_dir=tmp_path, compaction_model=compaction_model))
+        await run_subagent(
+            READER, "x", ctx=ctx, llm=ScriptedLLM([]), tools=default_registry(), gate=gate, model="small-9b"
+        )
+    assert seen == ["small-9b", "big"]

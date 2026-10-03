@@ -404,6 +404,8 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   limit, at most 32k tokens or half the window) when the model list or config gives that
   limit; summaries ask for at most 8,192 tokens. After a context overflow, the summary
   keeps only the last ~2k tokens word for word, so the retry fits.
+- Without `compaction_model`, a subagent's summaries are written on its own model; one on
+  another model of the session's provider used the session's model.
 - A model's tokenizer (`tokenizer` in a `models` entry) is read from the local Hugging Face
   cache once downloaded: no request to the Hub, and no warning about unauthenticated
   requests, on every session.
