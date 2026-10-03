@@ -67,10 +67,17 @@ SUMMARY_MARK = "[prior conversation summary]"
 # Starts the user message that repeats the request when a summary cuts into the middle of
 # a task (the kept messages begin with the agent's work, and APIs want a user message first).
 CONTINUING = "[continuing after a summary] The request being worked on:"
+# opencode's defaults (provider/transform.ts OUTPUT_TOKEN_MAX, session/compaction.ts)
 OUTPUT_TOKEN_MAX = 32_000  # the most of the window held back for the reply
 TAIL_SHARE = 0.25  # of `usable`: the recent tail kept word for word ...
 TAIL_MIN, TAIL_MAX = 2_000, 15_000  # ... within these bounds
 LONG_STRING = 500  # chars: tool-call strings longer than this are trimmed in old calls
+
+# Calibration (when the model's tokenizer isn't available): the provider's count for the messages
+# added between two requests over our estimate for them, as a moving average, within these bounds.
+CALIBRATION_MIN_TOKENS = 200  # too few new tokens to learn from
+CALIBRATION_BOUNDS = (0.5, 4.0)
+CALIBRATION_WEIGHT = 0.3  # of each new sample
 
 # Results that are instructions or delegated work: expensive to redo, cheap to keep.
 KEEP_TOOLS = frozenset({"Agent", "Team"})
@@ -107,6 +114,7 @@ class Compactor:
         cache_ttl: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
         model: str | None = None,
+        counter: Callable[[], Callable[[str], int] | None] | None = None,
     ) -> None:
         self.llm = llm
         self.model = model  # the model summaries are written on; None = the agent's own
@@ -131,6 +139,12 @@ class Compactor:
         # can't remove (system prompt, tools, the summary, the kept tail). None: not known yet.
         self._floor: int | None = None
         self._floor_pending = False
+        self._counter = counter  # the model's own tokenizer, when there is one
+        # Calibration: our estimate × ratio ≈ the provider's count. `_last_request`: the message
+        # count, last message id and the provider's prompt count of the previous request.
+        self.ratio = 1.0
+        self._calibrated = False
+        self._last_request: tuple[int, str, int] | None = None
 
     @property
     def context_window(self) -> int:
@@ -168,6 +182,36 @@ class Compactor:
         Before the first call (e.g. a resumed session) it is taken as cold."""
         return self._last_call is None or self._clock() - self._last_call > self.cache_ttl
 
+    def estimate(self, messages: list[Message]) -> int:
+        """Tokens these messages take up: with the model's tokenizer when there is one, scaled
+        by the calibration against the provider's counts (which also covers what neither
+        sees: how the chat template wraps each message, reasoning a provider doesn't resend)."""
+        count = self._counter() if self._counter is not None else None
+        return round(estimate_tokens(messages, count) * self.ratio)
+
+    def _calibrate(self, history: History, prompt: int) -> None:
+        """Learn the ratio from what was added between this request and the previous one: the
+        provider counted both prompts, so the difference is exact for exactly those messages
+        (the system prompt and tools, counted once in each, cancel out)."""
+        messages = history.messages
+        n = len(messages) - 1  # the request didn't have the reply just appended
+        last = self._last_request
+        if last is not None and n > last[0] and messages[last[0] - 1].id == last[1]:
+            count = self._counter() if self._counter is not None else None
+            ours = estimate_tokens(messages[last[0] : n], count)
+            theirs = prompt - last[2]
+            if ours >= CALIBRATION_MIN_TOKENS and theirs > 0:
+                low, high = CALIBRATION_BOUNDS
+                sample = min(high, max(low, theirs / ours))
+                w = CALIBRATION_WEIGHT if self._calibrated else 1.0
+                self.ratio, self._calibrated = (1 - w) * self.ratio + w * sample, True
+        self._last_request = (n, messages[n - 1].id, prompt) if n > 0 else None
+
+    def _rewritten(self) -> None:
+        """History changed in place: the provider's counts no longer match it."""
+        self._baseline = None
+        self._last_request = None
+
     def observe(self, history: History, usage: Usage) -> None:
         """Record the provider's own count after a model call: the prompt it read plus the
         reply, which is now the last message. More accurate than any estimate (it includes
@@ -175,6 +219,8 @@ class Compactor:
         tokens = usage.input + usage.cached + usage.output
         if tokens and history.messages:
             self._baseline = (len(history.messages), history.messages[-1].id, tokens)
+        if usage.input + usage.cached and history.messages:
+            self._calibrate(history, usage.input + usage.cached)
         if self._floor_pending and usage.input + usage.cached:
             self._floor, self._floor_pending = usage.input + usage.cached, False
 
@@ -184,8 +230,8 @@ class Compactor:
         if self._baseline is not None:
             n, last_id, tokens = self._baseline
             if len(messages) >= n and messages[n - 1].id == last_id:
-                return tokens + estimate_tokens(messages[n:])
-        return estimate_tokens(messages)
+                return tokens + self.estimate(messages[n:])
+        return self.estimate(messages)
 
     def budget_cap(self, history: History) -> int:
         """Truncate messages larger than `max_message_tokens`. Returns how many were capped."""
@@ -202,7 +248,7 @@ class Compactor:
             m.state = None  # the provider's saved copy would bring the full text back
             capped += 1
         if capped:
-            self._baseline = None
+            self._rewritten()
         return capped
 
     def microcompact(self, history: History) -> int:
@@ -255,7 +301,7 @@ class Compactor:
                     for c in m.tool_calls
                 ]
                 m.state = None  # the provider's saved copy has the full arguments
-        self._baseline = None
+        self._rewritten()
         return len(batch)
 
     def needs_summary(self, history: History) -> bool:
@@ -314,7 +360,7 @@ class Compactor:
             request = next((r for m in reversed(head) if (r := _request(m))), "")
             kept.append(Message(role="user", content=f"{CONTINUING}\n{request}"))
         history.messages = [*kept, *tail]
-        self._baseline = None
+        self._rewritten()
         self._floor, self._floor_pending = None, True
         return True
 
@@ -332,7 +378,7 @@ class Compactor:
         provider's count, which an overflow reports, can exceed this estimate)."""
         if len(body) <= 1:
             return 0  # a lone request: nothing to summarize
-        sizes = [estimate_tokens([m]) for m in body]
+        sizes = [self.estimate([m]) for m in body]
         after = [0] * (len(body) + 1)  # after[i]: tokens from message i to the end
         for i in range(len(body) - 1, -1, -1):
             after[i] = after[i + 1] + sizes[i]
@@ -359,7 +405,7 @@ class Compactor:
         at_user = start
         while at_user > 0 and body[at_user].role != "user":
             at_user -= 1
-        if at_user > 0 and estimate_tokens(body[at_user:]) <= self.tail_budget:
+        if at_user > 0 and self.estimate(body[at_user:]) <= self.tail_budget:
             return at_user
         while start > 0 and body[start].role == "tool":
             start -= 1

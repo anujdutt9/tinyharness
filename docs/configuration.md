@@ -47,7 +47,14 @@ server is a provider; leave out `api_key_env` when it needs no key. tinyharness 
 served models and their context windows from `/v1/models` (vLLM's `max_model_len`), so
 compaction triggers at the server's real limit: once the history leaves less room than the
 model's output limit (`max_output` in a `models` entry, else what the server lists, else
-32,000 tokens; at most half the window). Agents can run on different servers:
+32,000 tokens; at most half the window). Two more settings on a `models` entry help with
+self-hosted models: `tokenizer = "<Hugging Face repo>"` counts tokens with the model's own
+tokenizer (needs the `tokenizers` package: `tinyharness[tokens]`), so what compaction keeps
+fits its budget; without it, counts are estimated and calibrated against the server's own
+counts as the session goes. `images = false` says the model takes no image input (vLLM's
+`--language-model-only`, a text-only model): images are sent as a note saying so instead. Left
+unset, the first refusal of an image is enough; the model gets notes from then on. Agents can
+run on different servers:
 
 ```toml
 model = "local:planner"

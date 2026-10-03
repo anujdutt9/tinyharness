@@ -1,3 +1,5 @@
+import pytest
+
 from conftest import ScriptedLLM
 from tinyharness.agent.compaction import SUMMARY_MARK, Compactor
 from tinyharness.agent.history import History, Message, ToolCall
@@ -490,3 +492,54 @@ async def test_the_summary_request_is_built_like_opencodes():
     assert "revenue fell 12% in July" in prompt.split("<prior-summary>")[1]
     assert "[earlier summary]" not in prompt  # the prior summary is its own block, not part of the history
     assert "Do not continue the conversation" in seen["system"]
+
+
+# ---- counting tokens like the model does ----
+
+
+def test_a_models_own_tokenizer_is_used_when_given():
+    h = history(user("word " * 100))
+    assert compactor().estimate(h.messages) < compactor(counter=lambda: lambda t: len(t)).estimate(h.messages)
+
+
+def test_reasoning_sent_back_with_a_reply_is_counted():
+    from tinyharness.agent.history import ReasoningState
+
+    reply = assistant("ok")
+    plain = compactor().estimate([reply])
+    reply.state = ReasoningState("gw:qwen-27b", {"reasoning": "think " * 400})
+    assert compactor().estimate([reply]) > plain + 300
+
+
+def test_the_estimate_is_calibrated_against_the_providers_counts():
+    """Exp-1A attempt 3: ~4 chars a token, where the 27B's tokenizer gave 1.2-2.1x that on SQL
+    output, so the kept tail was far over its budget. The provider counts both prompts exactly;
+    their difference covers exactly the messages added between the two requests."""
+    from tinyharness.llm.usage import Usage
+
+    c = compactor()
+    h = history(Message(role="system", content="sys"), user("go"), assistant("", "a"))
+    c.observe(h, Usage(input=5_000, output=50))  # request 1: system + "go"
+    h.messages += [tool("a", "| 1 | 2 | 3 |\n" * 400), assistant("", "b")]
+    added = estimate_of(h.messages[2:4])
+    c.observe(h, Usage(input=5_000 + 2 * added, output=50))  # the provider counted twice our estimate
+    assert c.ratio == pytest.approx(2.0, rel=0.01)
+    assert c.estimate(h.messages[3:4]) == pytest.approx(2 * estimate_of(h.messages[3:4]), rel=0.01)
+
+
+def test_calibration_ignores_a_rewritten_history():
+    from tinyharness.llm.usage import Usage
+
+    c = compactor(stub_tool_results_over=100, keep_tail_messages=1, protect_tool_tokens=0, min_savings=0, cache_ttl=0)
+    h = history(user("go"), assistant("", "a"))
+    c.observe(h, Usage(input=100, output=10))
+    h.messages += [tool("a", BIG), assistant("", "b")]
+    c.microcompact(h)  # rewrites the result: the counts no longer match the history
+    c.observe(h, Usage(input=99_999, output=10))
+    assert c.ratio == 1.0
+
+
+def estimate_of(messages):
+    from tinyharness.llm.tokens import estimate_tokens
+
+    return estimate_tokens(messages)

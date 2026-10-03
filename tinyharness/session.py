@@ -50,7 +50,7 @@ from tinyharness.llm.client import LLMClient, Ping
 from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.providers import DEFAULT_CONTEXT, Provider
 from tinyharness.llm.textcalls import recover_calls
-from tinyharness.llm.tokens import count_tokens, estimate_tokens
+from tinyharness.llm.tokens import count_tokens, estimate_tokens, model_counter
 from tinyharness.llm.types import Effort
 from tinyharness.llm.usage import Usage, UsageMeter
 from tinyharness.paths import default_config_path, home_dir, move_legacy_state, project_dir
@@ -381,6 +381,7 @@ class Session:
             self.llm,
             context_window=lambda: self.context_window,
             max_output=lambda: (info := self.llm.model_info()) and info.max_output,
+            counter=lambda: model_counter((info := self.llm.model_info()) and info.tokenizer),
             reserved=cfg.compaction_reserved,
             preserve_recent_tokens=cfg.compaction_preserve_recent_tokens,
             threshold=cfg.auto_compact_threshold,

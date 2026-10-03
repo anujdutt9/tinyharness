@@ -27,6 +27,7 @@ from tinyharness.events import (
     ToolUse,
 )
 from tinyharness.llm.providers import DEFAULT_CONTEXT
+from tinyharness.llm.tokens import model_counter
 from tinyharness.llm.types import LLMError
 from tinyharness.subagents.specs import AgentSpec
 
@@ -160,6 +161,7 @@ async def run_subagent(
                 llm,
                 context_window=_context_window(llm, model),
                 max_output=_max_output(llm, model),
+                counter=lambda: model_counter(_tokenizer(llm, model)),
                 reserved=ctx.config.compaction_reserved,
                 preserve_recent_tokens=ctx.config.compaction_preserve_recent_tokens,
                 threshold=ctx.config.auto_compact_threshold,
@@ -255,6 +257,12 @@ def subagent_system_prompt(spec: AgentSpec, ctx: ToolContext) -> str:
     if instructions := load_agent_md(ctx.workspace.root):
         parts.append(f"# Project instructions (AGENTS.md)\n\n{instructions}")
     return "\n\n".join(parts)
+
+
+def _tokenizer(llm: Any, model: str | None) -> str | None:
+    """The Hugging Face repo with the subagent's model's tokenizer, if the config names one."""
+    info = llm.model_info(model) if hasattr(llm, "model_info") else None
+    return info.tokenizer if info is not None else None
 
 
 def _max_output(llm: Any, model: str | None) -> int | None:

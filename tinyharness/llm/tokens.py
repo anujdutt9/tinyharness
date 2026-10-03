@@ -1,12 +1,17 @@
-"""Token counting. Uses tiktoken when installed (`tinyharness[tokens]`), else ~4 chars/token."""
+"""Token counting. Uses tiktoken when installed (`tinyharness[tokens]`), else ~4 chars/token; a
+model's own tokenizer when the config names one (`model_counter`)."""
 
 from __future__ import annotations
 
+import functools
+import logging
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from tinyharness.agent.history import Message
+
+log = logging.getLogger(__name__)
 
 # What one image costs, roughly: a screenshot-sized picture is ~1,600 tokens on most APIs.
 IMAGE_TOKENS = 1_600
@@ -25,12 +30,35 @@ def _load_counter() -> Callable[[str], int]:
 count_tokens = _load_counter()
 
 
-def estimate_tokens(messages: Iterable[Message]) -> int:
+@functools.cache
+def model_counter(tokenizer: str | None) -> Callable[[str], int] | None:
+    """A counter with a model's own tokenizer: `tokenizer` is a Hugging Face repo id (the
+    model's, or any repo with its tokenizer.json), from a `tokenizer` setting in the config.
+    None when unset, or when the `tokenizers` package or the download isn't available (the
+    estimate is then calibrated against the provider's counts instead)."""
+    if not tokenizer:
+        return None
+    try:
+        from tokenizers import Tokenizer
+
+        tok = Tokenizer.from_pretrained(tokenizer)
+    except Exception as e:  # not installed, offline, no such repo
+        log.warning("tokenizer %s unavailable (%s); estimating token counts", tokenizer, e)
+        return None
+    return lambda text: len(tok.encode(text or "", add_special_tokens=False).ids)
+
+
+def estimate_tokens(messages: Iterable[Message], count: Callable[[str], int] | None = None) -> int:
     """What these messages take up in the context: text, tool calls (a Write's content is
-    in its arguments) and images. The one estimate everything uses (compaction, /context)."""
+    in its arguments), images, and the reasoning sent back with a reply. The one estimate
+    everything uses (compaction, /context); `count`: a model's own tokenizer (`model_counter`)."""
+    count = count or count_tokens
     total = 0
     for m in messages:
-        total += 4 + count_tokens(m.content or "") + IMAGE_TOKENS * len(m.images)
+        total += 4 + count(m.content or "") + IMAGE_TOKENS * len(m.images)
         for call in m.tool_calls:
-            total += count_tokens(call.name) + count_tokens(call.arguments)
+            total += count(call.name) + count(call.arguments)
+        data = m.state.data if m.state is not None else None
+        if isinstance(data, dict):  # chat APIs' reasoning text (reasoning, reasoning_content)
+            total += sum(count(v) for v in data.values() if isinstance(v, str))
     return total

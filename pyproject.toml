@@ -43,7 +43,7 @@ Issues = "https://github.com/anujdutt9/tinyharness/issues"
 Changelog = "https://github.com/anujdutt9/tinyharness/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-tokens = ["tiktoken>=0.7"]
+tokens = ["tiktoken>=0.7", "tokenizers>=0.15"]
 
 [project.scripts]
 tinyharness = "tinyharness.cli:main"
@@ -107,5 +107,5 @@ disallow_untyped_defs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["tiktoken"]
+module = ["tiktoken", "tokenizers"]
 ignore_missing_imports = true

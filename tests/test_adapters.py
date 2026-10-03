@@ -1040,3 +1040,51 @@ def test_an_older_model_cache_is_refetched(tmp_path):
     (tmp_path / "openrouter.json").write_text(json.dumps({"fetched_at": 9e12, "models": [{"id": "g4"}]}))
     directory = ModelDirectory(tmp_path)
     assert directory.info("openrouter", "g4") is not None and not directory.is_fresh("openrouter")
+
+
+# ---- a model that takes no images (text-only, or served without its vision encoder) ----
+
+
+def _shot():
+    from tinyharness.agent.history import Image
+
+    return Image("image/png", "iVBORw0KGgo=", "/tmp/report.png")
+
+
+async def test_a_model_configured_without_images_gets_a_note_instead():
+    from tinyharness.llm.providers import Provider
+
+    local = Provider(name="local", base_url="http://127.0.0.1:8000/v1", models=[{"id": "planner", "images": False}])
+    server = Server(OK_REPLY)
+    llm = LLMClient(local, "", "planner", transport=httpx.MockTransport(server))
+    history = [Message(role="user", content="check this", images=[_shot()])]
+    await run(llm, history)
+    sent = json.dumps(server.requests[0])
+    assert "image_url" not in sent and "Cannot read /tmp/report.png" in sent
+    assert history[0].images  # the history keeps it, for a model that can see it
+
+
+async def test_a_model_that_refused_an_image_is_sent_notes_from_then_on():
+    from tinyharness.llm.providers import Provider
+
+    local = Provider(name="local", base_url="http://127.0.0.1:8000/v1", models=["planner"])
+    server = Server(OK_REPLY)
+    llm = LLMClient(local, "", "planner", transport=httpx.MockTransport(server))
+    assert llm.takes_images() is None  # not known until it refuses one
+    llm.no_images.add("planner")
+    assert llm.takes_images() is False
+    await run(llm, [Message(role="user", content="check this", images=[_shot()])])
+    assert "image_url" not in json.dumps(server.requests[0])
+
+
+def test_vllm_refusing_images_is_recognized():
+    from tinyharness.llm.client import _http_error
+    from tinyharness.llm.types import ImagesUnsupportedError, ImageTooLargeError
+
+    body = ('{"error":{"message":"At most 0 image(s) may be provided in one prompt. (parameter=image)",'
+            '"type":"BadRequestError","param":"image","code":400}}')
+    assert isinstance(_http_error(400, body, "http://127.0.0.1:8080/v1/chat/completions"), ImagesUnsupportedError)
+    other = '{"error":{"message":"This model does not support image input"}}'
+    assert isinstance(_http_error(400, other, "x"), ImagesUnsupportedError)
+    assert not isinstance(_http_error(400, '{"error":"image exceeds the limit"}', "x"), ImagesUnsupportedError)
+    assert isinstance(_http_error(400, '{"error":"image exceeds the limit"}', "x"), ImageTooLargeError)

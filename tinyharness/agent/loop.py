@@ -47,7 +47,12 @@ from tinyharness.events import (
     ToolUse,
 )
 from tinyharness.images import fit_image
-from tinyharness.llm.client import ContextOverflowError, ImageTooLargeError, ToolCallAccumulator
+from tinyharness.llm.client import (
+    ContextOverflowError,
+    ImagesUnsupportedError,
+    ImageTooLargeError,
+    ToolCallAccumulator,
+)
 from tinyharness.llm.textcalls import (
     call_start,
     looks_like_a_call,
@@ -235,6 +240,17 @@ async def run_agent_loop(
                     yield event
             except RunawayOutputError as again:
                 raise _stuck_again(again) from None
+        except ImagesUnsupportedError:
+            # The model takes no images (text-only, or served without its vision encoder): from
+            # now on its requests carry a note in place of each image (llm.without_images); ask again.
+            model = deps.model or deps.llm.model
+            if model in deps.llm.no_images:
+                raise
+            deps.llm.no_images.add(model)
+            deps.transcript.write("images_unsupported", model=model)
+            turn = _Turn()
+            async for event in _ask_model(history, available, deps, turn):
+                yield event
         except ImageTooLargeError:
             # An image in the history is over this provider's limit, and would fail every
             # request from now on: make the images smaller (or drop them) and ask once more.
