@@ -100,6 +100,10 @@ class Config(BaseModel):
     effort: Effort | None = None
     request_timeout: float = 1800.0  # seconds; slow reasoning models can take minutes per turn
     request_retries: int = 3  # on 429/5xx or a refused connection, before the reply starts
+    # Subagents running at once (Agent calls and Team teammates together), as in Claude
+    # Code: the model decides how many to start; past this, an Agent call fails so the model
+    # can wait, and Team tasks wait their turn. TINYHARNESS_MAX_PARALLEL_AGENTS overrides.
+    max_parallel_agents: int = Field(default=20, ge=1)
     # True when nothing named a provider or model and one was picked from the keys found
     # (an installed CLI then asks the user instead).
     auto_selected: bool = Field(default=False, exclude=True)
@@ -533,6 +537,8 @@ def load_config(path: Path | None = None, *, use_last_model: bool = False) -> Co
 
     if todo_env := os.environ.get("TINYHARNESS_TODO_LIST", "").strip():
         data["todo_list"] = todo_env.lower() in ("1", "true", "yes", "on")
+    if parallel_env := os.environ.get("TINYHARNESS_MAX_PARALLEL_AGENTS", "").strip():
+        data["max_parallel_agents"] = parallel_env
     if pinned := os.environ.get("TINYHARNESS_MODEL", "").strip():
         data["model"] = pinned
     elif use_last_model and "model" not in data and (last := _last_model()):

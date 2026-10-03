@@ -44,6 +44,7 @@ from tinyharness.events import Compacted, Done, Event, SkillLoaded, ToolResult, 
 from tinyharness.ext import Command as ExtCommand
 from tinyharness.ext import Extension, LoadError, NeedsConsent, RunResult, load_extensions
 from tinyharness.hooks import Hook, HookRunner, load_hooks
+from tinyharness.llm import identity
 from tinyharness.llm.calibration import CalibrationStore
 from tinyharness.llm.client import LLMClient, Ping
 from tinyharness.llm.models import ModelDirectory
@@ -380,6 +381,14 @@ class Session:
             self.llm, context_window=lambda: self.context_window, threshold=cfg.auto_compact_threshold
         )
 
+    def _identify(self) -> identity.CallIdentity:
+        """This session's lead identity for the model calls that follow (llm/identity.py)."""
+        who = identity.CURRENT.get()
+        if who is None or who.session != self.id:
+            who = identity.for_session(self.id)
+            identity.CURRENT.set(who)
+        return who
+
     async def _spawn_subagent(
         self,
         spec: AgentSpec,
@@ -397,20 +406,25 @@ class Session:
             llm, model = self.llm_for(spec.model)
         except (MissingAPIKeyError, ValueError) as e:
             raise ToolError(f"can't start the {spec.name} agent: {e}") from None
-        return await run_subagent(
-            spec,
-            task,
-            ctx=ctx,
-            llm=llm,
-            model=model,
-            tools=self.tools,
-            gate=gate,
-            label=label,
-            extra_tools=extra_tools,
-            inbox=inbox,
-            write_lock=self._agent_writes,
-            **({"max_steps": spec.max_steps} if spec.max_steps else {}),
-        )
+        parent = identity.CURRENT.get() or self._identify()
+        token = identity.CURRENT.set(identity.child(parent, spec.name))  # this task only
+        try:
+            return await run_subagent(
+                spec,
+                task,
+                ctx=ctx,
+                llm=llm,
+                model=model,
+                tools=self.tools,
+                gate=gate,
+                label=label,
+                extra_tools=extra_tools,
+                inbox=inbox,
+                write_lock=self._agent_writes,
+                **({"max_steps": spec.max_steps} if spec.max_steps else {}),
+            )
+        finally:
+            identity.CURRENT.reset(token)
 
     def llm_for(self, spec: str | None) -> tuple[LLMClient, str | None]:
         """The client and model id for a subagent's `model` setting:
@@ -719,6 +733,7 @@ class Session:
             prompt = "\n\n".join([*(build_skill_prompt(s) for s in named), f"User message: {prompt}"])
         for skill in named:
             yield SkillLoaded(skill.name, count_tokens(build_skill_prompt(skill)), "named")
+        self._identify()
         async for event in self._turn(prompt, images):
             yield event
 

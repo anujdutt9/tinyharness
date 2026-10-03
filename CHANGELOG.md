@@ -138,7 +138,18 @@ First release.
   goes in after the current step; press Esc, and the step stops and your message goes
   in right away. When it reaches the agent, `↳ delivered to the agent: …` says so. SDK:
   `MessageDelivered` events and `Session.pending_steering`.
-- Subagents that can write run side by side too: Team teammates (up to 4) and several
+- `send_ids = true` on a provider sends who is calling with every request: X-Session-ID,
+  X-Agent-ID, X-Parent-Agent-ID, X-Agent-Role, X-Agent-Name and X-Task (from `TH_TASK`),
+  so a gateway of your own can admit, queue and attribute per session and per agent.
+  Each subagent gets its own id (its parent's as X-Parent-Agent-ID), also when several run
+  at once. Off by default. SDK: `tinyharness.llm.identity`.
+- One ceiling on subagents running at once, as in Claude Code: `max_parallel_agents`
+  (default 20; `TINYHARNESS_MAX_PARALLEL_AGENTS`), shared by Agent calls and Team
+  teammates. The model decides the team's size (the Team tool suggests 3-5); past the
+  ceiling an Agent call fails so the model can wait, and Team tasks wait their turn.
+  A Team takes up to 20 tasks (was 12) and no longer stops at 4 teammates at once.
+  SDK: `AgentSlots`; `run_team(..., slots=)` replaces `max_parallel=`.
+- Subagents that can write run side by side too: Team teammates and several
   Agent calls in one reply. Only their calls that change things (Bash, Edit, Write) take
   turns, on one lock per session, so two never write at once; their model calls overlap.
   A team of writers used to run one whole agent at a time. SDK: `Tool.runs_alongside`,

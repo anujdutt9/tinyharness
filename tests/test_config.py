@@ -139,6 +139,13 @@ def test_env_model_pins_active_model(tmp_path, monkeypatch):
     assert (cfg.provider, cfg.model) == ("openai", "pinned")
 
 
+def test_parallel_agent_limit_from_config_or_env(tmp_path, monkeypatch):
+    assert load_config(write_config(tmp_path)).max_parallel_agents == 20
+    assert load_config(write_config(tmp_path, "max_parallel_agents = 6\n")).max_parallel_agents == 6
+    monkeypatch.setenv("TINYHARNESS_MAX_PARALLEL_AGENTS", "8")
+    assert load_config(write_config(tmp_path, "max_parallel_agents = 6\n")).max_parallel_agents == 8
+
+
 def test_last_picked_model_is_used_unless_config_pins_one(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     remember_model("openai", "gpt-6-luna")

@@ -18,6 +18,7 @@ from tinyharness.events import SubagentUpdate, ToolResult
 from tinyharness.permissions import Decision, PermissionGate, PermissionMode, PermissionRequest
 from tinyharness.subagents import AgentSpec, parse_agent_md
 from tinyharness.subagents.runner import run_subagent
+from tinyharness.tools.agent import AgentSlots, AgentTool
 from tinyharness.tools.base import ToolError
 from tinyharness.tools.registry import ToolRegistry, default_registry
 from tinyharness.tools.team import Board, TaskState, TeamTool, report, run_team
@@ -261,6 +262,63 @@ async def test_a_team_runs_in_dependency_order_with_independent_tasks_in_paralle
     assert started[-1] == "sum"
     assert "result of w1" in prompts["sum"] and "result of r3" in prompts["sum"]
     assert out.startswith("Team finished (6 done)")
+
+
+async def test_teammates_past_the_subagent_limit_wait_their_turn(tmp_path):
+    running, most = 0, 0
+
+    async def spawner(spec, prompt, ctx, /, *, label, extra_tools, inbox):
+        nonlocal running, most
+        running += 1
+        most = max(most, running)
+        await asyncio.sleep(0.02)
+        running -= 1
+        return "ok"
+
+    tool = TeamTool(AGENTS, spawner, is_read_only, AgentSlots(2))
+    args = tool.parse(plan(*((f"r{i}", "reader", []) for i in range(5))))
+    out = await tool.run(args, make_ctx(tmp_path))
+    assert most == 2
+    assert out.startswith("Team finished (5 done)")
+
+
+async def test_an_agent_call_past_the_limit_fails_and_shares_it_with_the_team(tmp_path):
+    """Agent calls and teammates count against one ceiling; an Agent call that finds it
+    full fails at once (the model can wait), as in Claude Code."""
+    slots = AgentSlots(1)
+    release = asyncio.Event()
+
+    async def spawner(spec, prompt, ctx, /, **kwargs):
+        await release.wait()
+        return "ok"
+
+    agent = AgentTool(AGENTS, spawner, is_read_only, slots)
+    team = TeamTool(AGENTS, spawner, is_read_only, slots)
+    ctx = make_ctx(tmp_path)
+    first = asyncio.create_task(agent.run(agent.parse({"subagent_type": "reader", "prompt": "x"}), ctx))
+    await asyncio.sleep(0.01)
+    with pytest.raises(ToolError, match="concurrent subagent limit reached"):
+        await agent.run(agent.parse({"subagent_type": "reader", "prompt": "y"}), ctx)
+    teamwork = asyncio.create_task(team.run(team.parse(plan(("a", "reader", []), ("b", "reader", []))), ctx))
+    await asyncio.sleep(0.01)
+    assert not teamwork.done()  # waiting for the Agent call's slot
+    release.set()
+    assert await first == "ok"
+    assert (await teamwork).startswith("Team finished (2 done)")
+
+
+def test_the_session_limit_reaches_both_tools(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    config = tmp_path / "config.toml"
+    config.write_text('max_parallel_agents = 7\n[extensions]\nenabled = ["agents"]\n')
+    s = Session(SessionOptions(config_path=config, working_dir=tmp_path / "work"))
+    try:
+        agent, team = s.tools.get("Agent"), s.tools.get("Team")
+        assert agent.slots is team.slots and agent.slots.limit == 7
+        assert "Up to 7 run at once" in team.description
+    finally:
+        s.close()
 
 
 async def test_a_failed_teammate_is_retried_once_then_its_dependents_get_what_finished(tmp_path):

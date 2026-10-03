@@ -67,7 +67,7 @@ Three tiers: cap oversized messages → stub old tool output → summarize histo
 
 ## Subagents and teams
 
-Isolated context windows; built-in `explore` / `plan` / `general-purpose` / `researcher`, plus your own in Markdown, each on any model (`model: local:planner`) with its own step limit. `Team` runs a dependency graph of tasks, up to 4 teammates at once: independent tasks run in parallel, each teammate gets the results of the tasks it depends on, the user's request and its working directory, and teammates can message each other. Writing calls take turns on a shared lock; reads (including read-only shell commands) don't wait
+Isolated context windows; built-in `explore` / `plan` / `general-purpose` / `researcher`, plus your own in Markdown, each on any model (`model: local:planner`) with its own step limit. `Team` runs a dependency graph of tasks whose size the model chooses (3-5 teammates suit most goals). Up to `max_parallel_agents` subagents (default 20, or `TINYHARNESS_MAX_PARALLEL_AGENTS`) run at once across the session, Agent calls and teammates together; past that an Agent call fails so the model can wait, and Team tasks wait their turn: independent tasks run in parallel, each teammate gets the results of the tasks it depends on, the user's request and its working directory, and teammates can message each other. Writing calls take turns on a shared lock; reads (including read-only shell commands) don't wait
 
 ## Hooks and plugins
 

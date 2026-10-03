@@ -45,6 +45,10 @@ class Provider(BaseModel):
     small_model: str = ""  # cheap model for background work (classifier, WebSearch digests)
     extra_headers: dict[str, str] = Field(default_factory=dict)
     extra_body: dict[str, Any] = Field(default_factory=dict)  # merged into every request
+    # Send who is calling (session, agent, parent agent, role) as X-* headers on every
+    # request: for a gateway of your own that admits, queues or bills per session and agent
+    # (tinyharness/llm/identity.py). Off: no provider gets them unless you ask.
+    send_ids: bool = False
     effort_param: str = "reasoning_effort"  # chat API only: where the reasoning effort goes
     # The provider's own web search: true for APIs with a built-in search tool, a table
     # merged into the request for chat providers that switch it on another way, false: none.

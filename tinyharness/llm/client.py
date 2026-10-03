@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from tinyharness.agent.history import Message, ReasoningState, ToolCall, well_formed
+from tinyharness.llm import identity
 from tinyharness.llm.adapters import ADAPTERS
 from tinyharness.llm.calibration import CalibrationStore, ToolFormat, as_text, probe, tools_section
 from tinyharness.llm.models import ModelDirectory
@@ -245,11 +246,14 @@ class LLMClient:
         return self.provider.base_url.rstrip("/") + self.adapter.request_path
 
     def _headers(self) -> dict[str, str]:
-        return {
+        headers = {
             "Content-Type": "application/json",
             **self.adapter.headers(self.api_key),
             **self.provider.extra_headers,
         }
+        if self.provider.send_ids and (who := identity.CURRENT.get()) is not None:
+            headers.update(who.headers())
+        return headers
 
     # -- models -------------------------------------------------------------------
 

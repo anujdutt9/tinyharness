@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from pydantic import Field
 
@@ -8,7 +10,39 @@ from tinyharness.subagents import AgentSpec
 from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
 
 DEFAULT_AGENT = "general-purpose"
+# Subagents running at once across a session, as in Claude Code: the model decides how
+# many to start, this is only the ceiling (config: max_parallel_agents).
+MAX_PARALLEL_AGENTS = 20
 Spawner = Callable[..., Awaitable[str]]  # (spec, prompt, ctx, *, label=...) -> final answer
+
+
+class AgentSlots:
+    """The session's ceiling on subagents running at once, shared by Agent calls and Team
+    teammates. An Agent call past it fails right away, so the model can wait for the
+    running ones (Claude Code does the same); a Team task waits for a free slot instead,
+    since the team's plan is already laid out."""
+
+    def __init__(self, limit: int = MAX_PARALLEL_AGENTS) -> None:
+        self.limit = limit
+        self.running = 0
+        self._changed = asyncio.Condition()
+
+    @contextlib.asynccontextmanager
+    async def hold(self, *, wait: bool) -> AsyncIterator[None]:
+        async with self._changed:
+            if not wait and self.running >= self.limit:
+                raise ToolError(
+                    f"concurrent subagent limit reached ({self.limit} running): wait for some "
+                    "to finish before starting more, or do this step yourself"
+                )
+            await self._changed.wait_for(lambda: self.running < self.limit)
+            self.running += 1
+        try:
+            yield
+        finally:
+            async with self._changed:
+                self.running -= 1
+                self._changed.notify()
 
 
 class AgentInput(ToolInput):
@@ -41,15 +75,18 @@ class AgentTool(Tool[AgentInput]):
         agents: dict[str, AgentSpec],
         spawner: Spawner,
         agent_is_read_only: Callable[[AgentSpec], bool] = lambda spec: False,
+        slots: AgentSlots | None = None,
     ) -> None:
         self.agents = agents
         self.spawner = spawner
         self.agent_is_read_only = agent_is_read_only
+        self.slots = slots or AgentSlots()
         listing = "\n".join(f"- {name}: {spec.description}" for name, spec in agents.items())
         self.description = (
             "Run a subagent in an isolated context window; only its final summary is returned. "
             "Use it for substantial, self-contained work (broad research, independent stages), "
-            f"not for single file operations.\n\nAvailable agents:\n{listing or '(none)'}"
+            f"not for single file operations. Up to {self.slots.limit} subagents run at once."
+            f"\n\nAvailable agents:\n{listing or '(none)'}"
         )
 
     def agent_name(self, args: AgentInput) -> str:
@@ -76,4 +113,5 @@ class AgentTool(Tool[AgentInput]):
         spec = self.agents.get(name)
         if spec is None:
             raise ToolError(f"unknown subagent_type {name!r}; available: {', '.join(self.agents)}")
-        return await self.spawner(spec, args.prompt, ctx, label=args.description)
+        async with self.slots.hold(wait=False):
+            return await self.spawner(spec, args.prompt, ctx, label=args.description)
