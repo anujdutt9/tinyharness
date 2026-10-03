@@ -25,9 +25,10 @@ session/compaction.ts), sized from the model, not fixed:
     of the turn that doesn't fit (never starting at a tool result). After the provider
     says the prompt is too long, the tail is TAIL_MIN: the usual one has just failed.
 
-The other limits scale with `usable` too, at most their 200K-window values: on a 64K
-window a fixed 40K of protected tool output is more than `usable` itself, so tier 2
-would never clear anything and every long run would go straight to a summary.
+The other limits scale with `usable` too, at most their 200K-window values. Fixed, they
+shut tier 2 off on a 64K window (seen live): 40K of protected tool output and a 60%-of-
+the-window warm threshold are both past the summary trigger, and SQL results of 1-2K
+tokens are all under a 6K per-result floor, so every long run went straight to a summary.
 
 How full the window is comes from the provider's own count for the last request,
 plus an estimate for what was added since (`used`).
@@ -47,7 +48,7 @@ the model. So tier 2 clears only when it pays:
 
   - cache cold (the last call was more than `cache_ttl` ago): the whole prompt
     is written again anyway, so clearing is free and makes that write cheaper
-  - cache warm: only once the history passes `clear_when_warm_at` of the window,
+  - cache warm: only once the history passes `clear_when_warm_at` of `usable`,
     to hold off the lossy summary, and only for at least `min_savings` tokens at
     once (the idea behind Anthropic's `clear_at_least` and opencode's prune)
 """
@@ -87,6 +88,9 @@ TAIL_MIN, TAIL_MAX = 2_000, 15_000  # ... within these bounds
 # Tier 1 and 2 limits, as a share of `usable`, at most these tokens (their old fixed values)
 MESSAGE_SHARE, MESSAGE_MAX = 0.25, 16_000  # the largest single message
 PROTECT_SHARE, PROTECT_MAX = 0.30, 40_000  # recent tool output tier 2 never clears
+STUB_SHARE, STUB_MAX = 0.036, 6_000  # the smallest tool result worth stubbing
+SAVINGS_SHARE, SAVINGS_MAX = 0.15, 20_000  # the least a warm-cache clearing must free
+CLEAR_WHEN_WARM_AT = 0.75  # of `usable`: tier 2 may rewrite a warm cache from here on
 # The summary's own output limit: a summary is a few thousand tokens, and a model given its
 # whole output limit can spend all of it thinking and return nothing.
 SUMMARY_MAX_TOKENS = 8_192
@@ -125,11 +129,11 @@ class Compactor:
         preserve_recent_tokens: int | None = None,
         threshold: float | None = None,
         max_message_tokens: int | None = None,
-        stub_tool_results_over: int = 6_000,
+        stub_tool_results_over: int | None = None,
         keep_tail_messages: int = 12,
         protect_tool_tokens: int | None = None,
-        min_savings: int = 20_000,
-        clear_when_warm_at: float = 0.60,
+        min_savings: int | None = None,
+        clear_when_warm_at: float = CLEAR_WHEN_WARM_AT,
         cache_ttl: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
         model: str | None = None,
@@ -143,10 +147,10 @@ class Compactor:
         self.preserve_recent_tokens = preserve_recent_tokens
         self.threshold = threshold  # a fraction of the window instead of `usable` (old setting)
         self._max_message_tokens = max_message_tokens  # None: from `usable`
-        self.stub_tool_results_over = stub_tool_results_over
+        self._stub_tool_results_over = stub_tool_results_over  # None: from `usable`
         self.keep_tail = keep_tail_messages
         self._protect_tool_tokens = protect_tool_tokens  # None: from `usable`
-        self.min_savings = min_savings
+        self._min_savings = min_savings  # None: from `usable`
         self.clear_when_warm_at = clear_when_warm_at
         self.cache_ttl = cache_ttl  # Anthropic's default; other providers keep theirs as long or longer
         self._clock = clock
@@ -207,6 +211,18 @@ class Compactor:
         if self._max_message_tokens is not None:
             return self._max_message_tokens
         return min(MESSAGE_MAX, int(self.usable * MESSAGE_SHARE))
+
+    @property
+    def stub_tool_results_over(self) -> int:
+        if self._stub_tool_results_over is not None:
+            return self._stub_tool_results_over
+        return min(STUB_MAX, int(self.usable * STUB_SHARE))
+
+    @property
+    def min_savings(self) -> int:
+        if self._min_savings is not None:
+            return self._min_savings
+        return min(SAVINGS_MAX, int(self.usable * SAVINGS_SHARE))
 
     @property
     def protect_tool_tokens(self) -> int:
@@ -315,7 +331,7 @@ class Compactor:
         Protected: the last `keep_tail` messages, the most recent `protect_tool_tokens`
         of tool output and calls, KEEP_TOOLS, and anything under `stub_tool_results_over`.
         The rest is changed if the cache is cold, or if the history is past
-        `clear_when_warm_at` of the window and at least `min_savings` tokens would go
+        `clear_when_warm_at` of `usable` and at least `min_savings` tokens would go
         (see the module docstring)."""
         messages = history.messages
         if len(messages) <= self.keep_tail:
@@ -346,7 +362,7 @@ class Compactor:
             return 0
         if not self.cache_cold and (
             sum(t for _, t in batch) < self.min_savings
-            or self.used(history) < self.context_window * self.clear_when_warm_at
+            or self.used(history) < self.usable * self.clear_when_warm_at
         ):
             return 0
         for m, tokens in batch:

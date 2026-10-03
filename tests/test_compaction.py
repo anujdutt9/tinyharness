@@ -670,3 +670,24 @@ def test_a_cached_tokenizer_is_loaded_without_asking_the_hub(monkeypatch, tmp_pa
         assert asked == ["org/new"]  # not cached yet: downloaded
     finally:
         tokens.model_counter.cache_clear()
+
+
+def test_a_64k_analyst_clears_old_sql_results_before_it_needs_a_summary():
+    """Seen live (SQL analysts on a 64K vLLM window): every analyst went straight to a summary.
+    Its SQL results were 1-2K tokens each, under the fixed 6K per-result floor, and the 60%-
+    of-the-window warm threshold (39.3K) was past the 33.5K summary trigger."""
+    row = "| 2026-03 | Helix Genomics | enterprise | 422,118.40 | churned |\n"
+    result = row * 80
+    per = count_tokens(result)
+    assert 1_000 < per < 2_500
+    c = Compactor(ScriptedLLM([]), context_window=65_536, clock=Clock())
+    c.mark_call()  # warm cache
+    out: list[Message] = [user("analyze revenue")]
+    i = 0
+    while c.used(History(out)) < c.usable * 0.85:  # past the warm threshold, short of the summary
+        out += [assistant("", f"q{i}", name="Bash"), tool(f"q{i}", result)]
+        i += 1
+    h = History(out)
+    assert not c.needs_summary(h)
+    assert c.microcompact(h) > 0
+    assert c.used(h) < c.usable * 0.75  # room again, without a summary

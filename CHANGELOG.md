@@ -388,10 +388,11 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   includes providers that stream it only as `reasoning` (Groq, vLLM, Ollama).
 - Models, context windows and capabilities come from each provider's model list.
 - Models are checked before switching; context overflows are compacted and retried.
-- Old tool output (results over 6k tokens) is cleared in batches, not one result per
-  turn, so the prompt cache survives. While the cache is warm, output is only cleared
-  once the history passes 60% of the context window, and at least 20k tokens at a
-  time. After 5 idle minutes, when the cache has expired anyway, it's cleared freely.
+- Old tool output is cleared in batches, not one result per turn, so the prompt cache
+  survives. While the cache is warm, output is only cleared once the history passes 75%
+  of the room before a summary, and only when that frees enough (15% of it, at most 20k
+  tokens). Results under 3.6% of it (at most 6k tokens) are left alone. On a 64k window
+  that clears 1-2k-token results before a summary is needed; before, it never did. After 5 idle minutes, when the cache has expired anyway, it's cleared freely.
   The most recent tool output is kept (30% of the usable window, at most 40k tokens), and
   so are skill reads, `Agent` and `Team` results.
 - Compaction sizes its limits from each model's window, so a 64k model gets them too: the
