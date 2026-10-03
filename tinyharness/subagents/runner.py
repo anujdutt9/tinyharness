@@ -26,6 +26,7 @@ from tinyharness.events import (
     ToolResult,
     ToolUse,
 )
+from tinyharness.llm import identity
 from tinyharness.llm.providers import DEFAULT_CONTEXT
 from tinyharness.llm.tokens import model_counter
 from tinyharness.llm.types import LLMError
@@ -152,7 +153,11 @@ async def run_subagent(
 
     with Transcript(ctx.workspace.root, f"{spec.name}-{run_id}", kind="sidechains") as transcript:
         log = str(transcript.path)
-        transcript.write("session_start", agent=spec.name, model=model_id, task=task)
+        # Which session and agent this is (set by the caller), so a sidechain can be matched to the
+        # session that started it: with several sessions running at once, times overlap.
+        who = identity.CURRENT.get()
+        ids = {"session": who.session, "agent_id": who.agent, "parent": who.parent} if who is not None else {}
+        transcript.write("session_start", agent=spec.name, model=model_id, task=task, **ids)
         deps = LoopDeps(
             llm=llm,
             tools=registry,
