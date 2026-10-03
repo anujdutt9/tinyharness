@@ -555,7 +555,10 @@ def test_tier_limits_scale_with_a_small_window():
     small = compactor(context_window=65_536)
     assert small.usable == 33_536
     assert small.protect_tool_tokens == int(33_536 * 0.30) < small.usable
-    assert small.max_message_tokens == int(33_536 * 0.25)
+    # A whole ~10K-token file still fits in one read (seen live: 10-K excerpts of 9-10K tokens were
+    # cut at 25% of usable, and the agents paged through them instead).
+    assert small.max_message_tokens == 16_000
+    assert compactor(context_window=32_768).max_message_tokens == int(16_384 * 0.5)
     large = compactor(context_window=200_000)
     assert (large.protect_tool_tokens, large.max_message_tokens) == (40_000, 16_000)
     assert compactor(context_window=65_536, protect_tool_tokens=7).protect_tool_tokens == 7

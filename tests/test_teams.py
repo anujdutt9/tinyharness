@@ -995,3 +995,20 @@ async def test_a_subagent_summarizes_on_its_own_model_unless_one_is_configured(t
             READER, "x", ctx=ctx, llm=ScriptedLLM([]), tools=default_registry(), gate=gate, model="small-9b"
         )
     assert seen == ["small-9b", "big"]
+
+
+async def test_every_member_result_is_saved_and_named_short_ones_too(tmp_path):
+    """Seen live: three long results were named by path and one short one was shown whole with
+    no file; the lead guessed a path for it, found nothing, and ran that task again."""
+    from tinyharness.workspace.scratch import Scratch
+
+    async def spawner(spec, prompt, ctx, /, *, label, extra_tools, inbox):
+        return "short finding"
+
+    board = Board("goal", {"a": TaskState("a", "A", "analyze", "general-purpose", [])})
+    ctx = make_ctx(tmp_path)
+    ctx.scratch = Scratch(tmp_path, "s1")
+    await run_team(board, {"general-purpose": AgentSpec("general-purpose", "x")}, spawner, ctx)
+    path = board.tasks["a"].result_file
+    assert path and Path(path).read_text() == "short finding"
+    assert f"short finding\n[the whole result, above; also in {path}]" in report(board)

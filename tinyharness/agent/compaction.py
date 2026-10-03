@@ -86,7 +86,7 @@ OUTPUT_TOKEN_MAX = 32_000  # the most of the window held back for the reply
 TAIL_SHARE = 0.25  # of `usable`: the recent tail kept word for word ...
 TAIL_MIN, TAIL_MAX = 2_000, 15_000  # ... within these bounds
 # Tier 1 and 2 limits, as a share of `usable`, at most these tokens (their old fixed values)
-MESSAGE_SHARE, MESSAGE_MAX = 0.25, 16_000  # the largest single message
+MESSAGE_SHARE, MESSAGE_MAX = 0.50, 16_000  # the largest single message (a 10K-token file read whole on 64K)
 PROTECT_SHARE, PROTECT_MAX = 0.30, 40_000  # recent tool output tier 2 never clears
 STUB_SHARE, STUB_MAX = 0.036, 6_000  # the smallest tool result worth stubbing
 SAVINGS_SHARE, SAVINGS_MAX = 0.15, 20_000  # the least a warm-cache clearing must free

@@ -441,9 +441,11 @@ def report(board: Board) -> str:
 
 
 def _keep_whole(task: TaskState, ctx: ToolContext) -> None:
-    """Save a result too long for the prompts it goes into, so nothing is silently lost:
-    the next task and the lead get the start of it and the path to the rest."""
-    if len(task.result) <= RESULT_CHARS_IN_PROMPT or ctx.scratch is None:
+    """Save every result, so nothing is silently lost when one is too long for the prompts it
+    goes into (the next task and the lead get the start of it and the path to the rest). Short
+    ones too: seen live, a lead given three paths and one whole result went looking for a
+    fourth file, guessed its name, and ran that task again."""
+    if ctx.scratch is None:
         return
     path = ctx.scratch.dir / f"team-{uuid.uuid4().hex[:6]}-{task.id}.md"
     try:
@@ -457,7 +459,7 @@ def _handed_off(task: TaskState, limit: int) -> str:
     """A task's result as passed on: whole, or its start and where the rest is."""
     text = task.result.strip()
     if len(text) <= limit:
-        return text
+        return f"{text}\n[the whole result, above; also in {task.result_file}]" if task.result_file else text
     rest = f"{len(text) - limit:,} more characters"
     where = (
         f"; the whole result is in {task.result_file}: Read it before you use it" if task.result_file else ""

@@ -396,7 +396,7 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   The most recent tool output is kept (30% of the usable window, at most 40k tokens), and
   so are skill reads, `Agent` and `Team` results.
 - Compaction sizes its limits from each model's window, so a 64k model gets them too: the
-  protected tool output above, and the largest single message (25% of the usable window,
+  protected tool output above, and the largest single message (half the usable window,
   at most 16k tokens). An oversized message keeps its start and its end (where a test
   run's result is), and trimmed output is saved to a file in the session's scratch space,
   named in its place, for the model to Read back instead of running the tool again.
@@ -406,6 +406,8 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   keeps only the last ~2k tokens word for word, so the retry fits.
 - Without `compaction_model`, a subagent's summaries are written on its own model; one on
   another model of the session's provider used the session's model.
+- A Team saves every member's result to a file and names it, short ones too, so a lead
+  never goes looking for a file that isn't there.
 - A model's tokenizer (`tokenizer` in a `models` entry) is read from the local Hugging Face
   cache once downloaded: no request to the Hub, and no warning about unauthenticated
   requests, on every session.
