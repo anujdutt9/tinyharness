@@ -156,7 +156,9 @@ async def run_subagent(
             llm=llm,
             tools=registry,
             gate=gate,
-            compactor=Compactor(llm, context_window=_context_window(llm, model)),
+            compactor=Compactor(
+                llm, context_window=_context_window(llm, model), threshold=ctx.config.auto_compact_threshold
+            ),
             transcript=transcript,
             ctx=ctx,
             allowed_tools=allowed,

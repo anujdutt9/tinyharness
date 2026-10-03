@@ -952,3 +952,23 @@ async def test_a_long_result_is_handed_on_whole_through_a_file(tmp_path):
     assert path and Path(path).read_text().endswith("LAST LINE")
     assert f"the whole result is in {path}" in seen["b: B"]
     assert path in report(board)
+
+
+async def test_a_subagent_compacts_at_the_configured_threshold(tmp_path, monkeypatch):
+    """auto_compact_threshold applies to subagents too, not only the lead: on a 64K model with an
+    8K-16K answer reservation the default 90% sits past the point where the engine refuses."""
+    seen = {}
+
+    async def fake_loop(task, history, deps):
+        seen["threshold"] = deps.compactor.threshold
+        return
+        yield
+
+    monkeypatch.setattr("tinyharness.subagents.runner.run_agent_loop", fake_loop)
+    from tinyharness.config import Config
+    from tinyharness.tools.base import ToolContext
+
+    ctx = ToolContext(workspace=Workspace(tmp_path), config=Config(working_dir=tmp_path, auto_compact_threshold=0.7))
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
+    await run_subagent(READER, "x", ctx=ctx, llm=ScriptedLLM([]), tools=default_registry(), gate=gate)
+    assert seen["threshold"] == 0.7
