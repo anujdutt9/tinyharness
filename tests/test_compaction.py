@@ -462,3 +462,31 @@ async def test_after_a_summary_it_waits_for_new_history_before_summarizing_again
     assert not c.needs_summary(h)
     h.messages += [assistant("", "z"), tool("z", "word " * 2_500)]  # a tail's worth more
     assert c.needs_summary(h)
+
+
+async def test_the_summary_request_is_built_like_opencodes():
+    """The history in <conversation> tags with the instructions after it, and the system prompt
+    saying not to continue: with the instructions only in the system prompt and the history
+    ending in the agent's words, the 27B continued the conversation (a 37-token "summary")."""
+    seen = {}
+
+    class Client(ScriptedLLM):
+        async def one_shot(self, prompt, *, system=None, **_):
+            seen["prompt"], seen["system"] = prompt, system
+            return "summary"
+
+    h = history(
+        Message(role="system", content="sys"),
+        Message(role="system", content=f"{SUMMARY_MARK}\nrevenue fell 12% in July"),
+        user("a " * 3000),
+        assistant("I'll continue with the next query"),
+        user("go on"),
+        assistant("ok"),
+    )
+    assert await Compactor(Client([])).summarize(h, keep_tail=1)
+    prompt = seen["prompt"]
+    assert prompt.startswith("Here is the conversation so far:\n\n<conversation>\n")
+    assert prompt.index("</conversation>") < prompt.index("<prior-summary>") < prompt.index("Summarize the conversation")
+    assert "revenue fell 12% in July" in prompt.split("<prior-summary>")[1]
+    assert "[earlier summary]" not in prompt  # the prior summary is its own block, not part of the history
+    assert "Do not continue the conversation" in seen["system"]

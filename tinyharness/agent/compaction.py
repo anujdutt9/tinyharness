@@ -67,7 +67,6 @@ SUMMARY_MARK = "[prior conversation summary]"
 # Starts the user message that repeats the request when a summary cuts into the middle of
 # a task (the kept messages begin with the agent's work, and APIs want a user message first).
 CONTINUING = "[continuing after a summary] The request being worked on:"
-# opencode's defaults (provider/transform.ts OUTPUT_TOKEN_MAX, session/compaction.ts)
 OUTPUT_TOKEN_MAX = 32_000  # the most of the window held back for the reply
 TAIL_SHARE = 0.25  # of `usable`: the recent tail kept word for word ...
 TAIL_MIN, TAIL_MAX = 2_000, 15_000  # ... within these bounds
@@ -297,7 +296,7 @@ class Compactor:
         who = identity.CURRENT.get()
         token = identity.CURRENT.set(dataclasses.replace(who, role="compaction")) if who is not None else None
         try:
-            prompt, instructions = self._transcript(head, notes), load_prompt("compaction")
+            prompt, instructions = self._prompt(head, notes), load_prompt("compaction_system")
             if self.model:
                 summary = await self.llm.one_shot(prompt, system=instructions, model=self.model)
             else:
@@ -365,6 +364,29 @@ class Compactor:
         while start > 0 and body[start].role == "tool":
             start -= 1
         return start
+
+    def _prompt(self, head: list[Message], notes: str) -> str:
+        """The summarizer's request, built as opencode's (core/session/compaction.ts `buildPrompt`):
+        the history inside <conversation> tags, an earlier summary in <prior-summary>, and the
+        instructions after them. With the instructions only in the system prompt and the history
+        ending in the agent's own words, a model continues the conversation instead (the 27B did,
+        with thinking off)."""
+        prior = "\n\n".join(
+            (m.content or "").removeprefix(SUMMARY_MARK).strip() for m in head if m.role == "system"
+        )
+        parts = [
+            "Here is the conversation so far:\n\n<conversation>\n"
+            + self._transcript([m for m in head if m.role != "system"], notes)
+            + "\n</conversation>"
+        ]
+        if prior:
+            parts += [
+                "Here is the summary of the conversation before the <conversation> above:\n\n"
+                f"<prior-summary>\n{prior}\n</prior-summary>",
+                load_prompt("compaction_update"),
+            ]
+        parts.append(load_prompt("compaction"))
+        return "\n\n".join(parts)
 
     def _transcript(self, head: list[Message], notes: str) -> str:
         """What the summarizer reads: every message, with the tool calls the agent made

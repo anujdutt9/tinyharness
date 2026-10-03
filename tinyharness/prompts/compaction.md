@@ -1,5 +1,5 @@
-Summarize the work so far for handoff: the agent will continue from your summary alone,
-with only the most recent messages still in view. Write it under these headings:
+Summarize the conversation in the <conversation> tags above for handoff: the agent will continue from your
+summary alone, with only the most recent messages still in view. Write it under these headings:
 
 - Goal: what the user asked for, with their exact constraints and preferences.
 - Progress: what is done, what is in progress, what is blocked.
@@ -8,5 +8,5 @@ with only the most recent messages still in view. Write it under these headings:
 - Files changed: each path and what changed in it.
 - Next steps: what remains, in order.
 
-If an earlier summary is included, merge it in: keep every fact it has that still holds.
-Be concise but lose no facts. No preamble.
+Keep every heading, even when empty ("(none)"). Be concise but lose no facts. No preamble, and do not mention
+that this is a summary.

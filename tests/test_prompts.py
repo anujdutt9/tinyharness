@@ -10,6 +10,8 @@ from tinyharness.subagents import builtin_agents
 PROMPT_VARIABLES = {
     "system": {"model_name", "model_id", "provider"},
     "compaction": set(),
+    "compaction_system": set(),
+    "compaction_update": set(),
     "classifier": set(),
     "aside": set(),
     "next_prompt": set(),
