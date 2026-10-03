@@ -91,8 +91,10 @@ class Compactor:
         clear_when_warm_at: float = 0.60,
         cache_ttl: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
+        model: str | None = None,
     ) -> None:
         self.llm = llm
+        self.model = model  # the model summaries are written on; None = the agent's own
         self._context_window = context_window
         self.threshold = threshold
         self.max_message_tokens = max_message_tokens
@@ -236,13 +238,16 @@ class Compactor:
             return False
         head, tail = body[:cut], body[cut:]
 
-        # On the provider's small model (background work; the main model if the small one refuses),
-        # tagged role "compaction" so a gateway can tell it from the agent's own turns.
+        # On the configured compaction model (one model for every summary, no fallback), tagged
+        # role "compaction" so a gateway can tell it from the agent's own turns.
         who = identity.CURRENT.get()
         token = identity.CURRENT.set(dataclasses.replace(who, role="compaction")) if who is not None else None
         try:
-            ask = getattr(self.llm, "one_shot_small", None) or self.llm.one_shot
-            summary = await ask(self._transcript(head, notes), system=load_prompt("compaction"))
+            prompt, instructions = self._transcript(head, notes), load_prompt("compaction")
+            if self.model:
+                summary = await self.llm.one_shot(prompt, system=instructions, model=self.model)
+            else:
+                summary = await self.llm.one_shot(prompt, system=instructions)
         finally:
             if token is not None:
                 identity.CURRENT.reset(token)

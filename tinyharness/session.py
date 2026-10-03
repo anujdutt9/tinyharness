@@ -378,7 +378,10 @@ class Session:
         self.llm.show_reasoning = cfg.show_thinking
         self.gate.classifier = AutoModeClassifier(self.llm, model=cfg.small_model)
         self.compactor = Compactor(
-            self.llm, context_window=lambda: self.context_window, threshold=cfg.auto_compact_threshold
+            self.llm,
+            context_window=lambda: self.context_window,
+            threshold=cfg.auto_compact_threshold,
+            model=cfg.compaction_model,
         )
 
     def _identify(self) -> identity.CallIdentity:

@@ -152,6 +152,9 @@ class Config(BaseModel):
     # --- context management ---
     context_window_tokens: int | None = None  # None = what the provider reports for the model
     auto_compact_threshold: float = Field(default=0.90, gt=0, le=1)
+    # The one model every compaction summary uses (lead and subagents alike), e.g. a provider's
+    # cheaper model; None = the agent's own model.
+    compaction_model: str | None = None
 
     @field_validator("working_dir", mode="after")
     @classmethod
