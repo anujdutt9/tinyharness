@@ -33,14 +33,19 @@ the model. So tier 2 clears only when it pays:
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import logging
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from tinyharness.agent.history import History, Message, ToolCall
+from tinyharness.llm import identity
 from tinyharness.llm.tokens import count_tokens, estimate_tokens
 from tinyharness.prompts import load_prompt
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from tinyharness.llm.client import LLMClient
@@ -231,7 +236,21 @@ class Compactor:
             return False
         head, tail = body[:cut], body[cut:]
 
-        summary = await self.llm.one_shot(self._transcript(head, notes), system=load_prompt("compaction"))
+        # On the provider's small model (background work; the main model if the small one refuses),
+        # tagged role "compaction" so a gateway can tell it from the agent's own turns.
+        who = identity.CURRENT.get()
+        token = identity.CURRENT.set(dataclasses.replace(who, role="compaction")) if who is not None else None
+        try:
+            ask = getattr(self.llm, "one_shot_small", None) or self.llm.one_shot
+            summary = await ask(self._transcript(head, notes), system=load_prompt("compaction"))
+        finally:
+            if token is not None:
+                identity.CURRENT.reset(token)
+        if not (summary or "").strip():
+            # e.g. a reasoning model that spent its whole output thinking: dropping the history for an
+            # empty summary would lose the agent's work, so keep it as it is.
+            log.warning("compaction: the model returned an empty summary; history kept")
+            return False
         kept = [*system, Message(role="system", content=f"{SUMMARY_MARK}\n{summary}")]
         if tail[0].role != "user":
             request = next((r for m in reversed(head) if (r := _request(m))), "")

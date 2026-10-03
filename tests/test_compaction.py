@@ -336,3 +336,37 @@ def test_microcompact_leaves_arguments_it_cannot_shorten():
     )
     h = history(user("go"), write, tool("w", "ok"), user("p1"), user("p2"))
     assert c.microcompact(h) == 0 and c.microcompact(h) == 0
+
+
+async def test_an_empty_summary_keeps_the_history():
+    """A reasoning model can spend its whole output thinking and return no text; replacing the
+    history with that would silently lose the agent's work."""
+
+    class Thinker(ScriptedLLM):
+        async def one_shot(self, prompt, **_):
+            return ""
+
+    h = history(Message(role="system", content="sys"), user("a " * 3000), assistant("b " * 3000), user("go on"), assistant("ok"))
+    before = list(h.messages)
+    assert not await Compactor(Thinker([])).summarize(h, keep_tail=1)
+    assert h.messages == before
+
+
+async def test_the_summary_runs_on_the_small_model_as_role_compaction():
+    from tinyharness.llm import identity
+
+    seen = {}
+
+    class Client(ScriptedLLM):
+        async def one_shot_small(self, prompt, **_):
+            seen["role"] = identity.CURRENT.get().role
+            return "summary"
+
+    token = identity.CURRENT.set(identity.for_session("s1"))
+    try:
+        h = history(Message(role="system", content="sys"), user("a " * 3000), assistant("b " * 3000), user("go on"), assistant("ok"))
+        assert await Compactor(Client([])).summarize(h, keep_tail=1)
+        assert identity.CURRENT.get().role == "lead"  # restored after the call
+    finally:
+        identity.CURRENT.reset(token)
+    assert seen["role"] == "compaction"

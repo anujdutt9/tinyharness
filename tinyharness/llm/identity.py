@@ -7,7 +7,7 @@ session and per agent, or just attributes cost. Never sent otherwise.
     X-Session-ID       one per session (a CLI session, or an SDK Session)
     X-Agent-ID         this agent: "<session>-lead", or "<session>-<agent>-<n>" for a subagent
     X-Parent-Agent-ID  the agent that started this one (subagents only)
-    X-Agent-Role       lead | subagent
+    X-Agent-Role       lead | subagent | compaction (a summary written to compact an agent's history)
     X-Agent-Name       the agent type, e.g. "explore" ("lead" for the main agent)
     X-Task             the TH_TASK environment variable, if set: a label for the session's work
 
