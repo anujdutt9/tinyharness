@@ -971,3 +971,61 @@ async def test_a_call_written_as_text_runs_without_being_shown(tmp_path):
 async def test_text_that_only_looked_like_a_call_is_shown_in_full(tmp_path, parts):
     events, _ = await run(tmp_path, ScriptedLLM([_chunks(*parts)]), [Echo()])
     assert "".join(e.text for e in events if isinstance(e, AssistantText)) == "".join(parts)
+
+
+async def test_after_an_overflow_the_summary_keeps_only_the_smallest_tail(tmp_path):
+    """The usual tail has just been part of a prompt that didn't fit: keeping it again
+    could fail the retry the same way."""
+    from tinyharness.agent.compaction import CONTINUING, TAIL_MIN
+    from tinyharness.llm.types import ContextOverflowError
+
+    class OverflowOnce(ScriptedLLM):
+        async def stream(self, messages, tools=None, **kw):
+            if not self.requests:
+                self.requests.append(list(messages))
+                raise ContextOverflowError("prompt is too long")
+            async for chunk in super().stream(messages, tools, **kw):
+                yield chunk
+
+    llm = OverflowOnce(["done"])
+    long = "word " * 1000
+    history = History(
+        [Message(role=r, content=f"{r} {i} {long}") for i in range(20) for r in ("user", "assistant")]
+    )
+    compactor = Compactor(llm, preserve_recent_tokens=30_000)  # a tail that would keep everything
+    with Transcript(tmp_path, "test") as transcript:
+        deps = LoopDeps(
+            llm=llm,
+            tools=ToolRegistry([]),
+            gate=PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS),
+            compactor=compactor,
+            transcript=transcript,
+            ctx=make_ctx(tmp_path),
+        )
+        [e async for e in run_agent_loop("go", history, deps)]
+    # After the summary (and the request, repeated): the tail, at most TAIL_MIN of the ~40K.
+    kept = [m for m in llm.requests[1] if m.role != "system" and not (m.content or "").startswith(CONTINUING)]
+    assert compactor.estimate(kept) <= TAIL_MIN
+
+
+async def test_each_request_asks_for_the_room_compaction_keeps(tmp_path):
+    asked = []
+
+    class Recording(ScriptedLLM):
+        async def stream(self, messages, tools=None, **kw):
+            asked.append(kw.get("max_tokens"))
+            async for chunk in super().stream(messages, tools, **kw):
+                yield chunk
+
+    llm = Recording(["done"])
+    with Transcript(tmp_path, "test") as transcript:
+        deps = LoopDeps(
+            llm=llm,
+            tools=ToolRegistry([]),
+            gate=PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS),
+            compactor=Compactor(llm, context_window=65_536, max_output=12_288),
+            transcript=transcript,
+            ctx=make_ctx(tmp_path),
+        )
+        [e async for e in run_agent_loop("go", History([]), deps)]
+    assert asked == [12_288]

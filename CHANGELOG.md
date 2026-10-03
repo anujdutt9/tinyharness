@@ -392,8 +392,17 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   turn, so the prompt cache survives. While the cache is warm, output is only cleared
   once the history passes 60% of the context window, and at least 20k tokens at a
   time. After 5 idle minutes, when the cache has expired anyway, it's cleared freely.
-  The last 40k tokens of tool output are kept, and so are skill reads, `Agent` and `Team`
-  results.
+  The most recent tool output is kept (30% of the usable window, at most 40k tokens), and
+  so are skill reads, `Agent` and `Team` results.
+- Compaction sizes its limits from each model's window, so a 64k model gets them too: the
+  protected tool output above, and the largest single message (25% of the usable window,
+  at most 16k tokens). An oversized message keeps its start and its end (where a test
+  run's result is), and trimmed output is saved to a file in the session's scratch space,
+  named in its place, for the model to Read back instead of running the tool again.
+- Requests ask for the output room compaction keeps for the reply (the model's output
+  limit, at most 32k tokens or half the window) when the model list or config gives that
+  limit; summaries ask for at most 8,192 tokens. After a context overflow, the summary
+  keeps only the last ~2k tokens word for word, so the retry fits.
 - WebSearch runs on the provider's `small_model`, as the auto-mode classifier already
   did. If the small model can't take a request (no search tool, rate limited), the main
   model answers instead. Compaction summaries stay on the main model: a weak summary

@@ -1088,3 +1088,26 @@ def test_vllm_refusing_images_is_recognized():
     assert isinstance(_http_error(400, other, "x"), ImagesUnsupportedError)
     assert not isinstance(_http_error(400, '{"error":"image exceeds the limit"}', "x"), ImagesUnsupportedError)
     assert isinstance(_http_error(400, '{"error":"image exceeds the limit"}', "x"), ImageTooLargeError)
+
+
+@pytest.mark.parametrize(
+    ("provider", "path"),
+    [
+        ("openrouter", ("max_tokens",)),
+        ("openai", ("max_output_tokens",)),
+        ("gemini", ("generation_config", "max_output_tokens")),
+        ("anthropic", ("max_tokens",)),
+    ],
+)
+def test_each_wire_format_sends_the_requested_output_limit(provider, path):
+    from tinyharness.llm.types import Request
+
+    llm = client(provider, Server())
+    request = Request(model="m1", system="", messages=[Message(role="user", content="hi")], max_tokens=4_096)
+    body = llm.adapter.payload(request)
+    for key in path:
+        body = body[key]
+    assert body == 4_096
+    request.max_tokens = None  # not asked for: the API's default, except Anthropic's required field
+    unasked = llm.adapter.payload(request)
+    assert (path[0] in unasked) == (provider == "anthropic")

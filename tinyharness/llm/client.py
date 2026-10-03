@@ -329,6 +329,7 @@ class LLMClient:
         model: str | None = None,
         web_search: bool = False,
         probing: bool = False,
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream one reply. The last chunk carries `state` when the provider needs data back next turn."""
         await self._ensure_model_list()
@@ -354,6 +355,7 @@ class LLMClient:
             owner=owner,
             web_search=web_search,
             show_reasoning=self.show_reasoning,
+            max_tokens=max_tokens,
         )
         payload = _merge(self.adapter.payload(request), self.provider.extra_body)
         log.debug(
@@ -470,12 +472,15 @@ class LLMClient:
         *,
         model: str | None = None,
         web_search: bool = False,
+        max_tokens: int | None = None,
     ) -> CompletedTurn:
         """Non-streaming convenience: run `stream` to completion."""
         text: list[str] = []
         calls = ToolCallAccumulator()
         finish: str | None = None
-        async for chunk in self.stream(messages, tools, model=model, web_search=web_search):
+        async for chunk in self.stream(
+            messages, tools, model=model, web_search=web_search, max_tokens=max_tokens
+        ):
             text.append(chunk.text)
             if chunk.tool_call_delta:
                 calls.add(chunk.tool_call_delta)
@@ -508,11 +513,17 @@ class LLMClient:
         return fmt
 
     async def one_shot(
-        self, prompt: str, *, system: str | None = None, model: str | None = None, web_search: bool = False
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        model: str | None = None,
+        web_search: bool = False,
+        max_tokens: int | None = None,
     ) -> str:
         messages = [Message(role="system", content=system)] if system else []
         messages.append(Message(role="user", content=prompt))
-        return (await self.collect(messages, model=model, web_search=web_search)).text
+        return (await self.collect(messages, model=model, web_search=web_search, max_tokens=max_tokens)).text
 
     @property
     def small_model(self) -> str:

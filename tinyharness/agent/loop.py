@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
+from tinyharness.agent.compaction import TAIL_MIN
 from tinyharness.agent.history import History, Image, Message, ReasoningState, ToolCall
 from tinyharness.agent.runaway import RunawayGuard
 from tinyharness.agent.world import file_meta
@@ -214,7 +215,11 @@ async def run_agent_loop(
             async for event in _ask_model(history, available, deps, turn):
                 yield event
         except ContextOverflowError:
-            if not await deps.compactor.summarize(history, notes=summary_notes(deps.ctx)):
+            # The usual summary was not enough (or the estimate was low): keep only the
+            # smallest tail this time, so the retry doesn't fail the same way.
+            if not await deps.compactor.summarize(
+                history, tail_tokens=TAIL_MIN, notes=summary_notes(deps.ctx)
+            ):
                 raise
             deps.transcript.write("compaction", kind="summary", reason="context overflow")
             yield Compacted("summary")
@@ -580,7 +585,9 @@ async def _ask_model(
 ) -> AsyncGenerator[Event, None]:
     tools = [t.spec() for t in available.values()]
     guard = RunawayGuard()
-    async with contextlib.aclosing(deps.llm.stream(history.messages, tools, model=deps.model)) as stream:
+    reply = deps.compactor.reply_tokens  # the room compaction keeps for the reply, when it is known
+    stream_ = deps.llm.stream(history.messages, tools, model=deps.model, max_tokens=reply)
+    async with contextlib.aclosing(stream_) as stream:
         async for chunk in stream:
             if (why := guard.check(chunk)) is not None:
                 raise RunawayOutputError(why)
@@ -662,10 +669,11 @@ def _held(turn: _Turn) -> str:
 
 async def _compact(history: History, deps: LoopDeps) -> AsyncGenerator[Event, None]:
     compactor = deps.compactor
-    if n := compactor.budget_cap(history):
+    spill = deps.ctx.scratch.dir if deps.ctx.scratch is not None else None  # where cut text is kept
+    if n := compactor.budget_cap(history, spill):
         deps.transcript.write("compaction", kind="budget_cap", count=n)
         yield Compacted("budget_cap", n)
-    if n := compactor.microcompact(history):
+    if n := compactor.microcompact(history, spill):
         deps.transcript.write("compaction", kind="microcompact", count=n)
         yield Compacted("microcompact", n)
     if compactor.needs_summary(history) and await compactor.summarize(history, notes=summary_notes(deps.ctx)):

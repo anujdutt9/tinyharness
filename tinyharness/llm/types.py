@@ -135,6 +135,7 @@ class Request:
     owner: str = ""  # "provider:model"; saved reasoning is only sent back to its owner
     web_search: bool = False  # let the model search the web with the provider's own search tool
     show_reasoning: bool = False  # ask for readable reasoning where that's opt-in (OpenAI summaries)
+    max_tokens: int | None = None  # the reply's output limit; None: the API's default
 
     def echo(self, message: Message) -> Any:
         """The saved provider data for `message`, if it came from this same model."""

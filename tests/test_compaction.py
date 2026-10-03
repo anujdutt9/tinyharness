@@ -543,3 +543,84 @@ def estimate_of(messages):
     from tinyharness.llm.tokens import estimate_tokens
 
     return estimate_tokens(messages)
+
+
+# ---- limits sized from the model ----
+
+
+def test_tier_limits_scale_with_a_small_window():
+    """Seen live (a vLLM server at a 64K window): 40K tokens of tool output were always protected, more
+    than the 33.5K `usable` itself, so old results were never stubbed and every long run
+    went straight to a summary."""
+    small = compactor(context_window=65_536)
+    assert small.usable == 33_536
+    assert small.protect_tool_tokens == int(33_536 * 0.30) < small.usable
+    assert small.max_message_tokens == int(33_536 * 0.25)
+    large = compactor(context_window=200_000)
+    assert (large.protect_tool_tokens, large.max_message_tokens) == (40_000, 16_000)
+    assert compactor(context_window=65_536, protect_tool_tokens=7).protect_tool_tokens == 7
+
+
+def test_the_reply_asks_for_the_room_the_trigger_keeps():
+    assert compactor(context_window=200_000).reply_tokens is None  # output limit unknown: no guess
+    assert compactor(context_window=200_000, max_output=64_000).reply_tokens == 32_000
+    assert compactor(context_window=32_768, max_output=32_768).reply_tokens == 16_384
+    assert compactor(context_window=65_536, max_output=lambda: 8_192).reply_tokens == 8_192
+    configured = compactor(context_window=65_536, reserved=12_288)
+    assert (configured.reply_tokens, configured.usable) == (12_288, 65_536 - 12_288)
+
+
+def test_budget_cap_keeps_the_start_and_the_end_and_saves_the_rest(tmp_path):
+    """A test run's verdict is in its last lines: cutting the end lost it."""
+    output = "START " + "line of output\n" * 5000 + " 3 failed, 212 passed"
+    h = history(user("run the tests"), assistant("", "b1", name="Bash"), tool("b1", output))
+    assert compactor(max_message_tokens=500).budget_cap(h, tmp_path) == 1
+    content = h.messages[2].content
+    assert content.startswith("[truncated:") and "START" in content and content.endswith("212 passed")
+    saved = tmp_path / "compacted-b1.txt"
+    assert str(saved) in content and saved.read_text() == output
+
+
+def test_a_stubbed_result_says_where_the_whole_of_it_is(tmp_path):
+    h = history(user("hi"), assistant("", "1"), tool("1", BIG), *(user(f"p{i}") for i in range(4)))
+    c = compactor(stub_tool_results_over=100, keep_tail_messages=4, protect_tool_tokens=0)
+    assert c.microcompact(h, tmp_path) == 1
+    assert (
+        h.messages[2].content.startswith("[trimmed:")
+        and str(tmp_path / "compacted-1.txt") in h.messages[2].content
+    )
+    assert (tmp_path / "compacted-1.txt").read_text() == BIG
+    # With nowhere to save it, the stub is as before.
+    h = history(user("hi"), assistant("", "1"), tool("1", BIG), *(user(f"p{i}") for i in range(4)))
+    c.microcompact(h)
+    assert "Read" not in h.messages[2].content
+
+
+async def test_the_summary_has_its_own_output_limit():
+    """A reasoning model given its whole output limit can spend it all thinking and return
+    an empty summary; a summary needs a few thousand tokens."""
+    from tinyharness.agent.compaction import SUMMARY_MAX_TOKENS
+
+    asked = []
+
+    class Recording(ScriptedLLM):
+        async def one_shot(self, prompt, **kwargs):
+            asked.append(kwargs.get("max_tokens"))
+            return "summary"
+
+    h = history(user("a"), assistant("b"), user("c"), assistant("d"))
+    assert await Compactor(Recording([])).summarize(h, keep_tail=1)
+    assert await Compactor(Recording([]), model="small").summarize(
+        history(user("a"), assistant("b"), user("c"), assistant("d")), keep_tail=1
+    )
+    assert asked == [SUMMARY_MAX_TOKENS, SUMMARY_MAX_TOKENS]
+
+
+async def test_a_smaller_tail_can_be_asked_for():
+    turns = [
+        m for i in range(10) for m in (user(f"q{i} " + "word " * 400), assistant(f"a{i} " + "word " * 400))
+    ]
+    c = Compactor(ScriptedLLM([]), context_window=200_000)
+    h = history(*turns)
+    assert await c.summarize(h, tail_tokens=2_000)
+    assert c.estimate(h.messages[1:]) <= 2_000 + 100  # the summary, then at most the asked-for tail

@@ -2,9 +2,13 @@
 
 Three tiers, cheapest first, run before every model call:
 
-  1. budget_cap    cap any single oversized message (e.g. a huge file read)
+  1. budget_cap    cap any single oversized message (e.g. a huge file read), keeping its
+                   start and end
   2. microcompact  replace old, large tool results with a one-line stub, and trim the
                    long strings in old tool calls (a Write's content is on disk already)
+
+Both save what they cut to a file in the session's scratch directory, named in the
+message, so the model can Read it back instead of running the tool again.
   3. summarize     when the history leaves less room than the model's output needs,
                    have the model summarize everything but the recent tail
 
@@ -13,10 +17,17 @@ session/compaction.ts), sized from the model, not fixed:
 
   - usable = window − reserve, where reserve is the model's output limit (at most
     OUTPUT_TOKEN_MAX), or `reserved` from the config. Summarize once the history
-    reaches `usable`, so the reply always has its room.
+    reaches `usable`, so the reply always has its room. When the output limit is known,
+    requests ask for exactly that reserve as their max_tokens (`reply_tokens`), so the
+    trigger and the request agree.
   - The recent tail kept word for word is `preserve_recent_tokens`, by default a quarter
     of `usable` between TAIL_MIN and TAIL_MAX tokens: whole turns from the end, and part
-    of the turn that doesn't fit (never starting at a tool result).
+    of the turn that doesn't fit (never starting at a tool result). After the provider
+    says the prompt is too long, the tail is TAIL_MIN: the usual one has just failed.
+
+The other limits scale with `usable` too, at most their 200K-window values: on a 64K
+window a fixed 40K of protected tool output is more than `usable` itself, so tier 2
+would never clear anything and every long run would go straight to a summary.
 
 How full the window is comes from the provider's own count for the last request,
 plus an estimate for what was added since (`used`).
@@ -46,8 +57,10 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import re
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tinyharness.agent.history import History, Message, ToolCall
@@ -71,6 +84,12 @@ CONTINUING = "[continuing after a summary] The request being worked on:"
 OUTPUT_TOKEN_MAX = 32_000  # the most of the window held back for the reply
 TAIL_SHARE = 0.25  # of `usable`: the recent tail kept word for word ...
 TAIL_MIN, TAIL_MAX = 2_000, 15_000  # ... within these bounds
+# Tier 1 and 2 limits, as a share of `usable`, at most these tokens (their old fixed values)
+MESSAGE_SHARE, MESSAGE_MAX = 0.25, 16_000  # the largest single message
+PROTECT_SHARE, PROTECT_MAX = 0.30, 40_000  # recent tool output tier 2 never clears
+# The summary's own output limit: a summary is a few thousand tokens, and a model given its
+# whole output limit can spend all of it thinking and return nothing.
+SUMMARY_MAX_TOKENS = 8_192
 LONG_STRING = 500  # chars: tool-call strings longer than this are trimmed in old calls
 
 # Calibration (when the model's tokenizer isn't available): the provider's count for the messages
@@ -105,10 +124,10 @@ class Compactor:
         reserved: int | None = None,
         preserve_recent_tokens: int | None = None,
         threshold: float | None = None,
-        max_message_tokens: int = 16_000,
+        max_message_tokens: int | None = None,
         stub_tool_results_over: int = 6_000,
         keep_tail_messages: int = 12,
-        protect_tool_tokens: int = 40_000,
+        protect_tool_tokens: int | None = None,
         min_savings: int = 20_000,
         clear_when_warm_at: float = 0.60,
         cache_ttl: float = 300.0,
@@ -123,10 +142,10 @@ class Compactor:
         self.reserved = reserved  # tokens held back for the reply, overriding the model's output limit
         self.preserve_recent_tokens = preserve_recent_tokens
         self.threshold = threshold  # a fraction of the window instead of `usable` (old setting)
-        self.max_message_tokens = max_message_tokens
+        self._max_message_tokens = max_message_tokens  # None: from `usable`
         self.stub_tool_results_over = stub_tool_results_over
         self.keep_tail = keep_tail_messages
-        self.protect_tool_tokens = protect_tool_tokens
+        self._protect_tool_tokens = protect_tool_tokens  # None: from `usable`
         self.min_savings = min_savings
         self.clear_when_warm_at = clear_when_warm_at
         self.cache_ttl = cache_ttl  # Anthropic's default; other providers keep theirs as long or longer
@@ -152,18 +171,48 @@ class Compactor:
         window = self._context_window
         return window() if callable(window) else window
 
+    def _output_limit(self) -> int | None:
+        return self._max_output() if callable(self._max_output) else self._max_output
+
+    @property
+    def reserve(self) -> int:
+        """Tokens held back for the reply: `reserved`, or the model's output limit, at most
+        OUTPUT_TOKEN_MAX. Unlike opencode, at most half the window: model lists often give
+        the output limit as the whole window (or it is unknown on a 32K model), which would
+        summarize on every call."""
+        if self.reserved is not None:
+            return self.reserved
+        window = self.context_window
+        return min(self._output_limit() or OUTPUT_TOKEN_MAX, OUTPUT_TOKEN_MAX, window // 2)
+
     @property
     def usable(self) -> int:
         """How much of the window the history may fill and still leave the reply its room
-        (opencode's `usable`): the window less the model's output limit, at most
-        OUTPUT_TOKEN_MAX. Unlike opencode, at most half the window is held back: model lists
-        often give the output limit as the whole window (or it is unknown on a 32K model),
-        which would summarize on every call."""
-        window = self.context_window
-        if self.reserved is not None:
-            return max(0, window - self.reserved)
-        output = self._max_output() if callable(self._max_output) else self._max_output
-        return window - min(output or OUTPUT_TOKEN_MAX, OUTPUT_TOKEN_MAX, window // 2)
+        (opencode's `usable`): the window less `reserve`."""
+        return max(0, self.context_window - self.reserve)
+
+    @property
+    def reply_tokens(self) -> int | None:
+        """The max_tokens to ask for: `reserve`, the room the trigger keeps. None when it is a
+        guess (no output limit from the model list or the config): a guessed limit over the
+        model's real one is an error on some APIs, so the provider's default is kept then.
+        (Asking for the whole output limit, as before, can fail too: prompt + max_tokens over
+        the window is an error on Anthropic's API once the history is near `usable`.)"""
+        if self.reserved is None and not self._output_limit():
+            return None
+        return self.reserve or None
+
+    @property
+    def max_message_tokens(self) -> int:
+        if self._max_message_tokens is not None:
+            return self._max_message_tokens
+        return min(MESSAGE_MAX, int(self.usable * MESSAGE_SHARE))
+
+    @property
+    def protect_tool_tokens(self) -> int:
+        if self._protect_tool_tokens is not None:
+            return self._protect_tool_tokens
+        return min(PROTECT_MAX, int(self.usable * PROTECT_SHARE))
 
     @property
     def tail_budget(self) -> int:
@@ -233,27 +282,35 @@ class Compactor:
                 return tokens + self.estimate(messages[n:])
         return self.estimate(messages)
 
-    def budget_cap(self, history: History) -> int:
-        """Truncate messages larger than `max_message_tokens`. Returns how many were capped."""
+    def budget_cap(self, history: History, spill: Path | None = None) -> int:
+        """Truncate messages larger than `max_message_tokens`, keeping the start and the end
+        (a test run's or a build's verdict is in its last lines). The whole text goes to a
+        file in `spill`, named in the message. Returns how many were capped."""
         capped = 0
+        limit = self.max_message_tokens
         for m in history.messages:
             content = m.content or ""
             if not content or _already_compacted(content):
                 continue
             tokens = count_tokens(content)
-            if tokens <= self.max_message_tokens:
+            if tokens <= limit:
                 continue
-            keep_chars = self.max_message_tokens * 4  # ~4 chars per token
-            m.content = f"{TRUNCATED_MARK} kept ~{self.max_message_tokens} of {tokens} tokens]\n\n{content[:keep_chars]}"
+            half = limit * 2  # chars for each end: ~4 chars per token
+            where = _spilled(spill, m, content)
+            cut = len(content) - 2 * half
+            m.content = (
+                f"{TRUNCATED_MARK} kept ~{limit} of {tokens} tokens, the start and the end{where}]\n\n"
+                f"{content[:half]}\n\n…[{cut} chars cut]…\n\n{content[-half:]}"
+            )
             m.state = None  # the provider's saved copy would bring the full text back
             capped += 1
         if capped:
             self._rewritten()
         return capped
 
-    def microcompact(self, history: History) -> int:
-        """Stub old tool results and trim old tool calls, in one batch. Returns how many
-        messages changed.
+    def microcompact(self, history: History, spill: Path | None = None) -> int:
+        """Stub old tool results and trim old tool calls, in one batch. A stubbed result goes
+        to a file in `spill`, named in the stub. Returns how many messages changed.
 
         Protected: the last `keep_tail` messages, the most recent `protect_tool_tokens`
         of tool output and calls, KEEP_TOOLS, and anything under `stub_tool_results_over`.
@@ -294,7 +351,8 @@ class Compactor:
             return 0
         for m, tokens in batch:
             if m.role == "tool":
-                m.content = f"{STUB_MARK} {tokens} tokens of older tool output]"
+                where = _spilled(spill, m, m.content or "")
+                m.content = f"{STUB_MARK} {tokens} tokens of older tool output{where}]"
             else:
                 m.tool_calls = [
                     c if c.name in KEEP_TOOLS else ToolCall(c.id, c.name, _trim_arguments(c.arguments))
@@ -315,11 +373,18 @@ class Compactor:
             return False
         return self._floor is None or used - self._floor >= self.tail_budget
 
-    async def summarize(self, history: History, *, keep_tail: int | None = None, notes: str = "") -> bool:
+    async def summarize(
+        self,
+        history: History,
+        *,
+        keep_tail: int | None = None,
+        tail_tokens: int | None = None,
+        notes: str = "",
+    ) -> bool:
         """Replace everything before the recent tail with an LLM-written summary.
-        The tail is `tail_budget` tokens of the latest turns; `keep_tail` keeps that many
-        messages instead (more, if that would start the tail at a tool result). `notes`:
-        current state worth keeping (the todo list).
+        The tail is `tail_tokens` (default `tail_budget`) tokens of the latest turns;
+        `keep_tail` keeps that many messages instead (more, if that would start the tail at a
+        tool result). `notes`: current state worth keeping (the todo list).
 
         The tail can start mid-task, even inside one long agentic turn: never at a tool
         result, so a tool call is never separated from its result. When it doesn't start
@@ -332,7 +397,10 @@ class Compactor:
         ]
         body = messages[len(system) :]
 
-        cut = self._cut_tokens(body, self.tail_budget) if keep_tail is None else self._cut(body, keep_tail)
+        if keep_tail is not None:
+            cut = self._cut(body, keep_tail)
+        else:
+            cut = self._cut_tokens(body, self.tail_budget if tail_tokens is None else tail_tokens)
         if cut == 0:
             return False
         head, tail = body[:cut], body[cut:]
@@ -344,9 +412,11 @@ class Compactor:
         try:
             prompt, instructions = self._prompt(head, notes), load_prompt("compaction_system")
             if self.model:
-                summary = await self.llm.one_shot(prompt, system=instructions, model=self.model)
+                summary = await self.llm.one_shot(
+                    prompt, system=instructions, model=self.model, max_tokens=SUMMARY_MAX_TOKENS
+                )
             else:
-                summary = await self.llm.one_shot(prompt, system=instructions)
+                summary = await self.llm.one_shot(prompt, system=instructions, max_tokens=SUMMARY_MAX_TOKENS)
         finally:
             if token is not None:
                 identity.CURRENT.reset(token)
@@ -470,6 +540,22 @@ class Compactor:
             if len(transcript) <= budget:
                 break
         return transcript[-budget:]
+
+
+def _spilled(directory: Path | None, m: Message, content: str) -> str:
+    """Save `content` to a file in `directory` (the session's scratch space, which the model
+    can Read without asking) and say where, for the message that replaces it. Empty if
+    there is nowhere to put it."""
+    if directory is None:
+        return ""
+    name = re.sub(r"[^\w-]", "_", m.tool_call_id or m.id)
+    path = directory / f"compacted-{name}.txt"
+    try:
+        path.write_text(content, encoding="utf-8")
+    except OSError as e:
+        log.warning("compaction: could not save the full text to %s: %s", path, e)
+        return ""
+    return f"; all of it is in {path}: Read or Grep that file if you need it"
 
 
 def _request(m: Message) -> str:

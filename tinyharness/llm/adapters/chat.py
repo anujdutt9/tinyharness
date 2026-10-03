@@ -64,6 +64,8 @@ class ChatAdapter(Adapter):
                 }
                 for t in request.tools
             ]
+        if request.max_tokens:
+            payload["max_tokens"] = request.max_tokens
         if request.effort:
             _set_path(payload, self.provider.effort_param, request.effort)
         if request.web_search:

@@ -68,8 +68,10 @@ class GeminiAdapter(Adapter):
                 {"type": "function", "name": t.name, "description": t.description, "parameters": t.parameters}
                 for t in request.tools
             ]
+        if request.max_tokens:
+            payload.setdefault("generation_config", {})["max_output_tokens"] = request.max_tokens
         if request.effort:
-            payload["generation_config"] = {"thinking_level": THINKING_LEVELS[request.effort]}
+            payload.setdefault("generation_config", {})["thinking_level"] = THINKING_LEVELS[request.effort]
         if request.web_search:
             self.add_web_search(payload)
         return payload

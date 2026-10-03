@@ -72,6 +72,8 @@ class ResponsesAdapter(Adapter):
                 }
                 for t in request.tools
             ]
+        if request.max_tokens:
+            payload["max_output_tokens"] = request.max_tokens
         if request.effort:
             payload["reasoning"] = {"effort": request.effort}
         if request.show_reasoning:  # opt-in: some organizations must be verified to get these
