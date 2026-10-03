@@ -107,5 +107,5 @@ disallow_untyped_defs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["tiktoken", "tokenizers"]
+module = ["tiktoken", "tokenizers", "huggingface_hub"]
 ignore_missing_imports = true

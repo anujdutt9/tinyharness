@@ -6,7 +6,7 @@ from __future__ import annotations
 import functools
 import logging
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from tinyharness.agent.history import Message
@@ -41,11 +41,23 @@ def model_counter(tokenizer: str | None) -> Callable[[str], int] | None:
     try:
         from tokenizers import Tokenizer
 
-        tok = Tokenizer.from_pretrained(tokenizer)
+        tok = _cached(Tokenizer, tokenizer) or Tokenizer.from_pretrained(tokenizer)
     except Exception as e:  # not installed, offline, no such repo
         log.warning("tokenizer %s unavailable (%s); estimating token counts", tokenizer, e)
         return None
     return lambda text: len(tok.encode(text or "", add_special_tokens=False).ids)
+
+
+def _cached(tokenizer_class: Any, repo: str) -> Any:
+    """The tokenizer from the local Hugging Face cache, without asking the Hub: once it has
+    been downloaded, every session would otherwise check for a newer revision first (and
+    print the Hub's warning about unauthenticated requests). None if it isn't cached yet."""
+    try:
+        from huggingface_hub import hf_hub_download
+
+        return tokenizer_class.from_file(hf_hub_download(repo, "tokenizer.json", local_files_only=True))
+    except Exception:  # not cached (or no huggingface_hub): download it
+        return None
 
 
 def estimate_tokens(messages: Iterable[Message], count: Callable[[str], int] | None = None) -> int:

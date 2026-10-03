@@ -624,3 +624,49 @@ async def test_a_smaller_tail_can_be_asked_for():
     h = history(*turns)
     assert await c.summarize(h, tail_tokens=2_000)
     assert c.estimate(h.messages[1:]) <= 2_000 + 100  # the summary, then at most the asked-for tail
+
+
+def test_a_cached_tokenizer_is_loaded_without_asking_the_hub(monkeypatch, tmp_path):
+    """Seen live: with the tokenizer already downloaded, every session still asked the Hub
+    for a newer revision, printing its warning about unauthenticated requests."""
+    import sys
+    import types
+
+    from tinyharness.llm import tokens
+
+    asked = []
+
+    class Tokenizer:
+        def __init__(self, source):
+            self.source = source
+
+        @classmethod
+        def from_file(cls, path):
+            return cls(path)
+
+        @classmethod
+        def from_pretrained(cls, repo):
+            asked.append(repo)
+            return cls(repo)
+
+        def encode(self, text, add_special_tokens=False):
+            return types.SimpleNamespace(ids=text.split())
+
+    cache = {"org/cached": str(tmp_path / "tokenizer.json")}
+
+    def hf_hub_download(repo, filename, local_files_only=False):
+        assert local_files_only and filename == "tokenizer.json"
+        if repo not in cache:
+            raise FileNotFoundError(repo)
+        return cache[repo]
+
+    monkeypatch.setitem(sys.modules, "tokenizers", types.SimpleNamespace(Tokenizer=Tokenizer))
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(hf_hub_download=hf_hub_download))
+    tokens.model_counter.cache_clear()
+    try:
+        assert tokens.model_counter("org/cached")("a b c") == 3
+        assert asked == []  # from the cache: no request
+        assert tokens.model_counter("org/new")("a b") == 2
+        assert asked == ["org/new"]  # not cached yet: downloaded
+    finally:
+        tokens.model_counter.cache_clear()
