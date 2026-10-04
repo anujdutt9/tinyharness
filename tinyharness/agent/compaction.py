@@ -81,6 +81,12 @@ SUMMARY_MARK = "[prior conversation summary]"
 # Starts the user message that repeats the request when a summary cuts into the middle of
 # a task (the kept messages begin with the agent's work, and APIs want a user message first).
 CONTINUING = "[continuing after a summary] The request being worked on:"
+# Follows the repeated request. Without it a model can read the request, the last user message it sees, as a
+# fresh order and start over: re-running a team or tool calls the summary says already finished.
+RESUME = (
+    "[This is the original request, for reference. The summary above says what is already done: continue "
+    "from there with the next unfinished step, and don't repeat steps it reports as finished.]"
+)
 # opencode's defaults (provider/transform.ts OUTPUT_TOKEN_MAX, session/compaction.ts)
 OUTPUT_TOKEN_MAX = 32_000  # the most of the window held back for the reply
 TAIL_SHARE = 0.25  # of `usable`: the recent tail kept word for word ...
@@ -444,7 +450,7 @@ class Compactor:
         kept = [*system, Message(role="system", content=f"{SUMMARY_MARK}\n{summary}")]
         if not tail or tail[0].role != "user":
             request = next((r for m in reversed(head) if (r := _request(m))), "")
-            kept.append(Message(role="user", content=f"{CONTINUING}\n{request}"))
+            kept.append(Message(role="user", content=f"{CONTINUING}\n{request}\n\n{RESUME}"))
         history.messages = [*kept, *tail]
         self._rewritten()
         self._floor, self._floor_pending = None, True
@@ -580,7 +586,7 @@ def _request(m: Message) -> str:
     content = m.content or ""
     if m.role != "user" or content.startswith(("[tinyharness]", "<teammate")):
         return ""
-    return content.removeprefix(CONTINUING).strip()
+    return content.removeprefix(CONTINUING).removesuffix(RESUME).strip()
 
 
 def _clip(text: str, chars: int) -> str:

@@ -1,10 +1,14 @@
 import pytest
 
 from conftest import ScriptedLLM
-from tinyharness.agent.compaction import SUMMARY_MARK, Compactor
+from tinyharness.agent.compaction import RESUME, SUMMARY_MARK, Compactor
 from tinyharness.agent.history import History, Message, ToolCall
 from tinyharness.llm.tokens import count_tokens
 
+
+def _asks(m) -> bool:
+    """The repeated request (before the note that follows it) is the user's."""
+    return m.content.removesuffix(RESUME).rstrip().endswith("build the report from data.db")
 
 def history(*messages: Message) -> History:
     return History(list(messages))
@@ -233,7 +237,7 @@ async def test_one_long_task_can_be_summarized():
     after = h.messages
     assert after[1].content.startswith(SUMMARY_MARK)
     # The kept part starts with the request, word for word, and never with a tool result.
-    assert after[2].role == "user" and after[2].content.endswith("build the report from data.db")
+    assert after[2].role == "user" and _asks(after[2])
     assert after[3].role == "assistant"
     calls = {c.id for m in after for c in m.tool_calls}
     assert calls == {m.tool_call_id for m in after if m.role == "tool"}
@@ -325,7 +329,7 @@ async def test_a_second_summary_still_keeps_the_request():
         h.messages += [assistant("", f"c{i}"), tool(f"c{i}", BIG)]
     assert await c.summarize(h)
     request = next(m for m in h.messages if m.role == "user")
-    assert request.content.endswith("build the report from data.db")
+    assert _asks(request)
 
 
 def test_microcompact_leaves_arguments_it_cannot_shorten():
@@ -436,7 +440,7 @@ async def test_a_turn_too_big_to_keep_whole_keeps_its_latest_steps():
     h = one_long_task(30, "word " * 2_000)
     assert await compactor(preserve_recent_tokens=6_000).summarize(h)  # each result ~2,500 tokens: two fit
     after = h.messages
-    assert after[2].role == "user" and after[2].content.endswith("build the report from data.db")
+    assert after[2].role == "user" and _asks(after[2])
     assert after[3].role == "assistant"  # never a tool result first
     assert sum(m.role == "tool" for m in after) == 2
 
@@ -445,7 +449,7 @@ async def test_when_not_even_the_last_step_fits_everything_is_summarized():
     h = one_long_task(3, "word " * 20_000)
     assert await compactor(preserve_recent_tokens=1_000).summarize(h)
     assert [m.role for m in h.messages] == ["system", "system", "user"]  # sys, summary, the request
-    assert h.messages[2].content.endswith("build the report from data.db")
+    assert _asks(h.messages[2])
 
 
 async def test_a_lone_request_is_not_summarized():

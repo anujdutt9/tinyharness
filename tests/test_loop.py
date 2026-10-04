@@ -1029,3 +1029,15 @@ async def test_each_request_asks_for_the_room_compaction_keeps(tmp_path):
         )
         [e async for e in run_agent_loop("go", History([]), deps)]
     assert asked == [12_288]
+
+
+def test_the_repeated_request_says_to_continue_and_survives_a_second_summary():
+    """After a summary cuts into a task, the request comes back as the last user message. Framed as a reference
+    with a note to continue from the summary, a model doesn't take it as a fresh order and redo finished steps;
+    a later summary recovers the request alone, so the note isn't stacked."""
+    from tinyharness.agent.compaction import CONTINUING, RESUME, _request
+
+    request = "Run a team of 8 analysts, then write the report."
+    content = f"{CONTINUING}\n{request}\n\n{RESUME}"
+    assert content.endswith("don't repeat steps it reports as finished.]")
+    assert _request(Message(role="user", content=content)) == request
