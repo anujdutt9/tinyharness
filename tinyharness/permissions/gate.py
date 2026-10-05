@@ -8,8 +8,8 @@ Layers are checked in order and the first one with an opinion wins:
     4. rules    config rules and "don't ask again" answers (deny beats allow)
        escape   a call that leaves its sandbox (Bash with sandbox=false), or that
                 changes a file that runs code outside it (hooks, plugins, git hooks,
-                settings), skips allow rules and steps 5-6: it always asks, and can't
-                be remembered
+                settings), skips allow rules. Auto may keep a non-destructive command
+                contained; other escapes always ask and can't be remembered
     5. mode     plan / bypass / reads-are-free / project edits / sandboxed commands /
                 auto (see `_auto`)
     6. scratch  the agent's own scratch directory
@@ -61,6 +61,8 @@ class Decision:
     remember: bool = False  # allow: apply the request's "don't ask again" scope
     interrupt: bool = False  # deny: skip the rest of this turn's tool calls
     feedback: str = ""  # with interrupt: what to do instead, sent as the user's next message
+    # Auto mode can replace an unnecessary sandbox escape with equivalent contained args.
+    arguments: dict[str, Any] | None = None
     # allow: the resolved path this was judged on. The tool must act on exactly this path,
     # not resolve it again: a symlink swapped in between would point it somewhere else.
     path: Path | None = None
@@ -160,7 +162,10 @@ class PermissionGate:
                 return Decision(allow, verdict.get("reason", f"hook {verdict['decision']}"), "hook")
 
         site = f"{DOMAIN}{target_host.lower()}" if target_host else None
-        escape = tool.escapes(args) or self._protected(tool, path) or self._persists_outside(tool)
+        sandbox_escape = tool.escapes(args)
+        protected_escape = self._protected(tool, path)
+        persistent_escape = self._persists_outside(tool)
+        escape = sandbox_escape or protected_escape or persistent_escape
         match self.rules.check(tool.name, str(path) if path else site):
             case "deny":
                 return Decision(False, "blocked by a deny rule", "rule")
@@ -172,6 +177,23 @@ class PermissionGate:
                 return Decision(True, "bypassPermissions mode", "mode")
             if self.mode == PermissionMode.PLAN:
                 return Decision(False, "plan mode blocks mutating tools", "mode")
+            risk = None
+            if (
+                self.mode == PermissionMode.AUTO
+                and sandbox_escape is not None
+                and protected_escape is None
+                and persistent_escape is None
+                and not self.outside()
+            ):
+                risk = self._auto_risk(tool, args, path, trusted)
+                contained = tool.contained_args(args)
+                if risk is None and contained is not None:
+                    return Decision(
+                        True,
+                        "kept the non-destructive command inside the sandbox",
+                        "contained",
+                        arguments=contained,
+                    )
             request = PermissionRequest(
                 agent=self.agent,
                 tool=tool.name,
@@ -179,6 +201,7 @@ class PermissionGate:
                 summary=summary or tool.name,
                 path=str(path) if path else None,
                 remember_label="",
+                reason=risk or "",
                 warning=escape + self._outside_warning(),
             )
             return await self._ask(request)
@@ -192,9 +215,9 @@ class PermissionGate:
         if self._in_scratch(path):
             return Decision(True, "agent scratch directory", "mode")
 
-        # Auto mode asks about a risky change to a file case by case: a "don't ask again"
-        # there would stop it judging the next one (and used to switch modes).
-        case_by_case = risk is not None and path is not None
+        # Auto mode asks about every risky action case by case: a "don't ask again"
+        # would stop it judging the next one (and used to switch modes).
+        case_by_case = risk is not None
         request = PermissionRequest(
             agent=self.agent,
             tool=tool.name,

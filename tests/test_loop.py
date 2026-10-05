@@ -976,7 +976,7 @@ async def test_text_that_only_looked_like_a_call_is_shown_in_full(tmp_path, part
 async def test_after_an_overflow_the_summary_keeps_only_the_smallest_tail(tmp_path):
     """The usual tail has just been part of a prompt that didn't fit: keeping it again
     could fail the retry the same way."""
-    from tinyharness.agent.compaction import CONTINUING, TAIL_MIN
+    from tinyharness.agent.compaction import CHECKPOINT_CONTINUATION, TAIL_MIN
     from tinyharness.llm.types import ContextOverflowError
 
     class OverflowOnce(ScriptedLLM):
@@ -1003,8 +1003,8 @@ async def test_after_an_overflow_the_summary_keeps_only_the_smallest_tail(tmp_pa
             ctx=make_ctx(tmp_path),
         )
         [e async for e in run_agent_loop("go", history, deps)]
-    # After the summary (and the request, repeated): the tail, at most TAIL_MIN of the ~40K.
-    kept = [m for m in llm.requests[1] if m.role != "system" and not (m.content or "").startswith(CONTINUING)]
+    # After the summary and checkpoint marker: the tail is at most TAIL_MIN of the ~40K.
+    kept = [m for m in llm.requests[1] if m.role != "system" and m.content != CHECKPOINT_CONTINUATION]
     assert compactor.estimate(kept) <= TAIL_MIN
 
 
@@ -1031,13 +1031,10 @@ async def test_each_request_asks_for_the_room_compaction_keeps(tmp_path):
     assert asked == [12_288]
 
 
-def test_the_repeated_request_says_to_continue_and_survives_a_second_summary():
-    """After a summary cuts into a task, the request comes back as the last user message. Framed as a reference
-    with a note to continue from the summary, a model doesn't take it as a fresh order and redo finished steps;
-    a later summary recovers the request alone, so the note isn't stacked."""
+def test_an_old_repeated_request_can_still_be_read_from_a_saved_session():
+    """Sessions written before execution checkpoints remain resumable."""
     from tinyharness.agent.compaction import CONTINUING, RESUME, _request
 
     request = "Run a team of 8 analysts, then write the report."
     content = f"{CONTINUING}\n{request}\n\n{RESUME}"
-    assert content.endswith("don't repeat steps it reports as finished.]")
     assert _request(Message(role="user", content=content)) == request

@@ -31,6 +31,9 @@ sandbox=false).
 `<session-resumed>` lists what changed while the session was away: trust it over memory.
 `[stale: …]`, `[trimmed: …]` and `[truncated: …]` mark old or shortened output; run it
 again if you need it. `[prior conversation summary]` stands in for earlier messages.
+Its Completed section records work already done: do not repeat it or recreate its Agent
+or Team calls. `[continuing from a context checkpoint]` is harness state, not a new task;
+continue only from the checkpoint's Active work or Next Action.
 
 # Answering
 Be concise. Refer to code as `path:line`. After changes, end with what changed and how you

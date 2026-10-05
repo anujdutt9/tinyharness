@@ -78,15 +78,17 @@ if TYPE_CHECKING:
 TRUNCATED_MARK = "[truncated:"
 STUB_MARK = "[trimmed:"
 SUMMARY_MARK = "[prior conversation summary]"
-# Starts the user message that repeats the request when a summary cuts into the middle of
-# a task (the kept messages begin with the agent's work, and APIs want a user message first).
+# Legacy markers remain readable so sessions written by earlier tinyharness versions can
+# still be compacted correctly. New checkpoints never repeat the original request.
 CONTINUING = "[continuing after a summary] The request being worked on:"
-# Follows the repeated request. Without it a model can read the request, the last user message it sees, as a
-# fresh order and start over: re-running a team or tool calls the summary says already finished.
 RESUME = (
     "[This is the original request, for reference. The summary above says what is already done: continue "
     "from there with the next unfinished step, and don't repeat steps it reports as finished.]"
 )
+CHECKPOINT_CONTINUATION = """[continuing from a context checkpoint]
+The checkpoint above is authoritative about execution state. Continue only from Active or Next Action. Do
+not repeat anything in Completed, and do not recreate completed Agent or Team calls; reuse their recorded
+results. If no work remains, report completion."""
 # opencode's defaults (provider/transform.ts OUTPUT_TOKEN_MAX, session/compaction.ts)
 OUTPUT_TOKEN_MAX = 32_000  # the most of the window held back for the reply
 TAIL_SHARE = 0.25  # of `usable`: the recent tail kept word for word ...
@@ -410,8 +412,10 @@ class Compactor:
 
         The tail can start mid-task, even inside one long agentic turn: never at a tool
         result, so a tool call is never separated from its result. When it doesn't start
-        at a user message, the request being worked on is repeated, word for word, as the
-        first message after the summary. Returns False if there was nothing to summarize.
+        at a user message, a generic checkpoint continuation is inserted so APIs see a
+        user message before the remaining assistant work. The original request stays in
+        the summary instead of becoming a fresh instruction. Returns False if there was
+        nothing to summarize.
         """
         messages = history.messages
         system = [
@@ -449,8 +453,7 @@ class Compactor:
             return False
         kept = [*system, Message(role="system", content=f"{SUMMARY_MARK}\n{summary}")]
         if not tail or tail[0].role != "user":
-            request = next((r for m in reversed(head) if (r := _request(m))), "")
-            kept.append(Message(role="user", content=f"{CONTINUING}\n{request}\n\n{RESUME}"))
+            kept.append(Message(role="user", content=CHECKPOINT_CONTINUATION))
         history.messages = [*kept, *tail]
         self._rewritten()
         self._floor, self._floor_pending = None, True
@@ -465,7 +468,7 @@ class Compactor:
         """Where the kept tail starts, for a tail of at most `budget` tokens (opencode's
         `select`): whole turns from the end (a turn starts at a user message), then the
         latest part of the turn that doesn't fit whole, never starting at a tool result.
-        len(body): everything is summarized and the request repeated after the summary,
+        len(body): everything is summarized and a checkpoint continuation follows the summary,
         when not even the last step fits, or when everything does (as opencode: the
         provider's count, which an overflow reports, can exceed this estimate)."""
         if len(body) <= 1:
@@ -581,8 +584,11 @@ def _spilled(directory: Path | None, m: Message, content: str) -> str:
 
 
 def _request(m: Message) -> str:
-    """The user's request in `m`, if it is one: a message they wrote, or the copy an earlier
-    summary kept (then the only copy left). Not a harness note or a teammate's message."""
+    """Recover a request from an old repeated-request checkpoint.
+
+    Kept for loading sessions produced before checkpoint continuations stopped copying the
+    original request. Not a harness note or a teammate's message.
+    """
     content = m.content or ""
     if m.role != "user" or content.startswith(("[tinyharness]", "<teammate")):
         return ""

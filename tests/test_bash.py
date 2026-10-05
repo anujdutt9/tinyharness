@@ -174,13 +174,62 @@ def sandboxed_bash(tmp_path) -> BashTool:
 UNSANDBOXED = {"command": "pip install requests", "sandbox": False}
 
 
-@pytest.mark.parametrize("mode", [PermissionMode.ASK, PermissionMode.DEFAULT, PermissionMode.AUTO])
+@pytest.mark.parametrize("mode", [PermissionMode.ASK, PermissionMode.DEFAULT])
 @pytest.mark.parametrize("flag", [False, "false"])  # a string "false" parses the same way
 async def test_leaving_the_sandbox_always_asks_and_cannot_be_remembered(tmp_path, mode, flag):
     tool = sandboxed_bash(tmp_path)
     _, [request] = await check(tmp_path, tool, mode, {**UNSANDBOXED, "sandbox": flag})
     assert "outside the sandbox" in request.warning
     assert request.remember_label == ""
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cp -R code/ledger reports/run/ledger",
+        "ls -la reports/run",
+        "find reports/run -name 'test_*.py' -type f",
+        "python3 -m pytest -q -p no:cacheprovider",
+    ],
+)
+async def test_auto_mode_silently_keeps_non_destructive_commands_in_the_sandbox(tmp_path, command):
+    tool, user = sandboxed_bash(tmp_path), User()
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.AUTO, callback=user)
+    decision = await gate.check(tool, {"command": command, "sandbox": False}, None)
+    assert decision.allow and decision.source == "contained" and user.asked == []
+    assert decision.arguments == {"command": command, "sandbox": True}
+
+
+async def test_auto_mode_still_asks_when_a_command_really_needs_to_leave_the_sandbox(tmp_path):
+    tool, user = sandboxed_bash(tmp_path), User()
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.AUTO, callback=user)
+    args = {"command": "curl https://internal.example/api", "sandbox": False}
+    decision = await gate.check(tool, args, None)
+    assert decision.allow and decision.source == "user" and decision.arguments is None
+    [request] = user.asked
+    assert "outside the sandbox" in request.warning
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm file.txt",
+        "rm -rf build",
+        "/bin/rm -fr build",
+        "sudo -n rm -rf build",
+        "find . -type f -delete",
+        "git reset --hard HEAD~1",
+        "git clean -fdx",
+    ],
+)
+@pytest.mark.parametrize("sandbox", [True, False])
+async def test_auto_mode_asks_before_destructive_shell_commands(tmp_path, command, sandbox):
+    tool, user = sandboxed_bash(tmp_path), User()
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.AUTO, callback=user)
+    decision = await gate.check(tool, {"command": command, "sandbox": sandbox}, None)
+    assert decision.allow and decision.source == "user"
+    [request] = user.asked
+    assert request.reason.startswith("it ") and request.remember_label == ""
 
 
 async def test_leaving_the_sandbox_ignores_allow_rules_but_not_deny_rules(tmp_path):
@@ -218,7 +267,9 @@ async def test_leaving_the_sandbox_runs_the_command_unwrapped_with_the_users_own
     command = 'echo "${SANDBOXED:-no} ${POLICY_ENV:-unset}"'
     assert await run(tool, command, tmp_path) == "yes set"
     assert await run(tool, command, tmp_path, sandbox=False) == "no unset"
-    assert tool.describe(tool.parse({"command": "ls", "sandbox": False})) == "Bash(unsandboxed: ls)"
+    assert tool.describe(tool.parse({"command": "ls", "sandbox": False})) == (
+        "Bash(requested unsandboxed: ls)"
+    )
 
 
 async def test_without_a_sandbox_there_is_nothing_to_escape(tmp_path):

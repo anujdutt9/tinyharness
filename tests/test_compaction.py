@@ -1,14 +1,14 @@
 import pytest
 
 from conftest import ScriptedLLM
-from tinyharness.agent.compaction import RESUME, SUMMARY_MARK, Compactor
+from tinyharness.agent.compaction import CHECKPOINT_CONTINUATION, SUMMARY_MARK, Compactor
 from tinyharness.agent.history import History, Message, ToolCall
 from tinyharness.llm.tokens import count_tokens
 
 
-def _asks(m) -> bool:
-    """The repeated request (before the note that follows it) is the user's."""
-    return m.content.removesuffix(RESUME).rstrip().endswith("build the report from data.db")
+def _is_checkpoint(m) -> bool:
+    return m.role == "user" and m.content == CHECKPOINT_CONTINUATION
+
 
 def history(*messages: Message) -> History:
     return History(list(messages))
@@ -236,8 +236,10 @@ async def test_one_long_task_can_be_summarized():
     assert await c.summarize(h)
     after = h.messages
     assert after[1].content.startswith(SUMMARY_MARK)
-    # The kept part starts with the request, word for word, and never with a tool result.
-    assert after[2].role == "user" and _asks(after[2])
+    # The kept part starts with harness state, not a fresh copy of the original request,
+    # and never with a tool result.
+    assert _is_checkpoint(after[2])
+    assert "build the report from data.db" not in after[2].content
     assert after[3].role == "assistant"
     calls = {c.id for m in after for c in m.tool_calls}
     assert calls == {m.tool_call_id for m in after if m.role == "tool"}
@@ -321,15 +323,58 @@ async def test_the_summary_sees_tool_calls_files_todos_and_the_earlier_summary()
     assert "[result of Edit] edited" in prompt and "/w/page.html" in prompt and "Run tests" in prompt
 
 
-async def test_a_second_summary_still_keeps_the_request():
+async def test_a_second_summary_keeps_checkpoint_state_without_reissuing_the_request():
     h = one_long_task(40)
     c = Compactor(ScriptedLLM([]), context_window=100_000, keep_tail_messages=12)
     assert await c.summarize(h)
     for i in range(40, 60):
         h.messages += [assistant("", f"c{i}"), tool(f"c{i}", BIG)]
     assert await c.summarize(h)
-    request = next(m for m in h.messages if m.role == "user")
-    assert _asks(request)
+    checkpoint = next(m for m in h.messages if m.role == "user")
+    assert _is_checkpoint(checkpoint)
+    assert "build the report from data.db" not in checkpoint.content
+
+
+async def test_completed_team_is_not_reissued_as_the_newest_user_instruction():
+    """Regression: a long run created the requested eight-agent team again after each
+    compaction because the original request became the newest user message."""
+
+    class TeamSummary(ScriptedLLM):
+        async def one_shot(self, prompt, **_):
+            assert "[assistant called] Team(" in prompt
+            assert "8 agents completed" in prompt
+            return """## Objective
+Write a report using eight analysts.
+## Hard Constraints
+(none)
+## Execution State
+### Completed — Do Not Repeat
+Team of eight analysts completed; reuse its results.
+### Active
+Synthesizing the report.
+### Pending
+(none)
+## Findings and Decisions
+All analyses are available.
+## Artifacts and Files
+(none)
+## Verification
+Eight agent results returned.
+## Next Action
+Finish synthesizing the report."""
+
+    h = history(
+        Message(role="system", content="sys"),
+        user("Run a team of 8 analysts, then write the report."),
+        assistant("", "team-1", name="Team"),
+        tool("team-1", "8 agents completed; all results attached"),
+        assistant("I am now synthesizing the report."),
+    )
+    assert await Compactor(TeamSummary([])).summarize(h, keep_tail=1)
+    assert [m.role for m in h.messages] == ["system", "system", "user", "assistant"]
+    assert _is_checkpoint(h.messages[2])
+    assert "Run a team of 8 analysts" not in h.messages[2].content
+    assert "do not recreate completed Agent or Team calls" in h.messages[2].content
 
 
 def test_microcompact_leaves_arguments_it_cannot_shorten():
@@ -440,7 +485,7 @@ async def test_a_turn_too_big_to_keep_whole_keeps_its_latest_steps():
     h = one_long_task(30, "word " * 2_000)
     assert await compactor(preserve_recent_tokens=6_000).summarize(h)  # each result ~2,500 tokens: two fit
     after = h.messages
-    assert after[2].role == "user" and _asks(after[2])
+    assert _is_checkpoint(after[2])
     assert after[3].role == "assistant"  # never a tool result first
     assert sum(m.role == "tool" for m in after) == 2
 
@@ -448,8 +493,8 @@ async def test_a_turn_too_big_to_keep_whole_keeps_its_latest_steps():
 async def test_when_not_even_the_last_step_fits_everything_is_summarized():
     h = one_long_task(3, "word " * 20_000)
     assert await compactor(preserve_recent_tokens=1_000).summarize(h)
-    assert [m.role for m in h.messages] == ["system", "system", "user"]  # sys, summary, the request
-    assert _asks(h.messages[2])
+    assert [m.role for m in h.messages] == ["system", "system", "user"]  # sys, summary, checkpoint
+    assert _is_checkpoint(h.messages[2])
 
 
 async def test_a_lone_request_is_not_summarized():
@@ -495,6 +540,9 @@ async def test_the_summary_request_is_built_like_opencodes():
     assert prompt.index("</conversation>") < prompt.index("<prior-summary>") < prompt.index("Summarize the conversation")
     assert "revenue fell 12% in July" in prompt.split("<prior-summary>")[1]
     assert "[earlier summary]" not in prompt  # the prior summary is its own block, not part of the history
+    assert "### Completed — Do Not Repeat" in prompt
+    assert 'write "Report completion."' in prompt
+    assert "Completed Agent or Team calls remain completed" in prompt
     assert "Do not continue the conversation" in seen["system"]
 
 

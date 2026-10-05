@@ -9,6 +9,19 @@ the SDK, and every break is listed here.
 
 First release.
 
+### Fixed
+- Auto mode no longer turns a small model's unnecessary `sandbox=false` on routine
+  listings, searches, copies, directory creation, or test commands into a permission
+  storm: it silently keeps the command inside the sandbox. Commands that genuinely need
+  to leave it still ask. Recognizable destructive commands (`rm`, `find -delete`, `git
+  reset --hard`, and `git clean -f`) always require one-time explicit approval.
+- Context compaction now resumes from an execution-state checkpoint instead of repeating
+  the original request as the newest user instruction. Completed tool, Agent, and Team
+  work is explicitly marked not to repeat, preventing long tasks from restarting after a
+  summary while preserving compatibility with older saved sessions.
+- Back-to-back permission questions no longer hang when tinyharness runs in a dumb or
+  redirected terminal: the input box now releases the actual fallback application.
+
 ### CLI
 - Interactive coding agent with streamed Markdown, live tool status, `/` command
   autocomplete, pickers for model, provider, effort and permission mode.

@@ -169,6 +169,24 @@ def test_who_allowed_a_call_without_asking_is_credited_under_it(renderer):
     assert row.endswith("no output") and credit.strip() == "⎿ auto mode · read-only listing"
 
 
+def test_an_auto_contained_command_says_it_stayed_in_the_sandbox(renderer):
+    renderer.handle(
+        ToolUse(
+            "Bash",
+            {"command": "ls", "sandbox": False},
+            "Bash(requested unsandboxed: ls)",
+            id="c1",
+        )
+    )
+    renderer.handle(
+        PermissionDecision("Bash", True, "contained", "kept the non-destructive command inside the sandbox")
+    )
+    renderer.handle(ToolResult("Bash", "(no output)", False, id="c1"))
+    row, credit = shown(renderer)
+    assert "requested unsandboxed" in row
+    assert credit.strip() == "⎿ auto mode · kept the non-destructive command inside the sandbox"
+
+
 def test_failed_commands_show_why_underneath(renderer):
     output = "> build\nsrc/app.ts(12,5): error TS2322: bad type\n(exit code 2)"
     replay(renderer, ("Bash(npm run build)", "Bash", {"command": "npm run build"}, output, False))
@@ -658,10 +676,11 @@ def test_ctrl_o_shows_a_running_subagents_calls_so_far(repl, tmp_path):
     assert "Edit  measure.mjs" in text
 
 
-async def test_back_to_back_questions_both_get_the_keyboard(repl):
+async def test_back_to_back_questions_both_get_the_keyboard(repl, monkeypatch):
     """Two approvals in a row (a batch of Read + Grep outside the project): the second used
     to arrive while the input box was coming back, found it not yet running, and waited
-    forever for a keyboard the new input box held."""
+    forever for a keyboard the new input box held. A dumb terminal uses prompt-toolkit's
+    separate fallback application, which must be closed instead of PromptSession.app."""
     import asyncio
 
     from prompt_toolkit.application import create_app_session
@@ -669,6 +688,7 @@ async def test_back_to_back_questions_both_get_the_keyboard(repl):
     from prompt_toolkit.output import DummyOutput
 
     answered = []
+    monkeypatch.setenv("TERM", "dumb")
 
     async def questions() -> None:
         await asyncio.sleep(0.3)  # the input box is up

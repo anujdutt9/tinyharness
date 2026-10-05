@@ -7,13 +7,15 @@ loop masks any remaining secrets.
 
 With a sandbox, the command can write only to the project, scratch and temp dirs,
 can't read credential files and reaches only the allowlist proxy's hosts, so the gate
-lets it run without asking in default and auto modes. Without one, every command asks. The model can
-ask to skip the sandbox (sandbox=false) for one command, which asks the user every time.
+lets it run without asking in default and auto modes. Without one, every command asks.
+The model can ask to skip the sandbox (sandbox=false) for one command; default mode asks,
+while auto keeps non-destructive commands sandboxed and asks before destructive ones.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import shlex
 import shutil
 import uuid
@@ -66,6 +68,25 @@ _GIT_READS = frozenset({"status", "log", "diff", "show", "ls-files", "rev-parse"
 _FIND_WRITES = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls"})
 _SQLITE_WRITES = (".output", ".once", ".save", ".backup", ".import", ".shell", ".system", ".log", ".excel")
 
+# Keep this deterministic: a small model must not decide whether an irreversible shell
+# command is routine. These recognizable destructive operations always ask in auto mode.
+_DESTRUCTIVE_COMMANDS = (
+    (re.compile(r"(?:^|[;&|()\s])(?:/[^\s;&|()]+/)?(?:rm|rmdir|unlink|shred)(?=\s|$)"), "deletes files"),
+    (re.compile(r"(?:^|[;&|()\s])find\s+[^\n;&|]*\s-delete(?:\s|$)"), "deletes files with find"),
+    (
+        re.compile(r"(?:^|[;&|()\s])git\s+[^\n;&|]*\breset\s+--hard(?:\s|$)"),
+        "discards changes with git reset --hard",
+    ),
+    (
+        re.compile(r"(?:^|[;&|()\s])git\s+[^\n;&|]*\bclean\s+-[^\s;&|]*f"),
+        "deletes untracked files with git clean",
+    ),
+)
+_ROUTINE_CONTAINED = re.compile(
+    r"(?:^|[;&|]\s*)(?:cp|mkdir)\b"
+    r"|(?:^|[;&|]\s*)(?:(?:uv\s+run\s+)?python3?\s+-m\s+pytest|(?:uv\s+run\s+)?pytest)\b"
+)
+
 
 class BashInput(ToolInput):
     command: str = Field(description="The shell command to run")
@@ -75,7 +96,7 @@ class BashInput(ToolInput):
         default=True,
         description="false runs the command outside the sandbox. Only when it needs what the "
         "sandbox blocks (the network, e.g. installing packages; writes outside the project). "
-        "The user must approve every such command.",
+        "Default mode asks the user; auto mode may keep a non-destructive command sandboxed.",
     )
 
 
@@ -130,7 +151,8 @@ class BashTool(Tool[BashInput]):
 
     def describe(self, args: BashInput) -> str:
         command = args.command if len(args.command) <= 80 else args.command[:79] + "…"
-        return f"Bash({'unsandboxed: ' if self._unsandboxed(args) else ''}{command})"
+        escaped = "requested unsandboxed: " if self._unsandboxed(args) else ""
+        return f"Bash({escaped}{command})"
 
     def writes(self, args: BashInput) -> bool:
         return not only_reads(args.command)
@@ -142,6 +164,14 @@ class BashTool(Tool[BashInput]):
         if not self._unsandboxed(args):
             return None
         return "this command runs outside the sandbox: it can use the network and change any of your files"
+
+    def contained_args(self, args: dict[str, Any]) -> dict[str, Any] | None:
+        if not self._unsandboxed(args):
+            return None
+        command = str(args.get("command", ""))
+        if not only_reads(command) and not _ROUTINE_CONTAINED.search(command):
+            return None
+        return {**args, "sandbox": True}
 
     def _unsandboxed(self, args: BashInput | dict[str, Any]) -> bool:
         """A sandbox exists and the model asked to skip it. The gate sees raw arguments,
@@ -156,6 +186,10 @@ class BashTool(Tool[BashInput]):
         return not args.sandbox
 
     def risk(self, args: dict[str, Any], path: Path | None) -> str | None:
+        command = str(args.get("command", ""))
+        for pattern, reason in _DESTRUCTIVE_COMMANDS:
+            if pattern.search(command):
+                return reason
         return None if self.sandbox else "runs a shell command without a sandbox"
 
     async def run(self, args: BashInput, ctx: ToolContext) -> str:

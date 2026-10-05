@@ -108,7 +108,7 @@ PREVIEW_LINES = 3  # of a command's or search's output, under its row
 # Read, Edit or Write is summed up by its row (`212 lines`, `+4 −1`).
 _PREVIEWED = frozenset({"Bash", "Grep", "Glob"})
 # How a decision the user wasn't asked about is credited, under the call.
-_ALLOWED_BY = {"classifier": "auto mode", "hook": "hook"}
+_ALLOWED_BY = {"classifier": "auto mode", "contained": "auto mode", "hook": "hook"}
 LIVE_THOUGHT_LINES = 8  # while the model reasons, the latest lines of it (when shown)
 
 

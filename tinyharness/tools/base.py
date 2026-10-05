@@ -186,8 +186,14 @@ class Tool(ABC, Generic[InputT]):
 
     def escapes(self, args: dict[str, Any]) -> str | None:
         """Why this call runs outside the sandbox it would normally run in, or None.
-        Such calls always ask: no rule, mode or classifier approves them (only
-        bypassPermissions or a hook), and "don't ask again" isn't offered."""
+        Such calls normally ask: no rule or classifier approves them, and "don't ask
+        again" isn't offered. Auto may replace them with `contained_args`; bypass and
+        hooks may approve them directly."""
+        return None
+
+    def contained_args(self, args: dict[str, Any]) -> dict[str, Any] | None:
+        """Equivalent arguments that keep an escape inside the sandbox, or None.
+        Auto mode uses this instead of asking when the operation is non-destructive."""
         return None
 
     def is_read_only(self, args: InputT) -> bool:

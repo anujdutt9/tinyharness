@@ -21,19 +21,19 @@ import shlex
 import signal
 import subprocess
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Iterator
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Any
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.application import get_app
+from prompt_toolkit.application import Application, get_app
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.formatted_text import ANSI, FormattedText, StyleAndTextTuples
+from prompt_toolkit.formatted_text import ANSI, AnyFormattedText, FormattedText, StyleAndTextTuples
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
@@ -178,6 +178,22 @@ class _CompactPrompt(PromptSession[str]):
     the bottom anyway."""
 
     live: Callable[[], str] | None = None
+    _active_dumb_app: Application[str] | None = None
+
+    @contextlib.contextmanager
+    def _dumb_prompt(self, message: AnyFormattedText = "") -> Iterator[Application[str]]:
+        """Remember prompt-toolkit's temporary app so permission questions can close it.
+
+        On a dumb terminal, ``PromptSession.prompt_async`` runs this application instead
+        of ``self.app``. Without tracking it, ``Repl._close_input`` targets the idle app
+        and waits forever for the temporary one to release the UI lock.
+        """
+        with super()._dumb_prompt(message) as app:
+            self._active_dumb_app = app
+            try:
+                yield app
+            finally:
+                self._active_dumb_app = None
 
     def _create_layout(self) -> Layout:
         layout = super()._create_layout()
@@ -587,7 +603,8 @@ class Repl:
 
     def _close_input(self) -> None:
         """Close the input box if it's up, keeping what was typed."""
-        app = self._prompt.app if self._prompt is not None else None
+        prompt = self._prompt
+        app = (prompt._active_dumb_app or prompt.app) if prompt is not None else None
         if app is None or app.future is None or app.future.done():
             return  # between runs: the next one sees the waiting question (_make_way)
         self._draft = app.current_buffer.text
