@@ -5,7 +5,7 @@ All notable changes to tinyharness. The format follows
 [semantic versioning](https://semver.org/): while on 0.x, minor versions may break
 the SDK, and every break is listed here.
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-13)
 
 First release.
 
