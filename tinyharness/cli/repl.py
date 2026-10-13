@@ -22,7 +22,7 @@ import signal
 import subprocess
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -49,6 +49,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from tinyharness.agent.history import Image
+from tinyharness.agent.transcript import SessionBusyError
 from tinyharness.cli.commands import COMMANDS
 from tinyharness.cli.markdown import render as render_markdown
 from tinyharness.cli.render import Renderer, dollars, tokens, without_links
@@ -740,6 +741,51 @@ class Repl:
             ),
             highlight=False,
         )
+
+    def switch_session(self, session_id: str) -> bool:
+        """Atomically replace the idle conversation, keeping the old one on any error."""
+        if session_id == self.session.id:
+            self.console.print("  [muted]That conversation is already open here.[/]")
+            return False
+        old = self.session
+        options = replace(
+            old.options,
+            working_dir=old.workspace.root,
+            provider=None,
+            model=None,
+            permission_mode=old.mode,
+            resume=session_id,
+            trust_project=old.project_trusted,
+            use_last_model=True,
+        )
+        try:
+            selected = Session(options)
+        except SessionBusyError as error:
+            self.console.print(Text(f"  ✗ {error}", style="err"))
+            return False
+        except Exception as error:
+            report_error(self.console, error)
+            return False
+
+        self.session = selected
+        old.close()
+        self.renderer.use_session(
+            str(selected.workspace.root),
+            selected.ctx.usage,
+            show_thinking=selected.config.show_thinking,
+        )
+        self.context_used = 0.0
+        self.git = git_status(selected.workspace.root)
+        self.expanded = False
+        self.close_aside()
+        self._forget_suggestion()
+        if self._prompt is not None:
+            self._prompt.completer = SlashCompleter(selected)
+        from tinyharness.cli.app import print_resumed
+
+        print_resumed(self.console, selected)
+        self._measure_context()
+        return True
 
     def _show_subagent(self, agent: SubagentUpdate) -> None:
         """What a running subagent has done so far, printed in full (/output)."""

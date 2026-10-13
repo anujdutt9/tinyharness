@@ -14,6 +14,10 @@ Release validation is summarized in
 intentionally excluded because they can contain prompts, filesystem paths and project context.
 
 ### Added
+- `/sessions` opens a searchable conversation switcher inside the running CLI. The same
+  searchable picker is used for models, providers and skills; choosing a skill prepares its
+  slash command so arguments can be added before it runs. Session logs use an OS-held lock,
+  preventing two tinyharness windows from writing the same conversation at once.
 - Explicit software acquisition through common package managers, tool launchers, bootstrap
   scripts, browser runtimes, model downloaders and container clients now asks before downloading
   or executing new code, even inside the sandbox or `bypassPermissions`. The exact acquisition can be

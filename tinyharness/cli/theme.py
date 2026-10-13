@@ -232,7 +232,9 @@ PT_STYLE = Style.from_dict(
         "completion-menu.completion fuzzymatch.inside": f"{BRAND_2} bold",
         "completion-menu.completion.current fuzzymatch.outside": ON_BRAND,
         "completion-menu.completion.current fuzzymatch.inside": f"{ON_BRAND} bold",
-        # The approval prompt (ChoiceInput).
+        # Shared searchable pickers and approval prompts.
+        "palette.selected": f"{BRAND} bold",
+        "palette.detail": SUBTLE,
         "selected-option": f"{BRAND} bold",
         "number": SUBTLE,
     }

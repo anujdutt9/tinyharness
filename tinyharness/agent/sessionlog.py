@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from tinyharness.agent.history import History, Message
-from tinyharness.agent.transcript import Transcript
+from tinyharness.agent.transcript import Transcript, lock_is_held
 from tinyharness.paths import state_dir
 
 
@@ -64,6 +64,7 @@ class SessionInfo:
     title: str  # the first prompt
     messages: int
     model: str = ""
+    active: bool = False
 
 
 class SessionStore(Protocol):
@@ -244,4 +245,5 @@ def _describe(path: Path) -> SessionInfo | None:
                 title = " ".join(str(message.get("content") or "").split())[:80]
     if not title:
         return None
-    return SessionInfo(path.stem, datetime.fromtimestamp(path.stat().st_mtime), title, count, model)
+    active = lock_is_held(path.with_name(f".{path.stem}.lock"))
+    return SessionInfo(path.stem, datetime.fromtimestamp(path.stat().st_mtime), title, count, model, active)

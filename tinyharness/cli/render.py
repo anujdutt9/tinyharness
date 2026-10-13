@@ -203,6 +203,19 @@ class Renderer:
         self._finished_agents: list[SubagentUpdate] = []  # shown under their Agent/Team call
         self._last_was_row = False  # consecutive tool rows print as one block
 
+    def use_session(self, root: str, meter: UsageMeter, *, show_thinking: bool) -> None:
+        """Point the reusable terminal renderer at a newly selected conversation."""
+        self.root = f"{root.rstrip('/')}/"
+        self.meter = meter
+        self.show_thinking = show_thinking
+        self.last_output = None
+        self.last_thought = ""
+        self.last_thought_shown = False
+        self._thought.clear()
+        self._running.clear()
+        self._agents.clear()
+        self._finished_agents.clear()
+
     # -- the live region ------------------------------------------------------
 
     def __rich__(self) -> RenderableType:

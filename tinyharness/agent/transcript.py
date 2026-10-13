@@ -20,6 +20,10 @@ TRACE_SCHEMA = 1
 _TRACE: ContextVar[dict[str, Any] | None] = ContextVar("tinyharness_trace", default=None)
 
 
+class SessionBusyError(RuntimeError):
+    """Another tinyharness process currently owns this session log."""
+
+
 @contextlib.contextmanager
 def trace_scope(**fields: Any) -> Iterator[None]:
     """Attach correlation fields to every record written in this async context."""
@@ -59,10 +63,27 @@ class Transcript:
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         _chmod(directory, 0o700)  # made before logs were private: close it now
         self.path = directory / f"{session_id}.jsonl"
+        self._lock_path = directory / f".{session_id}.lock"
         self.session_id = session_id
         self.secrets = dict(secrets or {})
-        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        self._file = os.fdopen(fd, "a", encoding="utf-8")
+        lock_fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        self._lock = os.fdopen(lock_fd, "r+b", buffering=0)
+        _chmod(self._lock_path, 0o600)
+        try:
+            _lock(self._lock)
+        except OSError as e:
+            self._lock.close()
+            raise SessionBusyError(
+                "That conversation is open in another tinyharness window. "
+                "Switch to that window or close it before resuming here."
+            ) from e
+        try:
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            self._file = os.fdopen(fd, "a", encoding="utf-8")
+        except Exception:
+            _unlock(self._lock)
+            self._lock.close()
+            raise
         _chmod(self.path, 0o600)
 
     def write(self, event: str, **payload: Any) -> None:
@@ -93,6 +114,9 @@ class Transcript:
     def close(self) -> None:
         if not self._file.closed:
             self._file.close()
+        if not self._lock.closed:
+            _unlock(self._lock)
+            self._lock.close()
 
     def __enter__(self) -> Transcript:
         return self
@@ -124,3 +148,46 @@ def _redact(value: Any, *, patterns: bool = True, extra: dict[str, str] | None =
 def _chmod(path: Path, mode: int) -> None:
     with contextlib.suppress(OSError):  # not ours to change (a shared directory): leave it
         path.chmod(mode)
+
+
+def _lock(file: Any) -> None:
+    """Take an advisory, non-blocking lock. The OS releases it if the process dies."""
+    if os.name == "nt":
+        import msvcrt
+
+        if os.fstat(file.fileno()).st_size == 0:
+            file.write(b"\0")
+        file.seek(0)
+        msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+    else:
+        import fcntl
+
+        fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock(file: Any) -> None:
+    with contextlib.suppress(OSError):
+        if os.name == "nt":
+            import msvcrt
+
+            file.seek(0)
+            msvcrt.locking(file.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+        else:
+            import fcntl
+
+            fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+
+
+def lock_is_held(path: Path) -> bool:
+    """Whether another live Transcript holds `path`; used only for picker status."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    file = os.fdopen(fd, "r+b", buffering=0)
+    try:
+        _lock(file)
+    except OSError:
+        file.close()
+        return True
+    _unlock(file)
+    file.close()
+    return False

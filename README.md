@@ -62,11 +62,11 @@ In the session, type `/` to autocomplete commands. The ones you'll use most:
 | `/model` | pick a model from any provider you have a key for |
 | `/mode` | change the permission mode (or press Shift+Tab) |
 | `/effort` | how hard the model reasons, `low` … `max`, the same for every model |
-| `/skills`, `/<skill>` | list or run skills |
+| `/skills`, `/<skill>` | find or run skills |
 | `/extensions` | what's on and what it costs per request; `/extensions on web` |
 | `/sandbox` | what commands can write, read and reach |
 | `/btw <question>` | a quick side question, even while the agent works; not added to the conversation |
-| `/context`, `/clear` | context usage, or a fresh conversation |
+| `/sessions`, `/context`, `/clear` | switch conversations, inspect context, or start fresh |
 | `/key [provider]` | add or replace a provider key saved in `auth.json` |
 
 Useful flags: `-c` (continue the latest conversation), `-r` (pick one), `-p "prompt"`

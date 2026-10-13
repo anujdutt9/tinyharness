@@ -9,6 +9,7 @@ from conftest import ScriptedLLM
 from tinyharness import Session, SessionOptions
 from tinyharness.agent.history import Message, ToolCall
 from tinyharness.agent.sessionlog import replay
+from tinyharness.agent.transcript import SessionBusyError, Transcript
 from tinyharness.agent.world import STALE_MARK, UNFINISHED
 from tinyharness.paths import move_legacy_state, project_dir, state_dir
 from tinyharness.session import list_sessions
@@ -24,6 +25,17 @@ def work(tmp_path, monkeypatch):
 
 def options(work, **kw) -> SessionOptions:
     return SessionOptions(config_path=work.parent / "none.toml", working_dir=work, **kw)
+
+
+def test_a_session_log_has_only_one_live_writer(work):
+    """Two terminals may run at once, but never append to the same conversation."""
+    first = Transcript(work, "shared")
+    try:
+        with pytest.raises(SessionBusyError, match="another tinyharness window"):
+            Transcript(work, "shared")
+    finally:
+        first.close()
+    Transcript(work, "shared").close()  # the OS lock is released on close (and on process exit)
 
 
 def script(session: Session, *turns) -> ScriptedLLM:
@@ -67,6 +79,40 @@ async def test_a_resumed_conversation_is_the_same_conversation(work):
         assert llm.requests[0][-1].content == "continue"  # nothing changed: no note
     finally:
         resumed.close()
+
+
+async def test_repl_switch_keeps_current_session_until_target_is_available(work):
+    """A quick switch never steals a conversation from another live terminal."""
+    import io
+
+    from rich.console import Console
+
+    from tinyharness.cli.render import Renderer
+    from tinyharness.cli.repl import Repl
+    from tinyharness.cli.theme import THEME
+
+    target = Session(options(work))
+    await turn(target, "target conversation", "Target reply.")
+    target_id = target.id
+    current = Session(options(work))
+    await turn(current, "current conversation", "Current reply.")
+    current_id = current.id
+    console = Console(file=io.StringIO(), theme=THEME, color_system=None)
+    repl = Repl(current, console, Renderer(console))
+    try:
+        activity = {item.id: item.active for item in list_sessions(options(work))}
+        assert activity[target_id] and activity[current_id]
+        assert not repl.switch_session(target_id)
+        assert repl.session.id == current_id
+        assert "open in another tinyharness window" in console.file.getvalue()
+
+        target.close()
+        assert repl.switch_session(target_id)
+        assert repl.session.id == target_id
+        assert any(m.content == "target conversation" for m in repl.session.history.messages)
+    finally:
+        target.close()
+        repl.session.close()
 
 
 TODO = {"content": "Check", "status": "in_progress", "activeForm": "Checking"}

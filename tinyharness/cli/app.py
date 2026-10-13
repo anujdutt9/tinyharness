@@ -387,6 +387,8 @@ def _session_label(session: SessionInfo) -> str:
     details = [_ago(session.updated), f"{session.messages} messages"]
     if session.model:
         details.append(session.model.replace(":", "/").replace("/", " / ", 1))
+    if session.active:
+        details.append("active in another window")
     return f"{session.title}  [{' · '.join(details)}]"
 
 
