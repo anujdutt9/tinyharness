@@ -30,10 +30,12 @@ framework underneath, so you can read the whole thing in an afternoon.
 - **Robust with small models.** Cut-off replies, empty replies, tool calls written as
   text, malformed arguments and repeated failures are handled by the harness, so mid-size
   open models get work done too. [How](https://github.com/anujdutt9/tinyharness/blob/main/docs/features.md#reliability).
-- **Safe without the friction.** Commands run in an OS sandbox that reaches only package
-  registries, GitHub and CDNs; routine work inside it doesn't ask, anything beyond it
-  does, and API keys never reach the model. Once outside content (a web page, a download)
-  is in the conversation, anything that could send data out asks a person first.
+- **Safe without the friction.** Commands run with filesystem and network isolation;
+  routine contained work doesn't ask, while a newly required exact host can be approved
+  without dropping containment. Downloading new executable code asks once; cached tools
+  then run normally, and bare Python installs use a project `.venv`. API keys never reach
+  the model. Once outside content is
+  in the conversation, anything that could send data out asks a person first.
 - **Small and fast.** Six core tools and a short prompt (about 3k tokens before your
   instructions) that stays the same from call to call, so the provider's cache hits.
 - **Extensible.** One Python file with `setup(th)` adds tools, prompt sections, commands
@@ -113,7 +115,7 @@ hooks, skills, subagents on different models, and an extension.
 | **Tools** | Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash`. Built-in extensions you turn on: `web` (WebSearch, WebFetch), `pdf`, `open`, `todo`, `agents` (Agent, Team) |
 | **Extensions** | One Python file with `setup(th)` adds tools, prompt sections, slash commands and event handlers ([docs/extension-api.md](docs/extension-api.md)); `/extensions on|off` |
 | **Permissions** | Routine work in the project and the sandbox doesn't ask; anything beyond it asks, with a diff for edits. Modes `default`, `auto` (an LLM classifier for unclear cases), `plan`, `ask` (every edit and command) and `bypassPermissions`; persistent allow/deny rules |
-| **Sandbox** | Seatbelt on macOS: commands write only inside the project, can't read credential files, and reach only an allowlist of hosts (package registries, GitHub, CDNs) through a local proxy; `/sandbox` shows it |
+| **Sandbox** | Native Seatbelt on macOS; optional Sandbox Runtime on Linux, Windows and as a fallback. Commands have narrow writes, blocked credential reads and allowlisted network access; `/sandbox` shows it |
 | **Context** | Cap oversized messages, stub old tool output, then summarize, without rebuilding the prompt cache every turn |
 | **Subagents and teams** | Isolated contexts on any model; `Team` runs a dependency graph of tasks; the model picks the team's size, up to 20 subagents at once (`max_parallel_agents`) |
 | **Skills, hooks, plugins** | Portable `SKILL.md` skills, shell or Python hooks on 5 events, and plugins that bundle them |

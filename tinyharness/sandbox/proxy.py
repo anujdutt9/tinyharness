@@ -24,9 +24,9 @@ from urllib.parse import urlsplit
 
 log = logging.getLogger(__name__)
 
-# Reached without asking from inside the sandbox. Writes still stay in the project, and
-# credential files still can't be read, so what can leave is limited to what a command
-# can see; these hosts are where code and packages come from, not where data goes.
+# Reached without asking from inside the sandbox. This is a destination allowlist, not
+# data-loss prevention: HTTPS tunnels are opaque, so an allowed host can also receive
+# readable project data. Keep the defaults limited to dependency and rendering sources.
 DEFAULT_ALLOWED_HOSTS = (
     # Python
     "pypi.org",
@@ -162,8 +162,8 @@ class AllowlistProxy:
             await _reply(
                 writer,
                 403,
-                f"tinyharness sandbox: {host} is not in the allowed hosts. Run the command with "
-                "sandbox=false, or add the host to [sandbox] allow_hosts in config.toml.",
+                f"tinyharness sandbox: {host} is not in the allowed hosts. Add the exact host "
+                "to [sandbox] allow_hosts in config.toml if you trust it.",
             )
             return None
         self.reached.append(host)

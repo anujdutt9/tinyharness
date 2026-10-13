@@ -37,6 +37,7 @@ from tinyharness.cli.widgets import ask, pick
 from tinyharness.config import RECENT_MODELS, forget_model, recent_models, remember_model, save_theme
 from tinyharness.paths import pretty_path
 from tinyharness.permissions import PermissionMode
+from tinyharness.sandbox import setup_hint
 from tinyharness.security import redact
 from tinyharness.session import MissingAPIKeyError
 
@@ -560,17 +561,18 @@ def sandbox(repl: Repl, arg: str) -> None:
     session = repl.session
     if session.sandbox is None:
         repl.console.print("  [warn]No sandbox[/] [muted]· every command asks before it runs[/]")
+        repl.console.print(f"  [muted]Setup: {setup_hint()}.[/]")
         return
     policy = session.sandbox_policy
     table = _grid(12)
     table.add_row("  [bold default]writes[/]", ", ".join(pretty_path(p) for p in policy.write_roots[:4]))
     table.add_row("  [bold default]reads[/]", "anything except credential files (.env, keys, auth.json)")
-    network = ", ".join(session.proxy.allowed) if session.proxy is not None else "none"
+    network = ", ".join(policy.allowed_hosts) or "none"
     table.add_row("  [bold default]network[/]", network)
     repl.console.print(table)
     repl.console.print(
-        "  [muted]Anything else asks first (sandbox=false). Change the hosts with \\[sandbox] "
-        "allow_hosts in config.toml.[/]"
+        "  [muted]Bash cannot disable containment. A blocked exact host can be approved for "
+        "one command or the session; configure stable destinations with \\[sandbox] allow_hosts.[/]"
     )
     if session.ctx.outside:
         repl.console.print(

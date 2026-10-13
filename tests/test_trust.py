@@ -321,7 +321,7 @@ async def test_ordinary_work_is_not_slowed_down(session):
     assert session.user.asked == []
 
 
-async def test_bypass_mode_still_means_bypass(session):
+async def test_bypass_mode_does_not_approve_protected_code_without_asking(session):
     session.set_mode("bypassPermissions")
     assert (await session.gate.check(WriteTool(), {}, ".git/hooks/pre-push")).allow
-    assert session.user.asked == []
+    assert len(session.user.asked) == 1

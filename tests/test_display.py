@@ -169,24 +169,6 @@ def test_who_allowed_a_call_without_asking_is_credited_under_it(renderer):
     assert row.endswith("no output") and credit.strip() == "⎿ auto mode · read-only listing"
 
 
-def test_an_auto_contained_command_says_it_stayed_in_the_sandbox(renderer):
-    renderer.handle(
-        ToolUse(
-            "Bash",
-            {"command": "ls", "sandbox": False},
-            "Bash(requested unsandboxed: ls)",
-            id="c1",
-        )
-    )
-    renderer.handle(
-        PermissionDecision("Bash", True, "contained", "kept the non-destructive command inside the sandbox")
-    )
-    renderer.handle(ToolResult("Bash", "(no output)", False, id="c1"))
-    row, credit = shown(renderer)
-    assert "requested unsandboxed" in row
-    assert credit.strip() == "⎿ auto mode · kept the non-destructive command inside the sandbox"
-
-
 def test_failed_commands_show_why_underneath(renderer):
     output = "> build\nsrc/app.ts(12,5): error TS2322: bad type\n(exit code 2)"
     replay(renderer, ("Bash(npm run build)", "Bash", {"command": "npm run build"}, output, False))
@@ -483,13 +465,17 @@ def test_a_sandboxed_test_run_that_fails_shows_as_failed(renderer):
         args=BashInput(command="pytest -q"),
         sandboxed=True,
     )
-    assert output.endswith("(exit code 1)") and "(note: this ran in the sandbox" in output
+    assert output.endswith("(exit code 1)")
+    assert "tinyharness:filesystem_or_process_denied" in output
     replay(renderer, ("Bash(pytest -q)", "Bash", {"command": "pytest -q"}, output, False))
     renderer.handle(Done())
-    row, first, last, footer = shown(renderer)[-4:]
+    lines = shown(renderer)
+    row = next(line for line in lines if line.startswith("✗ Bash"))
+    first = next(line for line in lines if "PermissionError" in line)
+    footer = lines[-1]
     assert row.startswith("✗ Bash") and "exit 1" in row
     assert first.strip() == "⎿ E   PermissionError: Operation not permitted"
-    assert last.strip() == "8 failed, 462 passed in 10.29s"  # the note isn't taken for the error
+    assert any(line.strip() == "8 failed, 462 passed in 10.29s" for line in lines)
     assert "tests ✗" in footer
 
 
@@ -508,7 +494,8 @@ def test_an_app_that_crashes_in_the_sandbox_says_to_run_it_outside():
         args=BashInput(command=chrome),
         sandboxed=True,
     )
-    assert "this ran in the sandbox" in output and output.endswith("(exit code 134)")
+    assert "tinyharness:host_application_blocked" in output
+    assert output.endswith("(exit code 134)")
 
 
 def test_cost_explains_where_the_tokens_went():

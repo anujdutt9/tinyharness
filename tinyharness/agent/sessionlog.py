@@ -55,12 +55,15 @@ class SessionInfo:
         First user prompt.
     messages : int
         Number of saved messages.
+    model : str
+        Most recently selected model, when recorded.
     """
 
     id: str
     updated: datetime
     title: str  # the first prompt
     messages: int
+    model: str = ""
 
 
 class SessionStore(Protocol):
@@ -225,11 +228,15 @@ def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
 def _describe(path: Path) -> SessionInfo | None:
     """None for logs with nothing to resume: older logs, no prompt yet, or emptied by a
     /clear (logs from before /clear started a new conversation)."""
-    title, count = "", 0
+    title, model, count = "", "", 0
     records = list(_read_jsonl(path))
     if not replay(records).history.messages:
         return None
     for r in records:
+        if r.get("event") == "session_start":
+            model = str(r.get("model") or model)
+        elif r.get("event") == "model":
+            model = str(r.get("spec") or model)
         if r.get("event") == "msg":
             count += 1
             message = r.get("message", {})
@@ -237,4 +244,4 @@ def _describe(path: Path) -> SessionInfo | None:
                 title = " ".join(str(message.get("content") or "").split())[:80]
     if not title:
         return None
-    return SessionInfo(path.stem, datetime.fromtimestamp(path.stat().st_mtime), title, count)
+    return SessionInfo(path.stem, datetime.fromtimestamp(path.stat().st_mtime), title, count, model)

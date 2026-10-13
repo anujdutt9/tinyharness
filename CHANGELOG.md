@@ -14,6 +14,17 @@ Release validation is summarized in
 intentionally excluded because they can contain prompts, filesystem paths and project context.
 
 ### Added
+- Explicit software acquisition through common package managers, tool launchers, bootstrap
+  scripts, browser runtimes, model downloaders and container clients now asks before downloading
+  or executing new code, even inside the sandbox or `bypassPermissions`. The exact acquisition can be
+  allowed for the session; using an already-installed executable does not ask again.
+  Network-host approval stays separate, while plan mode continues to block acquisition.
+- Approved bare Python installs reuse an active writable virtualenv or Conda environment.
+  When the launcher environment is outside the sandbox or none exists, tinyharness creates
+  and uses `.venv` in the project instead of modifying a global or harness environment.
+- Linux and Windows can use Anthropic's optional Sandbox Runtime as the same filesystem
+  and network policy backend; native Seatbelt remains preferred on macOS. No new Python
+  dependency is installed, and `/sandbox` gives platform-specific setup help when none is active.
 - `[sandbox] required = true` now fails closed at session startup when no supported
   sandbox is active, so unattended runs cannot approve an unsandboxed fallback.
 - Session JSONL records now use trace schema 1 and carry session, turn, agent, model-call,
@@ -26,6 +37,20 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
   result, error or timeout is appended to the trace without changing the completed task.
 
 ### Changed
+- Resuming no longer requires remembering an opaque session id: `-r` opens a title-based
+  picker with recency, message count and model, while `-r words` searches conversation titles.
+  Exact ids remain supported for automation.
+- A blocked proxy-aware download now returns a structured failure with the exact destination.
+  Bash may request that one host; the user can allow it once or for the session while the
+  command remains sandboxed. Broad redirect hosts are not trusted by default.
+- Shell commands run fail-fast, including pipelines, so a denied or failed intermediate
+  step cannot silently continue and consume a stale artifact.
+- Bash containment is selected entirely by the harness; its tool schema exposes no
+  containment control. Permission modes, allow rules and allow hooks cannot silently
+  cross a missing-sandbox or host-app boundary.
+- Sandboxed commands now use a per-session temporary directory and a private tinyharness
+  cache, including explicit locations for Playwright and other common package/model
+  installers, instead of inheriting broad system temporary directories.
 - API keys now go through one resolver with visible provenance: SDK override, process
   environment, development `.env`, then `auth.json`. Saved and dotenv keys are no longer
   copied into `os.environ`, and `/whoami` reports the selected source.
@@ -51,11 +76,9 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
   automatically on first use.
 - The distribution smoke test now checks the source version's wheel instead of silently
   selecting a stale, higher-version artifact left in `dist/`.
-- Auto mode no longer turns a small model's unnecessary `sandbox=false` on routine
-  listings, searches, copies, directory creation, or test commands into a permission
-  storm: it silently keeps the command inside the sandbox. Commands that genuinely need
-  to leave it still ask. Recognizable destructive commands (`rm`, `find -delete`, `git
-  reset --hard`, and `git clean -f`) always require one-time explicit approval.
+- Recognizable destructive commands (`rm`, `find -delete`, `git reset --hard`, and `git
+  clean -f`) require one-time explicit approval in auto mode while routine sandboxed work
+  remains uninterrupted.
 - Context compaction now resumes from an execution-state checkpoint instead of repeating
   the original request as the newest user instruction. Completed tool, Agent, and Team
   work is explicitly marked not to repeat, preventing long tasks from restarting after a
@@ -117,10 +140,10 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
   it. Sent as each provider takes them: inside tool results for Anthropic, in a message
   right after them for the others. Shrunk to fit (see below). SDK: `session.run(prompt, images)`,
   `tools.read.load_image`, and `ToolOutput` for tools that return pictures.
-- Checking a page by looking: the model renders it with Playwright through Bash (outside
-  the sandbox, since pages load scripts and fonts from the network) and Reads the PNG.
-  Pages use CDN links as usual. (Google Chrome.app can't start in
-  the sandbox; a Bash attempt now says so instead of just "Abort trap: 6".)
+- Checking a page by looking: the model renders it with a headless browser through
+  sandboxed Bash and Reads the PNG. Browser and package caches remain private; redirected
+  download hosts need exact, visible approval. Desktop Chrome remains a host application
+  and is not a sandbox workaround.
 - A running subagent shows its last few tool calls under it (outcome, first line of the
   result, time) with a count of earlier ones, so you can tell progress from going in
   circles; `ctrl+o` while one runs shows all its calls so far. Pasting a file path at
@@ -174,10 +197,9 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
 - A project's tests can read back the fake `auth.json` and `.env` files they make in
   pytest's temp folder when run in the sandbox; those names stay unreadable everywhere
   else. tinyharness's own test suite now passes when the agent runs it.
-- The Bash tool states the sandbox's limits in three sentences (writes, credentials and
-  API keys, network, apps) and that a command needing any of them runs with
-  sandbox=false. A sandboxed failure that looks like one of them gets one short note; the
-  advice notes for servers (wrong whenever localhost is allowed) and apps are gone.
+- The Bash tool states the sandbox's limits directly: writable roots, credentials and API
+  keys, network destinations, and host applications. A blocked operation gets one short,
+  actionable note.
 - Images are shrunk to at most 2000 px a side (and 5 MB) before the model sees them: pasted
   screenshots and images the agent reads. A Retina screenshot used to go in at full size,
   and once a request had several images, the provider rejected it and every request after it. If a provider still
@@ -306,8 +328,8 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
 
 ### Permission modes
 - `default` no longer asks for routine work: reads, edits inside the project and
-  sandboxed commands run; anything that leaves that boundary (another folder,
-  `sandbox=false`, a network tool) asks. The new `ask` mode asks before every edit and
+  sandboxed commands run; operations in another folder and network tools ask. The new
+  `ask` mode asks before every edit and
   command, as `default` used to. `acceptEdits` still works and means `default`.
   Shift+Tab cycles `default` → `auto` → `plan` → `ask`. Reading a public web page (a URL
   without a query string) doesn't ask in `default` either, as in `auto`.
@@ -578,9 +600,8 @@ regression test.
   for loopback); no `open`/AppleScript; `.git/hooks`, `.git/config` and `.tinyharness/`
   are read-only. Package managers get their own cache. Where no sandbox is available,
   every command asks. `[sandbox]` in the config adds writable dirs or turns it off.
-- A command can ask to run outside the sandbox (`sandbox=false`, e.g. to install a
-  package). That always asks, whatever the mode or allow rules; only
-  `bypassPermissions` or a hook can approve it, and "don't ask again" isn't offered.
+- Bash containment is harness-owned. Dependency hosts and additional writable roots are
+  explicit configuration; host application actions use structured tools and ask.
 - The `general-purpose` subagent can run commands (`Bash`).
 - Subagents run in the session's permission mode and follow it live: switching to
   auto mid-run reaches subagents already running (so does "allow all edits" at a

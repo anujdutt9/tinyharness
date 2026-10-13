@@ -204,7 +204,7 @@ MODE_HINT = {
     PermissionMode.DEFAULT: "works in this project and the sandbox; asks before anything else",
     PermissionMode.PLAN: "read-only: looks, doesn't touch",
     PermissionMode.AUTO: "works on its own; asks before risky actions",
-    PermissionMode.BYPASS: "never asks",
+    PermissionMode.BYPASS: "routine prompts off; hard boundaries still ask",
 }
 
 # -- prompt_toolkit -------------------------------------------------------------

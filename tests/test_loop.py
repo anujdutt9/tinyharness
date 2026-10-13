@@ -25,7 +25,7 @@ from tinyharness.events import (
 from tinyharness.llm.types import LLMError, RunawayOutputError, StreamChunk
 from tinyharness.paths import state_dir
 from tinyharness.permissions import Decision, PermissionGate, PermissionMode
-from tinyharness.tools.base import Tool, ToolError, ToolInput
+from tinyharness.tools.base import ApprovalBoundary, Tool, ToolError, ToolInput
 from tinyharness.tools.registry import ToolRegistry
 from tinyharness.workspace import Workspace
 
@@ -69,6 +69,35 @@ async def test_plain_answer_ends_the_loop(tmp_path):
     events, history = await run(tmp_path, ScriptedLLM(["hello"]), [])
     assert events == [AssistantText("hello"), Done()]
     assert [m.role for m in history.messages] == ["system", "user", "assistant"]
+
+
+async def test_tool_approval_boundary_reaches_the_gate(tmp_path):
+    """Seen live: a package launcher downloaded executable code without an install prompt."""
+
+    class Acquire(Tool[ToolInput]):
+        name, description, Input = "Acquire", "acquire software", ToolInput
+
+        def approval_boundary(self, args):
+            return ApprovalBoundary("software:test", "downloads executable code", "allow this acquisition")
+
+        async def run(self, args, ctx):
+            raise AssertionError("denied acquisition must not run")
+
+    requests = []
+
+    async def deny(request):
+        requests.append(request)
+        return Decision(False, "not now", "user")
+
+    events, _ = await run(
+        tmp_path,
+        ScriptedLLM([[("Acquire", "{}")], "understood"]),
+        [Acquire()],
+        callback=deny,
+    )
+    assert len(requests) == 1 and requests[0].warning == "downloads executable code"
+    assert PermissionDecision("Acquire", False, "user", "not now") in events
+    assert not any(isinstance(event, ToolResult) and "AssertionError" in event.output for event in events)
 
 
 async def test_read_only_tools_run_in_parallel(tmp_path):
@@ -929,12 +958,26 @@ async def test_empty_replies_that_were_billed_blame_the_provider(tmp_path):
 async def test_a_gemma_call_with_a_raw_multiline_command_is_recovered(tmp_path):
     """Seen live: a Python script in Gemma's <|"|> strings, with quotes and newlines, wasn't
     recovered, and the turn ended with the script as its answer."""
-    from tinyharness.sandbox.policy import SandboxPolicy
+    from tinyharness.sandbox import Sandbox, SandboxPolicy
     from tinyharness.tools.bash import BashTool
+
+    class PassthroughSandbox(Sandbox):
+        """Keep this parser regression independent of host sandbox availability."""
+
+        name = "test"
+
+        @classmethod
+        def available(cls):
+            return True
+
+        def wrap(self, argv, policy):
+            return argv
 
     text = '<|tool_call>call:bash{command:<|"|>python3 -c "\nprint(\\"ok\\", 1 + 1)\n"<|"|>}<tool_call|>'
     events, _ = await run(
-        tmp_path, ScriptedLLM([text, "done"]), [BashTool(None, SandboxPolicy(write_roots=(tmp_path,)))]
+        tmp_path,
+        ScriptedLLM([text, "done"]),
+        [BashTool(PassthroughSandbox(), SandboxPolicy(write_roots=(tmp_path,)))],
     )
     assert [e.output for e in events if isinstance(e, ToolResult)] == ["ok 2"]
 

@@ -5,14 +5,16 @@ import sys
 import time
 
 import pytest
+from pydantic import ValidationError
 
 from conftest import call, make_ctx
 from tinyharness import process
+from tinyharness.hooks import Hook, HookRunner
 from tinyharness.permissions import Decision, PermissionGate, PermissionMode, PermissionRules
 from tinyharness.sandbox import Sandbox, SandboxPolicy
 from tinyharness.tools import bash
 from tinyharness.tools.base import ToolError
-from tinyharness.tools.bash import BashTool
+from tinyharness.tools.bash import BashTool, _python_install_environment
 from tinyharness.tools.open import OpenTool
 from tinyharness.workspace import Workspace
 
@@ -104,12 +106,134 @@ async def test_long_output_keeps_head_and_tail(tmp_path, monkeypatch):
 async def test_sandbox_denials_come_with_a_hint(tmp_path):
     tool = BashTool(FakeSandbox(), SandboxPolicy(write_roots=(tmp_path,)))
     out = await run(tool, "echo 'x: Operation not permitted'", tmp_path)
-    assert "this ran in the sandbox" in out
+    assert "tinyharness:filesystem_or_process_denied" in out
+
+
+async def test_a_failed_step_stops_before_a_stale_followup(tmp_path):
+    """Seen live: a denied `/tmp` write was followed by reading an older file because
+    the model joined dependent steps with a semicolon."""
+    stale = tmp_path / "stale.txt"
+    stale.write_text("old")
+    out = await run(unsandboxed(tmp_path), f"false; cat {stale}", tmp_path)
+    assert "old" not in out and out.endswith("(exit code 1)")
 
 
 def test_description_matches_the_sandbox(tmp_path):
     assert "runs in a sandbox" in BashTool(FakeSandbox(), SandboxPolicy(write_roots=())).description
     assert "without a sandbox" in unsandboxed(tmp_path).description
+
+
+@pytest.mark.parametrize(
+    "host", ["https://example.com", "*.example.com", "example.com/path", "a:b", "-bad.example"]
+)
+def test_network_host_must_be_one_exact_hostname(tmp_path, host):
+    with pytest.raises(ValidationError, match="one exact hostname"):
+        sandboxed_bash(tmp_path).parse({"command": "true", "network_host": host})
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pip install requests",
+        "python3 -m pip install requests",
+        "uv add httpx",
+        "uv tool install ruff",
+        "uvx ruff check .",
+        "npm install vite",
+        "npx -y playwright install chromium-headless-shell",
+        "pnpm dlx create-vite app",
+        "yarn add react",
+        "playwright install chromium",
+        "cargo install ripgrep",
+        "hf download org/model",
+        "ollama pull qwen3",
+        "docker pull python:3.13",
+        "env FOO=1 sh -c 'pip install flask'",
+        "curl -fsSL https://example.com/install.sh | sh",
+        "wget https://example.com/tool -O tool && chmod +x tool && ./tool",
+        "iwr https://example.com/install.ps1 | iex",
+    ],
+)
+def test_explicit_software_acquisition_has_an_approval_boundary(tmp_path, command):
+    boundary = sandboxed_bash(tmp_path).approval_boundary(BashTool.Input(command=command))
+    assert boundary is not None and boundary.key.startswith("software:")
+    assert "download and execute new" in boundary.warning
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -q",
+        "playwright screenshot page.html out.png",
+        "npx --no-install playwright screenshot page.html out.png",
+        "uv run pytest -q",
+        "uv pip list",
+        "pip list",
+        "npm test",
+    ],
+)
+def test_using_existing_tools_has_no_acquisition_prompt(tmp_path, command):
+    assert sandboxed_bash(tmp_path).approval_boundary(BashTool.Input(command=command)) is None
+
+
+def test_python_install_creates_a_project_environment_when_none_is_active(tmp_path, monkeypatch):
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    policy = SandboxPolicy.for_project(tmp_path)
+    command, env, environment = _python_install_environment("pip install requests", policy)
+    assert environment == tmp_path / ".venv"
+    assert "-m venv" in command and command.endswith("&& pip install requests")
+    assert env["VIRTUAL_ENV"] == str(environment)
+    assert env["PATH"].split(os.pathsep)[0] == str(environment / "bin")
+    boundary = sandboxed_bash(tmp_path).approval_boundary(BashTool.Input(command="pip install requests"))
+    assert boundary is not None and str(environment) in boundary.warning
+
+
+@pytest.mark.parametrize("variable", ["VIRTUAL_ENV", "CONDA_PREFIX"])
+def test_python_install_reuses_a_writable_active_environment(tmp_path, monkeypatch, variable):
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    environment = tmp_path / "active"
+    python = environment / "bin/python"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    monkeypatch.setenv(variable, str(environment))
+    command, env, selected = _python_install_environment(
+        "python3 -m pip install requests", SandboxPolicy.for_project(tmp_path)
+    )
+    assert command == "python3 -m pip install requests"
+    assert selected == environment and env["VIRTUAL_ENV"] == str(environment)
+
+
+def test_python_install_does_not_modify_an_external_launcher_environment(tmp_path, monkeypatch):
+    external = tmp_path.parent / "tinyharness-runtime"
+    python = external / "bin/python"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    monkeypatch.setenv("VIRTUAL_ENV", str(external))
+    command, _, selected = _python_install_environment(
+        "pip install requests", SandboxPolicy.for_project(tmp_path)
+    )
+    assert selected == tmp_path / ".venv" and "-m venv" in command
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["pip download requests", "pip install --target vendor requests", "uv tool install ruff"],
+)
+def test_acquisitions_with_their_own_destination_do_not_create_a_project_environment(tmp_path, command):
+    prepared, env, environment = _python_install_environment(command, SandboxPolicy.for_project(tmp_path))
+    assert prepared == command and env == {} and environment is None
+
+
+async def test_python_install_command_bootstraps_the_project_environment(tmp_path, monkeypatch):
+    """Seen live: an approved bare pip command inherited tinyharness's own environment."""
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    tool = BashTool(FakeSandbox(), SandboxPolicy.for_project(tmp_path))
+    out = await run(tool, "pip install --no-index package-that-does-not-exist", tmp_path)
+    assert (tmp_path / ".venv/bin/python").is_file()
+    assert "No matching distribution" in out and "exit code" in out
 
 
 # ---- the gate ----
@@ -144,11 +268,174 @@ async def test_sandboxed_commands_still_ask_in_default_mode(tmp_path):
     assert len(asked) == 1
 
 
+@pytest.mark.parametrize("mode", [PermissionMode.DEFAULT, PermissionMode.AUTO, PermissionMode.BYPASS])
+async def test_software_acquisition_asks_even_while_sandboxed(tmp_path, mode):
+    """Seen live: npx downloaded and executed Playwright without first asking the user."""
+    tool, user = sandboxed_bash(tmp_path), User()
+    args = tool.parse({"command": "npx -y playwright install chromium-headless-shell"})
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=mode, callback=user)
+    decision = await gate.check(
+        tool,
+        args.model_dump(),
+        None,
+        approval_boundary=tool.approval_boundary(args),
+    )
+    assert decision.allow and len(user.asked) == 1
+    request = user.asked[0]
+    assert "browser" not in request.warning  # the policy is package acquisition, not a demo rule
+    assert "JavaScript package" in request.warning
+    assert "private tinyharness cache" in request.warning
+
+
+async def test_identical_acquisition_can_be_approved_for_the_session(tmp_path):
+    tool = sandboxed_bash(tmp_path)
+    args = tool.parse({"command": "pip install requests"})
+    asked = []
+
+    async def remember(request):
+        asked.append(request)
+        return Decision(True, "ok", "user", remember=True)
+
+    gate = PermissionGate(workspace=Workspace(tmp_path), callback=remember)
+    for _ in range(2):
+        await gate.check(
+            tool,
+            args.model_dump(),
+            None,
+            approval_boundary=tool.approval_boundary(args),
+        )
+    different = tool.parse({"command": "pip install flask"})
+    await gate.check(
+        tool,
+        different.model_dump(),
+        None,
+        approval_boundary=tool.approval_boundary(different),
+    )
+    assert len(asked) == 2
+    assert asked[0].remember_label == "allow this Python package acquisition for this session"
+
+
+async def test_acquisition_and_new_network_host_are_separate_decisions(tmp_path):
+    tool, user = sandboxed_bash(tmp_path), User()
+    args = tool.parse(
+        {
+            "command": "npx -y playwright install chromium-headless-shell",
+            "network_host": "storage.example.com",
+        }
+    )
+    gate = PermissionGate(workspace=Workspace(tmp_path), callback=user)
+    decision = await gate.check(
+        tool,
+        args.model_dump(),
+        None,
+        target_host=tool.target_host(args),
+        approval_boundary=tool.approval_boundary(args),
+    )
+    assert decision.allow and len(user.asked) == 2
+    assert "download and execute new" in user.asked[0].warning
+    assert "connect to storage.example.com" in user.asked[1].warning
+
+
+async def test_allow_hook_cannot_approve_software_acquisition(tmp_path):
+    tool, user = sandboxed_bash(tmp_path), User()
+    args = tool.parse({"command": "pip install requests"})
+    hook = Hook("PreToolUse", type="python", callable=lambda *_: {"decision": "allow"})
+    gate = PermissionGate(
+        workspace=Workspace(tmp_path), callback=user, hooks=HookRunner([hook], cwd=tmp_path)
+    )
+    await gate.check(
+        tool,
+        args.model_dump(),
+        None,
+        approval_boundary=tool.approval_boundary(args),
+    )
+    assert len(user.asked) == 1
+
+
+async def test_plan_and_noninteractive_runs_cannot_acquire_software(tmp_path):
+    tool = sandboxed_bash(tmp_path)
+    args = tool.parse({"command": "pip install requests"})
+    boundary = tool.approval_boundary(args)
+    plan = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.PLAN)
+    unattended = PermissionGate(workspace=Workspace(tmp_path))
+    planned = await plan.check(tool, args.model_dump(), None, approval_boundary=boundary)
+    denied = await unattended.check(tool, args.model_dump(), None, approval_boundary=boundary)
+    assert not planned.allow and planned.reason == "plan mode blocks software acquisition"
+    assert not denied.allow and denied.source == "prompt"
+
+
+async def test_acquisition_without_a_sandbox_uses_one_combined_prompt(tmp_path):
+    tool, user = unsandboxed(tmp_path), User()
+    args = tool.parse({"command": "pip install requests"})
+    gate = PermissionGate(workspace=Workspace(tmp_path), callback=user)
+    decision = await gate.check(
+        tool,
+        args.model_dump(),
+        None,
+        approval_boundary=tool.approval_boundary(args),
+    )
+    assert decision.allow and len(user.asked) == 1
+    assert "download and execute new Python package code" in user.asked[0].warning
+    assert "no sandbox backend is active" in user.asked[0].warning
+    assert user.asked[0].remember_label == ""
+
+
+async def test_configured_network_host_stays_sandboxed_without_asking(tmp_path):
+    tool = BashTool(
+        FakeSandbox(),
+        SandboxPolicy(write_roots=(tmp_path,), allowed_hosts=("assets.example.com",)),
+    )
+    args = tool.parse(
+        {"command": "curl https://assets.example.com/app.js", "network_host": "assets.example.com"}
+    )
+    user = User()
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.DEFAULT, callback=user)
+    decision = await gate.check(tool, args.model_dump(), None, target_host=tool.target_host(args))
+    assert decision.allow and decision.source == "mode" and user.asked == []
+
+
+async def test_new_network_host_asks_once_and_can_be_remembered(tmp_path):
+    tool = sandboxed_bash(tmp_path)
+    args = tool.parse({"command": "curl https://charts.example/data", "network_host": "charts.example"})
+    asked = []
+
+    async def remember(request):
+        asked.append(request)
+        return Decision(True, "ok", "user", remember=True)
+
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.DEFAULT, callback=remember)
+    first = await gate.check(tool, args.model_dump(), None, target_host=tool.target_host(args))
+    second = await gate.check(tool, args.model_dump(), None, target_host=tool.target_host(args))
+    assert first.source == "user" and second.source == "mode" and len(asked) == 1
+    assert gate.rules.check("Bash", "domain:charts.example") == "allow"
+    assert "receive any non-secret project data" in asked[0].warning
+
+
+async def test_new_network_host_approval_never_removes_the_sandbox(tmp_path):
+    tool = sandboxed_bash(tmp_path)
+    args = tool.parse({"command": 'echo "${SANDBOXED:-no}"', "network_host": "charts.example"})
+    user = User()
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.DEFAULT, callback=user)
+    decision = await gate.check(tool, args.model_dump(), None, target_host=tool.target_host(args))
+    assert decision.allow and "keeps the command sandboxed" in user.asked[0].warning
+    assert await run(tool, args.command, tmp_path, network_host=args.network_host) == "yes"
+    assert "charts.example" not in tool.policy.allowed_hosts
+    assert tool.proxy is None  # the one-call proxy was discarded with its temporary authority
+
+
+async def test_destructive_command_cannot_bundle_a_remembered_host_approval(tmp_path):
+    tool, user = sandboxed_bash(tmp_path), User()
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.AUTO, callback=user)
+    args = tool.parse({"command": "rm report.html", "network_host": "charts.example"})
+    await gate.check(tool, args.model_dump(), None, target_host=tool.target_host(args))
+    [request] = user.asked
+    assert request.remember_label == "" and request.reason == "it deletes files"
+
+
 @pytest.mark.parametrize("mode", [PermissionMode.DEFAULT, PermissionMode.AUTO])
 async def test_unsandboxed_commands_always_ask(tmp_path, mode):
     _, [request] = await check(tmp_path, unsandboxed(tmp_path), mode)
-    if mode == PermissionMode.AUTO:
-        assert request.reason == "it runs a shell command without a sandbox"
+    assert "no sandbox backend" in request.warning
 
 
 async def test_plan_mode_blocks_commands(tmp_path):
@@ -157,7 +444,7 @@ async def test_plan_mode_blocks_commands(tmp_path):
     assert not decision.allow
 
 
-# ---- escaping the sandbox (sandbox=false) ----
+# ---- containment is a harness boundary ----
 
 
 class MarkingSandbox(FakeSandbox):
@@ -171,43 +458,15 @@ def sandboxed_bash(tmp_path) -> BashTool:
     return BashTool(MarkingSandbox(), SandboxPolicy(write_roots=(tmp_path,), env={"POLICY_ENV": "set"}))
 
 
-UNSANDBOXED = {"command": "pip install requests", "sandbox": False}
-
-
-@pytest.mark.parametrize("mode", [PermissionMode.ASK, PermissionMode.DEFAULT])
-@pytest.mark.parametrize("flag", [False, "false"])  # a string "false" parses the same way
-async def test_leaving_the_sandbox_always_asks_and_cannot_be_remembered(tmp_path, mode, flag):
+def test_bash_schema_contains_no_containment_control(tmp_path):
+    """Seen live: a routine dependency install was proposed without containment."""
     tool = sandboxed_bash(tmp_path)
-    _, [request] = await check(tmp_path, tool, mode, {**UNSANDBOXED, "sandbox": flag})
-    assert "outside the sandbox" in request.warning
-    assert request.remember_label == ""
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        "cp -R code/ledger reports/run/ledger",
-        "ls -la reports/run",
-        "find reports/run -name 'test_*.py' -type f",
-        "python3 -m pytest -q -p no:cacheprovider",
-    ],
-)
-async def test_auto_mode_silently_keeps_non_destructive_commands_in_the_sandbox(tmp_path, command):
-    tool, user = sandboxed_bash(tmp_path), User()
-    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.AUTO, callback=user)
-    decision = await gate.check(tool, {"command": command, "sandbox": False}, None)
-    assert decision.allow and decision.source == "contained" and user.asked == []
-    assert decision.arguments == {"command": command, "sandbox": True}
-
-
-async def test_auto_mode_still_asks_when_a_command_really_needs_to_leave_the_sandbox(tmp_path):
-    tool, user = sandboxed_bash(tmp_path), User()
-    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.AUTO, callback=user)
-    args = {"command": "curl https://internal.example/api", "sandbox": False}
-    decision = await gate.check(tool, args, None)
-    assert decision.allow and decision.source == "user" and decision.arguments is None
-    [request] = user.asked
-    assert "outside the sandbox" in request.warning
+    assert set(tool.input_schema()["properties"]) == {
+        "command",
+        "timeout",
+        "description",
+        "network_host",
+    }
 
 
 @pytest.mark.parametrize(
@@ -222,33 +481,31 @@ async def test_auto_mode_still_asks_when_a_command_really_needs_to_leave_the_san
         "git clean -fdx",
     ],
 )
-@pytest.mark.parametrize("sandbox", [True, False])
-async def test_auto_mode_asks_before_destructive_shell_commands(tmp_path, command, sandbox):
+async def test_auto_mode_asks_before_destructive_shell_commands(tmp_path, command):
     tool, user = sandboxed_bash(tmp_path), User()
     gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.AUTO, callback=user)
-    decision = await gate.check(tool, {"command": command, "sandbox": sandbox}, None)
+    decision = await gate.check(tool, {"command": command}, None)
     assert decision.allow and decision.source == "user"
     [request] = user.asked
     assert request.reason.startswith("it ") and request.remember_label == ""
 
 
-async def test_leaving_the_sandbox_ignores_allow_rules_but_not_deny_rules(tmp_path):
-    tool, user = sandboxed_bash(tmp_path), User()
+async def test_missing_sandbox_ignores_allow_rules_but_not_deny_rules(tmp_path):
+    tool, user = unsandboxed(tmp_path), User()
     allow = PermissionGate(
         workspace=Workspace(tmp_path), rules=PermissionRules.parse(["Bash"], [], tmp_path), callback=user
     )
-    assert (await allow.check(tool, {"command": "ls"}, None)).source == "rule"
-    await allow.check(tool, UNSANDBOXED, None)
-    assert len(user.asked) == 1
+    await allow.check(tool, {"command": "ls"}, None)
+    assert len(user.asked) == 1 and "no sandbox backend" in user.asked[0].warning
     deny = PermissionGate(workspace=Workspace(tmp_path), rules=PermissionRules.parse([], ["Bash"], tmp_path))
-    assert not (await deny.check(tool, UNSANDBOXED, None)).allow
+    assert not (await deny.check(tool, {"command": "ls"}, None)).allow
 
 
-async def test_yes_dont_ask_again_is_not_applied_when_leaving_the_sandbox(tmp_path):
-    tool = sandboxed_bash(tmp_path)
+async def test_yes_dont_ask_again_is_not_applied_when_no_sandbox_is_active(tmp_path):
+    tool = unsandboxed(tmp_path)
     remember = Decision(True, "ok", "user", remember=True)
     gate = PermissionGate(workspace=Workspace(tmp_path), callback=lambda request: _answer(remember))
-    await gate.check(tool, UNSANDBOXED, None)
+    await gate.check(tool, {"command": "ls"}, None)
     assert gate.rules.check("Bash", None) is None and gate.mode == PermissionMode.DEFAULT
 
 
@@ -256,25 +513,35 @@ async def _answer(decision):
     return decision
 
 
-@pytest.mark.parametrize(("mode", "allowed"), [(PermissionMode.BYPASS, True), (PermissionMode.PLAN, False)])
-async def test_bypass_and_plan_decide_without_asking(tmp_path, mode, allowed):
-    decision, asked = await check(tmp_path, sandboxed_bash(tmp_path), mode, UNSANDBOXED)
-    assert decision.allow == allowed and asked == []
+async def test_bypass_still_asks_when_no_sandbox_is_active(tmp_path):
+    decision, asked = await check(tmp_path, unsandboxed(tmp_path), PermissionMode.BYPASS)
+    assert decision.allow and len(asked) == 1
 
 
-async def test_leaving_the_sandbox_runs_the_command_unwrapped_with_the_users_own_caches(tmp_path):
+async def test_plan_blocks_a_command_without_asking_when_no_sandbox_is_active(tmp_path):
+    decision, asked = await check(tmp_path, unsandboxed(tmp_path), PermissionMode.PLAN)
+    assert not decision.allow and asked == []
+
+
+async def test_an_allow_hook_cannot_cross_the_containment_boundary(tmp_path):
+    hook = Hook("PreToolUse", type="python", callable=lambda *_: {"decision": "allow"})
+    user = User()
+    gate = PermissionGate(
+        workspace=Workspace(tmp_path), callback=user, hooks=HookRunner([hook], cwd=tmp_path)
+    )
+    decision = await gate.check(unsandboxed(tmp_path), {"command": "ls"}, None)
+    assert decision.allow and decision.source == "user" and len(user.asked) == 1
+
+
+async def test_a_command_with_a_backend_always_runs_wrapped(tmp_path):
     tool = sandboxed_bash(tmp_path)
     command = 'echo "${SANDBOXED:-no} ${POLICY_ENV:-unset}"'
     assert await run(tool, command, tmp_path) == "yes set"
-    assert await run(tool, command, tmp_path, sandbox=False) == "no unset"
-    assert tool.describe(tool.parse({"command": "ls", "sandbox": False})) == (
-        "Bash(requested unsandboxed: ls)"
-    )
 
 
-async def test_without_a_sandbox_there_is_nothing_to_escape(tmp_path):
+async def test_without_a_sandbox_every_command_crosses_a_hard_boundary(tmp_path):
     tool = unsandboxed(tmp_path)
-    assert tool.escapes(UNSANDBOXED) is None  # it asks anyway, as every command does
+    assert "no sandbox backend" in tool.escapes({"command": "ls"})
 
 
 # ---- Open ----
@@ -326,9 +593,9 @@ async def test_deny_rules_apply_to_open_by_path_and_site(tmp_path, target, deny)
     assert not decision.allow and decision.source == "rule" and asked == []
 
 
-async def test_bypass_mode_still_opens_without_asking(tmp_path):
+async def test_bypass_mode_still_asks_before_opening_a_host_app(tmp_path):
     decision, asked, _ = await gate_check(tmp_path, PermissionMode.BYPASS, "report.pdf")
-    assert decision.allow and asked == []
+    assert decision.allow and len(asked) == 1
 
 
 @pytest.mark.parametrize("name", ["run.command", "evil.sh", "App.app", "x.webloc", "noext"])

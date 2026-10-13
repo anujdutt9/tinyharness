@@ -5,11 +5,12 @@ Layers are checked in order and the first one with an opinion wins:
     1. tool     bookkeeping tools (TodoWrite) never need permission
     2. path     the target path must resolve
     3. hooks    PreToolUse hooks can allow or deny
-    4. rules    config rules and "don't ask again" answers (deny beats allow)
-       escape   a call that leaves its sandbox (Bash with sandbox=false), or that
-                changes a file that runs code outside it (hooks, plugins, git hooks,
-                settings), skips allow rules. Auto may keep a non-destructive command
-                contained; other escapes always ask and can't be remembered
+    4. boundary contained acquisition capabilities ask before execution; a matching
+                session approval may cover the exact operation
+       rules    config rules and "don't ask again" answers (deny beats allow)
+       escape   a call that crosses a hard boundary, or changes a file that runs code
+                outside it (hooks, plugins, git hooks, settings), skips allow rules and
+                always asks
     5. mode     plan / bypass / reads-are-free / project edits / sandboxed commands /
                 auto (see `_auto`)
     6. scratch  the agent's own scratch directory
@@ -30,12 +31,12 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from tinyharness.permissions.modes import PermissionMode
-from tinyharness.permissions.rules import DOMAIN, PermissionRules, Rule
+from tinyharness.permissions.rules import CAPABILITY, DOMAIN, PermissionRules, Rule
 
 if TYPE_CHECKING:
     from tinyharness.hooks import HookRunner
     from tinyharness.permissions.classifier import AutoModeClassifier
-    from tinyharness.tools.base import Tool
+    from tinyharness.tools.base import ApprovalBoundary, Tool
     from tinyharness.workspace import Scratch, Workspace
 
 
@@ -63,8 +64,6 @@ class Decision:
     remember: bool = False  # allow: apply the request's "don't ask again" scope
     interrupt: bool = False  # deny: skip the rest of this turn's tool calls
     feedback: str = ""  # with interrupt: what to do instead, sent as the user's next message
-    # Auto mode can replace an unnecessary sandbox escape with equivalent contained args.
-    arguments: dict[str, Any] | None = None
     # allow: the resolved path this was judged on. The tool must act on exactly this path,
     # not resolve it again: a symlink swapped in between would point it somewhere else.
     path: Path | None = None
@@ -131,6 +130,7 @@ class PermissionGate:
         target_path: str | None,
         *,
         target_host: str | None = None,
+        approval_boundary: ApprovalBoundary | None = None,
         summary: str = "",
         history_tail: str = "",
     ) -> Decision:
@@ -141,7 +141,7 @@ class PermissionGate:
             path = self.workspace.resolve(target_path)  # the one resolution: see Decision.path
             if path is None:
                 return Decision(False, f"invalid path: {target_path}", "path")
-        decision = await self._decide(tool, args, path, target_host, summary, history_tail)
+        decision = await self._decide(tool, args, path, target_host, approval_boundary, summary, history_tail)
         if decision.allow and path is not None:
             decision.path = path
         return decision
@@ -152,61 +152,91 @@ class PermissionGate:
         args: dict[str, Any],
         path: Path | None,
         target_host: str | None,
+        approval_boundary: ApprovalBoundary | None,
         summary: str,
         history_tail: str,
     ) -> Decision:
         trusted = path is not None and self.workspace.is_trusted(path)
-
-        if self.hooks is not None:
-            verdict = await self.hooks.fire("PreToolUse", {"tool": tool.name, "args": args})
-            if verdict and verdict.get("decision") in ("allow", "deny"):
-                allow = verdict["decision"] == "allow"
-                return Decision(allow, verdict.get("reason", f"hook {verdict['decision']}"), "hook")
 
         site = f"{DOMAIN}{target_host.lower()}" if target_host else None
         sandbox_escape = tool.escapes(args)
         protected_escape = self._protected(tool, path)
         persistent_escape = self._persists_outside(tool)
         escape = sandbox_escape or protected_escape or persistent_escape
+        scoped_escape = escape is not None and tool.rememberable_escape(args)
+        if self.hooks is not None:
+            verdict = await self.hooks.fire("PreToolUse", {"tool": tool.name, "args": args})
+            if verdict and verdict.get("decision") in ("allow", "deny"):
+                allow = verdict["decision"] == "allow"
+                # Hooks may deny anything, but an allow hook cannot weaken containment or
+                # approve code/config that will execute later outside it.
+                if not allow or (escape is None and approval_boundary is None):
+                    return Decision(allow, verdict.get("reason", f"hook {verdict['decision']}"), "hook")
+
+        separate_boundary = approval_boundary is not None and (escape is None or scoped_escape)
+        if separate_boundary:
+            assert approval_boundary is not None
+            capability = CAPABILITY + approval_boundary.key
+            capability_verdict = self.rules.check(tool.name, capability)
+            if capability_verdict == "deny":
+                return Decision(False, "blocked by a deny rule", "rule")
+            remembered = Rule(tool.name, capability) in self.rules.allow
+            if not remembered:
+                if self.mode == PermissionMode.PLAN:
+                    return Decision(False, "plan mode blocks software acquisition", "mode")
+                request = PermissionRequest(
+                    agent=self.agent,
+                    tool=tool.name,
+                    args=args,
+                    summary=summary or tool.name,
+                    path=str(path) if path else None,
+                    remember_label=approval_boundary.remember_label,
+                    warning=approval_boundary.warning + self._outside_warning(),
+                )
+                answer = await self._ask(request)
+                if not answer.allow:
+                    return answer
+                if answer.remember:
+                    self.rules.add_allow(Rule(tool.name, capability))
         match self.rules.check(tool.name, str(path) if path else site):
             case "deny":
                 return Decision(False, "blocked by a deny rule", "rule")
-            case "allow" if escape is None:  # rules were written with the sandbox in place
+            case "allow" if escape is None:
                 return Decision(True, "matches an allow rule", "rule")
+            case "allow" if scoped_escape:
+                # The remembered rule grants only this sandbox-enforced capability. The
+                # command still passes through mode and risk checks below.
+                escape = None
 
         if escape is not None:
-            if self.mode == PermissionMode.BYPASS:
-                return Decision(True, "bypassPermissions mode", "mode")
             if self.mode == PermissionMode.PLAN:
                 return Decision(False, "plan mode blocks mutating tools", "mode")
-            risk = None
-            if (
-                self.mode == PermissionMode.AUTO
-                and sandbox_escape is not None
-                and protected_escape is None
-                and persistent_escape is None
-                and not self.outside()
-            ):
-                risk = self._auto_risk(tool, args, path, trusted)
-                contained = tool.contained_args(args)
-                if risk is None and contained is not None:
-                    return Decision(
-                        True,
-                        "kept the non-destructive command inside the sandbox",
-                        "contained",
-                        arguments=contained,
-                    )
+            risk = self._auto_risk(tool, args, path, trusted) if self.mode == PermissionMode.AUTO else None
             request = PermissionRequest(
                 agent=self.agent,
                 tool=tool.name,
                 args=args,
                 summary=summary or tool.name,
                 path=str(path) if path else None,
-                remember_label="",
+                remember_label=(
+                    self._remember_label(tool, path, trusted, target_host)
+                    if scoped_escape and risk is None
+                    else ""
+                ),
                 reason=risk or "",
-                warning=escape + self._outside_warning(),
+                warning=(
+                    (
+                        f"{approval_boundary.warning}; {escape}"
+                        if approval_boundary is not None and not separate_boundary
+                        else escape
+                    )
+                    + self._outside_warning()
+                ),
             )
-            return await self._ask(request)
+            answer = await self._ask(request)
+            if answer.allow and answer.remember and request.remember_label:
+                self._remember(tool, path, trusted, site)
+            return answer
 
         risk = self._auto_risk(tool, args, path, trusted) if self.mode == PermissionMode.AUTO else None
         if risk is None and (decision := await self._check_mode(tool, args, path, trusted, history_tail)):

@@ -117,11 +117,12 @@ def test_subagents_get_the_projects_instructions(tmp_path):
 
 def test_pages_are_written_the_usual_way(tmp_path):
     """Seen live: told pages "must work offline" with a "bundled Chart.js", Sonnet ran
-    `find /` for the file for two minutes, then tried to download it. Pages use CDN links
-    as everywhere else, and are checked with Playwright outside the sandbox."""
+    `find /` for the file for two minutes, then tried to download it. Artifact validation
+    needs a general contained workflow, not a rule for one browser or one demo."""
     prompt = load_prompt("system", **{v: f"<{v}>" for v in PROMPT_VARIABLES["system"]})
     assert "offline" not in prompt and "bundled" not in prompt and "Screenshot" not in prompt
-    assert "playwright screenshot --proxy-server" in prompt
+    assert "non-interactive tool" in prompt and "private cache and $TMPDIR" in prompt
+    assert "network_host" in prompt and "playwright" not in prompt.lower()
 
 
 def test_the_system_prompt_carries_no_one_demos_instructions():

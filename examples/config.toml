@@ -73,18 +73,18 @@
 # deny = ["Edit(*.lock)", "Read(*/secrets/*)"]
 
 # --- Sandbox ------------------------------------------------------------------
-# Bash commands run in an OS sandbox (macOS: Seatbelt): they write only to the project,
-# scratch and temp dirs, can't read credential files, and reach only the allowed hosts,
-# through a local proxy. Sandboxed commands run without asking in default and auto
-# modes; a command run outside the sandbox (sandbox=false) asks every time. /sandbox
-# shows the limits.
+# Bash commands run in an OS sandbox (native Seatbelt on macOS; optional Anthropic
+# Sandbox Runtime on Linux, Windows and as a fallback): they write only to the project
+# and private scratch/cache dirs, can't read credential files, and reach only allowed
+# hosts. A blocked exact host can be approved without removing containment. /sandbox
+# shows the active backend and limits.
 # [sandbox]
 # enabled = true
 # required = false                    # true: fail startup if no sandbox backend is active
 # allow_write = ["~/code/other-repo"]  # more writable dirs (protected like the project)
 # allow_localhost = false              # true: tests may start and reach local servers
 # allow_hosts = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com",
-#                "*.github.com", "*.githubusercontent.com", "cdn.jsdelivr.net"]  # [] = no network
+#                "*.github.com", "*.githubusercontent.com"]  # [] = no network
 
 # --- Extensions ---------------------------------------------------------------
 # Built-in: web (WebSearch, WebFetch), pdf, open, todo, agents (Agent, Team). Your own go

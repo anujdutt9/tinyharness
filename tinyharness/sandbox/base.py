@@ -10,6 +10,9 @@ class Sandbox(ABC):
     """An OS mechanism that confines a command to a SandboxPolicy."""
 
     name: ClassVar[str]
+    # Native backends use tinyharness's localhost allowlist proxy. Sandbox Runtime
+    # applies the same domain policy itself.
+    manages_network: ClassVar[bool] = False
 
     @classmethod
     @abstractmethod

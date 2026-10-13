@@ -900,6 +900,7 @@ async def _prepare_call(
             raw,
             tool.target_path(args),
             target_host=tool.target_host(args),
+            approval_boundary=tool.approval_boundary(args),
             summary=summary,
             history_tail=_tail(history),
         )
@@ -914,8 +915,6 @@ async def _prepare_call(
     yield PermissionDecision(tool.name, decision.allow, decision.source, decision.reason)
 
     if decision.allow:
-        if decision.arguments is not None:
-            args = tool.parse(decision.arguments)
         # Act on the path that was checked, not a fresh resolution of it (see Decision.path).
         pinned = tool.pin_path(args, decision.path) if decision.path is not None else args
         batch.approved.append(_ApprovedCall(call, tool, pinned, model_call, routing_decision))

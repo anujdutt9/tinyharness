@@ -8,11 +8,10 @@ class PermissionMode(StrEnum):
 
     PLAN       read-only tools only; mutating tools are hidden and blocked
     ASK        reads run freely; every edit and command asks
-    DEFAULT    edits inside the project and sandboxed commands run; anything that leaves
-               the boundary (other folders, sandbox=false, network tools) asks
-    AUTO       as DEFAULT, keeps non-destructive sandbox escapes contained, and an LLM
-               classifier decides the other unclear cases
-    BYPASS     never prompt (secret-path denylist still applies)
+    DEFAULT    edits inside the project and sandboxed commands run; other folders and
+               network tools ask
+    AUTO       as DEFAULT; an LLM classifier decides other unclear cases
+    BYPASS     skip routine prompts inside containment; hard boundaries still ask
     """
 
     PLAN = "plan"

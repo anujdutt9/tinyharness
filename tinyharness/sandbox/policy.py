@@ -1,6 +1,7 @@
 """What a sandboxed command may do, independent of how it's enforced.
 
-    writes   only under `write_roots`, and never under `protected` paths inside them
+    writes   only under project, private scratch/cache and configured `write_roots`, and
+             never under `protected` paths inside them
     reads    anywhere, except the contents of `deny_read` paths (credential-shaped files)
     network  none, except loopback when `allow_localhost`, and the allowlist proxy's port
              when `proxy_port` is set (sandbox/proxy.py decides which hosts)
@@ -30,10 +31,12 @@ PROTECTED_IN_PROJECT = (".tinyharness", ".git/hooks", ".git/config")
 @dataclass(frozen=True)
 class SandboxPolicy:
     write_roots: tuple[Path, ...]
+    project_roots: tuple[Path, ...] = ()  # roots whose credential-shaped files stay unreadable
     protected: tuple[Path, ...] = ()
     deny_read: tuple[str, ...] = ()  # regexes over absolute, symlink-resolved paths
     allow_read: tuple[str, ...] = ()  # exceptions to deny_read (.env.example)
     allow_localhost: bool = False
+    allowed_hosts: tuple[str, ...] = ()  # exact names / *.suffixes the sandbox may reach
     proxy_port: int | None = None  # the allowlist proxy (sandbox/proxy.py), the one way out
     cache_dir: Path | None = None  # package managers cache here instead of the user's own cache
     env: dict[str, str] = field(default_factory=dict)  # extra environment for the command
@@ -47,25 +50,32 @@ class SandboxPolicy:
         cache_dir: Path | None = None,
         extra_write: Iterable[Path] = (),
         allow_localhost: bool = False,
+        allowed_hosts: Iterable[str] = (),
     ) -> SandboxPolicy:
-        """The default policy: write to the project, scratch space and temp dirs; read
-        anything but secrets; no network."""
+        """Build a project policy with private writes and explicit network destinations."""
         projects = [_real(root), *(_real(p) for p in extra_write)]
-        roots = [*projects, *_temp_dirs()]
+        roots = list(projects)
         if scratch is not None:
-            roots.append(_real(scratch))
+            scratch = _real(scratch)
+            roots.append(scratch)
         env: dict[str, str] = {}
         if cache_dir is not None:
             cache_dir = _real(cache_dir)
             cache_dir.mkdir(parents=True, exist_ok=True)
             roots.append(cache_dir)
             env = _cache_env(cache_dir)
+        if scratch is not None:
+            private_tmp = scratch / "tmp"
+            private_tmp.mkdir(parents=True, exist_ok=True)
+            env.update({"TMPDIR": str(private_tmp), "TMP": str(private_tmp), "TEMP": str(private_tmp)})
         return cls(
             write_roots=tuple(dict.fromkeys(roots)),
+            project_roots=tuple(projects),
             protected=tuple(p / rel for p in projects for rel in PROTECTED_IN_PROJECT),
             deny_read=secret_path_regexes(),
             allow_read=(*public_path_regexes(), *_test_fixtures()),
             allow_localhost=allow_localhost,
+            allowed_hosts=tuple(dict.fromkeys(h.lower().rstrip(".") for h in allowed_hosts)),
             cache_dir=cache_dir,
             env=env,
         )
@@ -99,7 +109,18 @@ def _cache_env(cache: Path) -> dict[str, str]:
     the user's real cache would let a command plant code that runs later, unsandboxed."""
     return {
         "XDG_CACHE_HOME": str(cache),
+        "XDG_CONFIG_HOME": str(cache / "config"),
+        "XDG_DATA_HOME": str(cache / "data"),
+        "XDG_STATE_HOME": str(cache / "state"),
         "UV_CACHE_DIR": str(cache / "uv"),
         "PIP_CACHE_DIR": str(cache / "pip"),
         "npm_config_cache": str(cache / "npm"),
+        "npm_config_store_dir": str(cache / "pnpm"),
+        "YARN_CACHE_FOLDER": str(cache / "yarn"),
+        "COREPACK_HOME": str(cache / "corepack"),
+        "PLAYWRIGHT_BROWSERS_PATH": str(cache / "playwright"),
+        "PUPPETEER_CACHE_DIR": str(cache / "puppeteer"),
+        "CYPRESS_CACHE_FOLDER": str(cache / "cypress"),
+        "HF_HOME": str(cache / "huggingface"),
+        "TORCH_HOME": str(cache / "torch"),
     }

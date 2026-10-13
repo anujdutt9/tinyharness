@@ -2,8 +2,8 @@
 
 This is the one sanctioned way out of the Bash sandbox, which blocks `open` and
 `xdg-open` because `open evil.command` would run a script outside it. So Open only
-takes documents (not programs), and it asks every time: no allow rule, mode or "don't
-ask again" approves it (only bypassPermissions or a hook). A page opened in a browser
+takes documents (not programs), and it asks every time: no allow rule, mode, hook or
+"don't ask again" approves it. A page opened in a browser
 can reach the network, which the sandbox can't, so a model that wrote one could send
 out what it has read. Deny rules still apply, to the file's path or the URL's site.
 """

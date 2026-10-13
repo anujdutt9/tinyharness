@@ -10,6 +10,7 @@ Flags tell the harness how to treat it:
   * `read_only`        — no side effects: allowed in plan mode, safe to run in parallel
   * `needs_permission` — False for bookkeeping tools (e.g. TodoWrite) that skip the gate
   * `network`          — reaches other machines (WebFetch): asks per site, never free
+  * `approval_boundary`— a contained capability that still needs an explicit decision
 """
 
 from __future__ import annotations
@@ -83,6 +84,15 @@ class ToolInput(BaseModel):
 
 
 InputT = TypeVar("InputT", bound=ToolInput)
+
+
+@dataclass(frozen=True)
+class ApprovalBoundary:
+    """A contained capability whose first use needs an explicit decision."""
+
+    key: str
+    warning: str
+    remember_label: str
 
 
 @dataclass
@@ -196,6 +206,10 @@ class Tool(ABC, Generic[InputT]):
         """The site a network tool contacts, used for permission decisions."""
         return None
 
+    def approval_boundary(self, args: InputT) -> ApprovalBoundary | None:
+        """A contained capability that still needs explicit user approval, if any."""
+        return None
+
     def outside_source(self, args: InputT) -> str | None:
         """Where this call's result comes from, if it's another machine (and so could carry
         instructions the user didn't write); None for local results."""
@@ -215,16 +229,17 @@ class Tool(ABC, Generic[InputT]):
         return False
 
     def escapes(self, args: dict[str, Any]) -> str | None:
-        """Why this call runs outside the sandbox it would normally run in, or None.
-        Such calls normally ask: no rule or classifier approves them, and "don't ask
-        again" isn't offered. Auto may replace them with `contained_args`; bypass and
-        hooks may approve them directly."""
+        """Why this call crosses a hard boundary, or None. Such calls ask even in bypass
+        mode: suppressing routine prompts never changes containment."""
         return None
 
-    def contained_args(self, args: dict[str, Any]) -> dict[str, Any] | None:
-        """Equivalent arguments that keep an escape inside the sandbox, or None.
-        Auto mode uses this instead of asking when the operation is non-destructive."""
-        return None
+    def rememberable_escape(self, args: dict[str, Any]) -> bool:
+        """Whether a narrow boundary expansion may be remembered for its target.
+
+        Most escapes remove containment and must be approved every time. A capability
+        that remains sandbox-enforced, such as one exact network destination, can opt in.
+        """
+        return False
 
     def is_read_only(self, args: InputT) -> bool:
         """Whether this call has no side effects (safe to run alongside others)."""

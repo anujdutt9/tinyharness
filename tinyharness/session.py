@@ -69,7 +69,7 @@ from tinyharness.permissions.classifier import AutoModeClassifier
 from tinyharness.permissions.rules import DOMAIN, Rule
 from tinyharness.plugins import load_plugins
 from tinyharness.prompts import load_prompt
-from tinyharness.sandbox import Sandbox, SandboxPolicy, detect_sandbox
+from tinyharness.sandbox import Sandbox, SandboxPolicy, detect_sandbox, setup_hint
 from tinyharness.sandbox.proxy import AllowlistProxy
 from tinyharness.skills import Skill, SkillRegistry, build_skill_prompt, load_skills, skills_section
 from tinyharness.subagents import AgentSpec, load_agents
@@ -310,7 +310,7 @@ class Session:
             self.scratch.cleanup()
             raise SandboxRequiredError(
                 "sandbox.required is true, but no supported sandbox backend is available; "
-                "install the platform sandbox or set sandbox.required = false"
+                f"{setup_hint()}, or set sandbox.required = false"
             )
         self.sandbox_policy = SandboxPolicy.for_project(
             root,
@@ -318,9 +318,14 @@ class Session:
             cache_dir=home_dir() / "sandbox-cache",
             extra_write=self.config.sandbox.allow_write,
             allow_localhost=self.config.sandbox.allow_localhost,
+            allowed_hosts=self.config.sandbox.allow_hosts,
         )
         hosts = self.config.sandbox.allow_hosts
-        self.proxy = AllowlistProxy(tuple(hosts)) if self.sandbox is not None and hosts else None
+        self.proxy = (
+            AllowlistProxy(tuple(hosts))
+            if self.sandbox is not None and not getattr(self.sandbox, "manages_network", False) and hosts
+            else None
+        )
         self.extensions: list[Extension] = []
         self.extension_errors: list[LoadError] = []
         enabled = list(self.config.extensions.enabled)
@@ -668,10 +673,14 @@ class Session:
         if ext.granted and ext.writes:
             policy = replace(policy, write_roots=(*policy.write_roots, *ext.writes))
         if ext.granted and ext.hosts and self.sandbox is not None:
-            if ext.name not in self._extension_proxies:
-                base = tuple(self.config.sandbox.allow_hosts)
-                self._extension_proxies[ext.name] = AllowlistProxy((*base, *ext.hosts))
-            proxy = self._extension_proxies[ext.name]
+            policy = replace(
+                policy,
+                allowed_hosts=tuple(dict.fromkeys((*policy.allowed_hosts, *ext.hosts))),
+            )
+            if not getattr(self.sandbox, "manages_network", False):
+                if ext.name not in self._extension_proxies:
+                    self._extension_proxies[ext.name] = AllowlistProxy(policy.allowed_hosts)
+                proxy = self._extension_proxies[ext.name]
         bash = BashTool(self.sandbox, policy, proxy=proxy)
         run = await bash.execute(BashInput(command=command, timeout=max(1, min(600, int(timeout)))), self.ctx)
         return RunResult(run.code, run.output)

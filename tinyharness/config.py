@@ -70,7 +70,7 @@ class SandboxSettings(BaseModel):
     allow_localhost: bool = False  # let commands use loopback (tests that start a local server)
     # Hosts commands may reach from inside the sandbox, through a local proxy: package
     # registries, GitHub and script CDNs by default. `*.example.com` covers subdomains.
-    # [] turns the network off entirely. Anything else needs sandbox=false (it asks).
+    # [] turns the network off entirely. Add other exact destinations deliberately.
     allow_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))
 
     @model_validator(mode="after")

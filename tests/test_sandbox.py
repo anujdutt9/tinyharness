@@ -1,12 +1,13 @@
-"""The OS sandbox: the policy, the Seatbelt profile, and (on macOS) that it really confines commands."""
+"""The OS sandbox: shared policy, platform backends, and real macOS confinement."""
 
+import json
 import sys
 from pathlib import Path
 
 import pytest
 
 from conftest import call, make_ctx
-from tinyharness.sandbox import SandboxPolicy, Seatbelt
+from tinyharness.sandbox import BACKENDS, SandboxPolicy, SandboxRuntime, Seatbelt, setup_hint
 from tinyharness.sandbox.seatbelt import profile
 from tinyharness.security import public_path_regexes, secret_path_regexes
 from tinyharness.tools.bash import BashTool
@@ -14,7 +15,18 @@ from tinyharness.tools.bash import BashTool
 # ---- the policy ----
 
 
-def test_project_policy_writes_to_project_scratch_temp_and_cache(tmp_path):
+def test_native_seatbelt_is_preferred_when_macos_has_both_backends():
+    assert (Seatbelt, SandboxRuntime) == BACKENDS
+
+
+def test_missing_sandbox_has_platform_specific_setup_help(monkeypatch):
+    monkeypatch.setattr("tinyharness.sandbox.sys.platform", "linux")
+    assert "bubblewrap" in setup_hint() and "sandbox-runtime" in setup_hint()
+    monkeypatch.setattr("tinyharness.sandbox.sys.platform", "win32")
+    assert "Git Bash" in setup_hint() and "windows-install" in setup_hint()
+
+
+def test_project_policy_uses_private_scratch_temp_and_tool_caches(tmp_path):
     root = tmp_path / "proj"
     scratch = root / ".tinyharness" / "tmp" / "s1"
     cache = tmp_path / "cache"
@@ -22,10 +34,64 @@ def test_project_policy_writes_to_project_scratch_temp_and_cache(tmp_path):
     real = root.resolve()
     assert real in policy.write_roots and scratch.resolve() in policy.write_roots
     assert cache.resolve() in policy.write_roots and cache.is_dir()
+    assert Path("/tmp").resolve() not in policy.write_roots
     assert set(policy.protected) == {real / ".tinyharness", real / ".git/hooks", real / ".git/config"}
     assert policy.reopened() == (scratch.resolve(),)  # scratch sits under the protected .tinyharness
     assert policy.env["UV_CACHE_DIR"] == str(cache.resolve() / "uv")
+    assert policy.env["PLAYWRIGHT_BROWSERS_PATH"] == str(cache.resolve() / "playwright")
+    assert policy.env["HF_HOME"] == str(cache.resolve() / "huggingface")
+    assert policy.env["TMPDIR"] == str(scratch.resolve() / "tmp")
+    assert (scratch / "tmp").is_dir()
     assert not policy.allow_localhost
+
+
+def test_sandbox_runtime_translates_the_shared_policy(tmp_path, monkeypatch):
+    executable = tmp_path / "srt"
+    executable.touch()
+    monkeypatch.setattr("tinyharness.sandbox.srt.shutil.which", lambda name: str(executable))
+    root = tmp_path / "project"
+    protected = root / ".git/hooks"
+    policy = SandboxPolicy(
+        write_roots=(root,),
+        project_roots=(root,),
+        protected=(protected,),
+        allowed_hosts=("assets.example.com",),
+        allow_localhost=True,
+    )
+    backend = SandboxRuntime(tmp_path / "settings")
+    wrapped = backend.wrap(["python", "build.py"], policy)
+    settings = json.loads(Path(wrapped[2]).read_text())
+
+    assert wrapped[:2] == [str(executable), "--settings"] and wrapped[3:5] == ["--", "python"]
+    assert settings["network"]["allowedDomains"] == ["assets.example.com"]
+    assert settings["network"]["allowLocalBinding"] is True
+    assert settings["filesystem"]["allowWrite"] == [str(root)]
+    assert settings["filesystem"]["denyWrite"] == [str(protected)]
+    assert any(path.endswith("/.ssh") for path in settings["filesystem"]["denyRead"])
+    assert f"{root}/**/.env" in settings["filesystem"]["denyRead"]
+    assert f"{root}/**/.env.example" in settings["filesystem"]["allowRead"]
+    assert (Path(wrapped[2]).stat().st_mode & 0o777) == 0o600
+
+
+def test_sandbox_runtime_requires_a_posix_shell_on_windows(monkeypatch):
+    monkeypatch.setattr("tinyharness.sandbox.srt.sys.platform", "win32")
+    monkeypatch.setattr(
+        "tinyharness.sandbox.srt.shutil.which",
+        lambda name: "C:/npm/srt.cmd" if name == "srt" else None,
+    )
+    assert not SandboxRuntime.available()
+
+
+def test_sandbox_runtime_requires_its_linux_helpers(monkeypatch):
+    monkeypatch.setattr("tinyharness.sandbox.srt.sys.platform", "linux")
+    present = {"srt", "bwrap", "socat", "rg"}
+    monkeypatch.setattr(
+        "tinyharness.sandbox.srt.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in present else None,
+    )
+    assert SandboxRuntime.available()
+    present.remove("socat")
+    assert not SandboxRuntime.available()
 
 
 def test_extra_write_dirs_are_protected_like_the_project(tmp_path):

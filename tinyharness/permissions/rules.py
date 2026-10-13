@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Literal
 
 DOMAIN = "domain:"  # prefix of a site pattern, as opposed to a path
+CAPABILITY = "capability:"  # a narrow, session-only tool capability
 
 _RULE = re.compile(r"^\s*([\w*-]+)\s*(?:\((.*)\))?\s*$")
 
