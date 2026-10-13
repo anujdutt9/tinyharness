@@ -36,4 +36,10 @@ def setup(th: Extension) -> None:
                 f"{TITLES[scope].capitalize()} ({size(notes)} of {LIMITS[scope]} characters), "
                 f"{pretty_path(path)}:\n{render(notes)}"
             )
-        ctx.say("\n\n".join(parts) + "\n\nEdit the files to change them; new sessions read them.")
+        ctx.say(
+            "\n\n".join(parts)
+            + "\n\nUser memory follows you across projects; project memory applies only here. "
+            "Standing global instructions belong in ~/.tinyharness/AGENTS.md, and shared "
+            "project rules belong in AGENTS.md. Edit the memory files to change their notes; "
+            "new sessions read them."
+        )

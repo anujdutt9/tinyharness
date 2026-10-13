@@ -95,6 +95,6 @@ The same resolved compaction role is used by the lead and subagents.
 
 | Location | Contents |
 |---|---|
-| `~/.tinyharness/` | your skills, agents, plugins, `hooks.toml`, `AGENT.md`; `projects/<project>/` holds each project's conversation logs and scratch files |
+| `~/.tinyharness/` | your skills, agents, plugins, `hooks.toml`, `AGENTS.md`; `projects/<project>/` holds each project's conversation logs and scratch files |
 | `<project>/.tinyharness/` | project skills, agents, plugins and hooks: only what you put there, to commit and share. tinyharness never writes into your project |
-| `<project>/AGENT.md` (or `CLAUDE.md`) | project instructions added to the system prompt |
+| `<project>/AGENTS.md` | project instructions added to the system prompt |

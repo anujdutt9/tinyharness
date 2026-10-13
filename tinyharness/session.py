@@ -32,7 +32,7 @@ from tinyharness.agent import world
 from tinyharness.agent.compaction import SUMMARY_MARK, Compactor
 from tinyharness.agent.history import History, Image, Message
 from tinyharness.agent.loop import LoopDeps, record_usage, run_agent_loop, summary_notes
-from tinyharness.agent.prompts import build_system_prompt, load_agent_md
+from tinyharness.agent.prompts import build_system_prompt, load_instructions
 from tinyharness.agent.sessionlog import (
     FileSessionStore,
     Replayed,
@@ -408,10 +408,10 @@ class Session:
             reported=saved.reported,
             git_before=saved.world.get("git"),
             instructions_before=saved.world.get("agent_md"),
-            instructions_now=world.text_hash(load_agent_md(self.workspace.root)),
+            instructions_now=world.text_hash(load_instructions(self.workspace.root)),
         )
         report.unfinished = unfinished
-        # A fresh system prompt: the model, scratch dir or AGENT.md may have changed.
+        # A fresh system prompt: the model, scratch dir or AGENTS.md may have changed.
         first = history.messages[0]
         if first.role == "system" and not (first.content or "").startswith(SUMMARY_MARK):
             history.messages[0] = Message(role="system", content=self._system_prompt())
@@ -436,7 +436,7 @@ class Session:
     def _log_world(self) -> None:
         root = self.workspace.root
         self.transcript.write(
-            "world", git=world.git_state(root), agent_md=world.text_hash(load_agent_md(root))
+            "world", git=world.git_state(root), agent_md=world.text_hash(load_instructions(root))
         )
 
     # ------------------------------------------------------------------ setup

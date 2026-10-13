@@ -1,4 +1,4 @@
-"""The system prompt: prompts/system.md + user-provided AGENT.md context."""
+"""The system prompt: prompts/system.md plus user-provided AGENTS.md context."""
 
 from __future__ import annotations
 
@@ -11,26 +11,19 @@ from pathlib import Path
 from tinyharness.paths import home_dir, project_dir
 from tinyharness.prompts import load_prompt
 
-# Instruction files in each folder, in the order they're read; later ones take precedence.
-INSTRUCTION_FILES = (
-    "AGENTS.md",  # shared repository instructions
-    "AGENT.md",
-    "CLAUDE.md",  # supported alternate repository-instruction filename
-)
 
-
-def agent_md_sources(working_dir: Path) -> list[Path]:
+def instruction_sources(working_dir: Path) -> list[Path]:
     """Instruction files, lowest precedence first: managed, user, then each folder from the
     repository's root down to the working directory (a subfolder's rules refine the root's,
     so launching in `src/` still gets the repo's AGENTS.md), then the
     private per-project ones. Outside a git repository only the working directory counts,
     so a stray AGENTS.md in a parent folder (your home) doesn't apply to everything."""
     return [
-        Path("/etc/tinyharness/AGENT.md"),
-        home_dir() / "AGENT.md",
-        *(folder / name for folder in _repo_folders(working_dir) for name in INSTRUCTION_FILES),
-        project_dir(working_dir) / "AGENT.md",
-        working_dir / "AGENT.local.md",
+        Path("/etc/tinyharness/AGENTS.md"),
+        home_dir() / "AGENTS.md",
+        *(folder / "AGENTS.md" for folder in _repo_folders(working_dir)),
+        project_dir(working_dir) / "AGENTS.md",
+        working_dir / "AGENTS.local.md",
     ]
 
 
@@ -50,10 +43,10 @@ def _repo_folders(working_dir: Path) -> list[Path]:
     return [here]
 
 
-def load_agent_md(working_dir: Path) -> str:
+def load_instructions(working_dir: Path) -> str:
     chunks: list[str] = []
     seen: set[Path] = set()
-    for path in agent_md_sources(working_dir):
+    for path in instruction_sources(working_dir):
         try:
             resolved = path.resolve()
             if resolved in seen or not path.is_file():
@@ -100,9 +93,7 @@ def _git(cwd: Path, *args: str) -> str | None:
     return done.stdout.strip() if done.returncode == 0 else None
 
 
-NO_INSTRUCTIONS = (
-    "This project has no instructions file (AGENTS.md, AGENT.md or CLAUDE.md); don't look for one."
-)
+NO_INSTRUCTIONS = "This project has no instructions file (AGENTS.md); don't look for one."
 
 
 def build_system_prompt(
@@ -118,8 +109,8 @@ def build_system_prompt(
     # the date) last, so a new session reuses the provider's cached prefix of the old one.
     parts = [load_prompt("system", model_name=model_name, model_id=model_id, provider=provider)]
     parts.append(environment(working_dir))
-    if context := load_agent_md(working_dir):
-        parts.append(f"# User context (AGENT.md)\n\n{context}")
+    if context := load_instructions(working_dir):
+        parts.append(f"# Instructions (AGENTS.md)\n\n{context}")
     else:  # say so, or the model goes looking for one
         parts.append(NO_INSTRUCTIONS)
     if extra:

@@ -10,7 +10,7 @@ from tinyharness import Session, SessionOptions
 from tinyharness.agent.history import Message, ToolCall
 from tinyharness.agent.sessionlog import replay
 from tinyharness.agent.world import STALE_MARK, UNFINISHED
-from tinyharness.paths import project_dir, state_dir
+from tinyharness.paths import move_legacy_state, project_dir, state_dir
 from tinyharness.session import list_sessions
 
 
@@ -249,11 +249,11 @@ async def test_a_branch_switch_is_reported(repo):
 
 
 async def test_changed_instructions_are_reported_and_used(work):
-    (work / "AGENT.md").write_text("Use tabs.")
+    (work / "AGENTS.md").write_text("Use tabs.")
     first = Session(options(work))
     await turn(first, "hi", "hello")
     first.close()
-    (work / "AGENT.md").write_text("Use spaces.")
+    (work / "AGENTS.md").write_text("Use spaces.")
     resumed = Session(options(work, resume="latest"))
     try:
         assert resumed.resume_report.instructions_changed
@@ -336,6 +336,28 @@ def test_your_project_config_stays_put(work):
 def test_long_project_paths_get_short_unique_names(tmp_path):
     a, b = tmp_path / ("x" * 150) / "one", tmp_path / ("x" * 150) / "two"
     assert state_dir(a) != state_dir(b) and len(state_dir(a).name) <= 111
+
+
+def test_project_state_directory_has_a_readable_collision_resistant_name(tmp_path):
+    first, second = tmp_path / "one" / "app", tmp_path / "two" / "app"
+    assert state_dir(first).name.startswith("app-")
+    assert len(state_dir(first).name.removeprefix("app-")) == 16
+    assert state_dir(first) != state_dir(second)
+    assert str(tmp_path).replace("/", "-") not in state_dir(first).name
+
+
+def test_path_named_project_state_moves_to_the_readable_name(tmp_path):
+    from tinyharness.paths import _path_named_state_dir
+
+    work = tmp_path / "my app"
+    old = _path_named_state_dir(work)
+    (old / "sessions").mkdir(parents=True)
+    (old / "sessions" / "saved.jsonl").write_text("saved\n")
+
+    move_legacy_state(work)
+
+    assert not old.exists()
+    assert (state_dir(work) / "sessions" / "saved.jsonl").read_text() == "saved\n"
 
 
 # ---- /clear starts a new conversation ----

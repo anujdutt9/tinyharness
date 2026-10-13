@@ -38,8 +38,8 @@ def test_json_braces_are_left_alone():
     assert '{"decision": "allow"' in load_prompt("classifier")
 
 
-def test_system_prompt_includes_agent_md(tmp_path):
-    (tmp_path / "AGENT.md").write_text("Always use tabs.")
+def test_system_prompt_includes_agents_md(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("Always use tabs.")
     prompt = build_system_prompt(
         tmp_path,
         tmp_path / "scratch",
@@ -79,8 +79,7 @@ def _prompt(work):
     return build_system_prompt(work, work / "scratch", model_name="M", model_id="m", provider="P")
 
 
-def test_agents_md_is_read_like_agent_md(tmp_path):
-    """Repositories can use the plural AGENTS.md instruction filename."""
+def test_agents_md_is_read(tmp_path):
     (tmp_path / "AGENTS.md").write_text("Run make check before finishing.")
     assert "Run make check before finishing." in _prompt(tmp_path)
 
@@ -88,7 +87,7 @@ def test_agents_md_is_read_like_agent_md(tmp_path):
 def test_the_model_is_told_when_there_is_no_instructions_file(tmp_path):
     """Otherwise it goes looking (a failed Read of AGENTS.md)."""
     assert "no instructions file" in _prompt(tmp_path)
-    (tmp_path / "AGENT.md").write_text("Use tabs.")
+    (tmp_path / "AGENTS.md").write_text("Use tabs.")
     assert "no instructions file" not in _prompt(tmp_path)
 
 
@@ -136,7 +135,7 @@ def test_the_system_prompt_carries_no_one_demos_instructions():
 
 def test_what_changes_per_session_comes_last(tmp_path):
     """The scratch folder is new in every session; placed mid-prompt it made everything
-    after it (AGENT.md, skills, extension sections) miss the provider's cache each time."""
+    after it (AGENTS.md, skills, extension sections) miss the provider's cache each time."""
     a = build_system_prompt(tmp_path, tmp_path / "s1", model_name="M", model_id="m", provider="P", extra="X")
     b = build_system_prompt(tmp_path, tmp_path / "s2", model_name="M", model_id="m", provider="P", extra="X")
     shared = a[: a.index("# This session")]

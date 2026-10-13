@@ -39,7 +39,7 @@ def test_projects_without_code_never_ask(work):
     (work / ".tinyharness" / "agents").mkdir()
     (work / ".tinyharness" / "agents" / "a.md").write_text("---\nname: a\ndescription: d\n---\nhi")
     (work / ".tinyharness" / "skills").mkdir()
-    (work / "AGENT.md").write_text("Be nice.")
+    (work / "AGENTS.md").write_text("Be nice.")
     code = scan(work)
     assert not code.needs_trust and TrustStore().trusts(code)
 

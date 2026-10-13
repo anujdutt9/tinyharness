@@ -10,7 +10,7 @@ exactly:
            the full list of message ids, in order
     todos  the todo list changed
     model  the session switched model ("provider:model")
-    world  git HEAD and the AGENT.md hash, at the end of each turn
+    world  git HEAD and the AGENTS.md hash, at the end of each turn
     files  file changes a resume found and reported, so the next resume doesn't again
 
 Replaying them in order gives back the history as it was at the last record. The log

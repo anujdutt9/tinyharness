@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from tinyharness.agent.compaction import Compactor
 from tinyharness.agent.history import History, Message
 from tinyharness.agent.loop import STEP_LIMIT_RESULT, LoopDeps, run_agent_loop
-from tinyharness.agent.prompts import environment, load_agent_md
+from tinyharness.agent.prompts import environment, load_instructions
 from tinyharness.agent.transcript import Transcript
 from tinyharness.events import (
     AssistantText,
@@ -264,7 +264,7 @@ def subagent_system_prompt(spec: AgentSpec, ctx: ToolContext) -> str:
     if ctx.skills_prompt:  # subagents can load skills too: by reading SKILL.md
         parts.append(ctx.skills_prompt)
     # The project's own rules (how to run tests, which package manager) bind subagents too.
-    if instructions := load_agent_md(ctx.workspace.root):
+    if instructions := load_instructions(ctx.workspace.root):
         parts.append(f"# Project instructions (AGENTS.md)\n\n{instructions}")
     return "\n\n".join(parts)
 

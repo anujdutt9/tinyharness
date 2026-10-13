@@ -1,7 +1,7 @@
 """Folder trust: a project's own code runs only once you've said you trust it.
 
 Most of what a project can put in <project>/.tinyharness/ is text for the model
-(skills, agents, AGENT.md) and is always loaded. Two things run code on your machine,
+(skills, agents, AGENTS.md) and is always loaded. Two things run code on your machine,
 outside the sandbox, and are loaded only from a trusted project:
 
     hooks.toml   shell commands run at lifecycle events (SessionStart fires at launch)

@@ -38,6 +38,13 @@ First release.
   feature documentation and `agent/compaction.py` rationale.
 
 ### Fixed
+- Memory writes now require an explicit `user` or `project` scope, and the tool and
+  `/memory` explain when a durable fact belongs in memory versus a user `AGENTS.md` or
+  shared project `AGENTS.md`.
+- Per-project memory, session logs, sidechains and scratch files now live under a readable,
+  collision-resistant directory such as `projects/tinyharness-8f31c2a4d6e709ab/`, rather
+  than a directory containing the machine's full absolute path. Existing state is migrated
+  automatically on first use.
 - The distribution smoke test now checks the source version's wheel instead of silently
   selecting a stale, higher-version artifact left in `dist/`.
 - Auto mode no longer turns a small model's unnecessary `sandbox=false` on routine
@@ -154,7 +161,7 @@ First release.
 - The auto-mode classifier sees only your messages and the agent's tool calls: no tool
   output, no agent text, no teammates' messages. A page or file saying "the user
   approved this" can no longer argue for an action.
-- `AGENTS.md` is read as project instructions too, next to `AGENT.md` and `CLAUDE.md`.
+- `AGENTS.md` is the single instruction filename at the system, user, project and local levels.
   When a project has none, the model is told,
   so it doesn't go looking. Reading a file that isn't there shows a quiet `not found`, not
   a red error.
@@ -333,7 +340,7 @@ First release.
   (`th.run_agent`), with their briefing guidance as its prompt section.
 - The core system prompt is about 670 tokens (was about 2,300): how to work, safety, pages,
   harness notes and answering. With no extensions on, the whole prefix is about 2.9k tokens
-  before your AGENT.md and skills (was about 7k).
+  before your AGENTS.md and skills (was about 7k).
 
 ### Reports and pages
 - Pages are written as models write them elsewhere, CDN links included: no offline
@@ -345,7 +352,7 @@ First release.
   (teammates) were dropped. They pushed models into costly teams and double work.
 
 ### Project instructions
-- AGENTS.md (and AGENT.md, CLAUDE.md) are read from the repository's root down to the
+- AGENTS.md files are read from the repository's root down to the
   folder tinyharness runs in: launching in `src/` still gets the repo's
   rules, and a subfolder's file refines them. Outside a git repository only the working
   directory counts, so a file in a parent folder doesn't apply everywhere.
@@ -414,7 +421,7 @@ regression test.
   `SessionOptions(resume=...)`; `list_sessions()` lists them. The session log lives
   under `.tinyharness/`, which sandboxed commands can't write to.
 - On resume the harness checks what changed while the session was away: files the
-  agent read (content hashes), git HEAD or branch, and AGENT.md. Old contents of
+  agent read (content hashes), git HEAD or branch, and AGENTS.md. Old contents of
   changed files are replaced by a stub, the agent must read them again before editing,
   the model is told once what changed, and tool calls with no recorded result are
   flagged as maybe run. The system prompt is rebuilt; the conversation's model is kept

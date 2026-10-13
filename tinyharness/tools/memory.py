@@ -78,8 +78,10 @@ def render(notes: list[str]) -> str:
 class MemoryInput(ToolInput):
     action: Literal["add", "replace", "remove"]
     scope: Scope = Field(
-        default="project",
-        description="'user': about the user, for every project. 'project': about this project",
+        description=(
+            "Required destination: 'user' for durable facts about the user across projects; "
+            "'project' for durable context that only applies to this project"
+        ),
     )
     note: str = Field(default="", description="The note to add, or the new text for 'replace'")
     old: str = Field(
@@ -99,9 +101,11 @@ class MemoryTool(Tool[MemoryInput]):
     description = (
         "Add, replace or remove a note in your memory. Memory is loaded into the system prompt "
         "of every later session (not this one), so a note is something a future session needs "
-        "to know. There are two memories: 'user' for facts about the user that hold in any "
-        "project (their role, what they know, how they want you to work), and 'project' for "
-        "this project.\n\n"
+        "to know. Choose the scope explicitly:\n"
+        "- 'user': durable facts about the user across projects, such as their name, role, "
+        "expertise or communication preferences\n"
+        "- 'project': durable decisions or external context specific to this project that "
+        "cannot be learned from its files or Git history\n\n"
         "Save a note when:\n"
         "- the user asks you to remember something (or to forget it: remove the note)\n"
         "- the user corrects how you work, or confirms an approach that wasn't obvious: save "
@@ -109,9 +113,10 @@ class MemoryTool(Tool[MemoryInput]):
         "- you learn something about the project that later sessions need and can't get from "
         "the code, git history or AGENTS.md: a decision and why, a deadline, where something "
         "outside the repository lives\n\n"
-        "Don't save what the code, git or AGENTS.md already say, progress on the current task, "
-        "anything only true for now, or secrets. A rule the whole team should follow belongs in "
-        "AGENTS.md: suggest it there instead.\n\n"
+        "Don't save what the code or Git already says, progress on the current task, anything "
+        "only true for now, or secrets. Explicit standing instructions for every project belong "
+        "in ~/.tinyharness/AGENTS.md; a rule the project team should share belongs in its "
+        "AGENTS.md. Suggest the appropriate file instead.\n\n"
         "A note is one fact, in one short line that makes sense on its own (two facts are two "
         "calls, each in its own scope); write dates as dates "
         "(2026-10-01, not 'yesterday'). Before adding, look at your memory in the system "
