@@ -59,7 +59,7 @@ dev = [
 ]
 
 [tool.hatch.version]
-path = "tinyharness/__init__.py"  # the single place the version lives
+path = "tinyharness/version.py"  # the single place the version lives
 
 [tool.hatch.build.targets.wheel]
 packages = ["tinyharness"]

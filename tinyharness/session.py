@@ -14,14 +14,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
+import inspect
 import json
 import logging
 import re
 import shutil
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
-from dataclasses import dataclass, field, replace
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,7 @@ from tinyharness.agent.sessionlog import (
     SessionStore,
     replay,
 )
+from tinyharness.agent.transcript import trace_id
 from tinyharness.config import Config, dotenv_paths, load_auth, load_config, load_dotenv_files
 from tinyharness.events import Compacted, Done, Event, SkillLoaded, ToolResult, ToolUse
 from tinyharness.ext import Command as ExtCommand
@@ -122,6 +125,34 @@ class MissingAPIKeyError(RuntimeError):
         )
 
 
+class SandboxRequiredError(RuntimeError):
+    """Raised before agent work when required containment is unavailable."""
+
+
+@dataclass(frozen=True)
+class EvaluationContext:
+    """Read-only snapshot passed to a post-turn evaluator."""
+
+    session_id: str
+    turn_id: str
+    prompt: str
+    reason: str
+    working_dir: Path
+    messages: tuple[Message, ...]
+    duration_ms: float
+
+
+Evaluator = Callable[[EvaluationContext], Any | Awaitable[Any]]
+
+
+async def _invoke_evaluator(evaluator: Evaluator, context: EvaluationContext) -> Any:
+    """Run synchronous observers off the event loop; await asynchronous ones normally."""
+    if inspect.iscoroutinefunction(evaluator):
+        return await evaluator(context)
+    result = await asyncio.to_thread(evaluator, context)
+    return await result if inspect.isawaitable(result) else result
+
+
 @dataclass
 class SessionOptions:
     """Per-session overrides on top of the loaded Config. `None` means "use the config"."""
@@ -144,6 +175,8 @@ class SessionOptions:
     permission_callback: PermissionCallback | None = None
     on_event: Callable[[Event], None] | None = None  # progress of subagents/teammates as it happens
     hooks: list[Hook] = field(default_factory=list)
+    evaluators: list[Evaluator] = field(default_factory=list)
+    evaluator_timeout: float = 30.0
     tools: list[Tool[Any]] = field(default_factory=list)  # your own tools; a built-in's name replaces it
     # Extensions given in code: modules with setup(th), or setup functions (tinyharness/ext.py).
     extensions: list[Any] = field(default_factory=list)
@@ -182,6 +215,8 @@ class SessionOptions:
 class Session:
     def __init__(self, options: SessionOptions | None = None, config: Config | None = None) -> None:
         self.options = options or SessionOptions()
+        if self.options.evaluator_timeout <= 0:
+            raise ValueError("evaluator_timeout must be greater than zero")
         self.config = config or self.options.resolve_config()
         root = self.config.working_dir
         move_legacy_state(root)
@@ -229,6 +264,14 @@ class Session:
                 self.workspace.add_read_root(skill.directory)
 
         self.sandbox: Sandbox | None = detect_sandbox() if self.config.sandbox.enabled else None
+        if self.config.sandbox.required and self.sandbox is None:
+            self.transcript.write("sandbox_unavailable", required=True)
+            self.transcript.close()
+            self.scratch.cleanup()
+            raise SandboxRequiredError(
+                "sandbox.required is true, but no supported sandbox backend is available; "
+                "install the platform sandbox or set sandbox.required = false"
+            )
         self.sandbox_policy = SandboxPolicy.for_project(
             root,
             scratch=self.scratch.dir,
@@ -376,7 +419,7 @@ class Session:
             calibration=self._calibration,
         )
         self.llm.show_reasoning = cfg.show_thinking
-        self.gate.classifier = AutoModeClassifier(self.llm, model=cfg.small_model)
+        self.gate.classifier = AutoModeClassifier(self.llm, model=cfg.role_model("safety_classifier"))
         self.compactor = Compactor(
             self.llm,
             context_window=lambda: self.context_window,
@@ -385,7 +428,7 @@ class Session:
             reserved=cfg.compaction_reserved,
             preserve_recent_tokens=cfg.compaction_preserve_recent_tokens,
             threshold=cfg.auto_compact_threshold,
-            model=cfg.compaction_model,
+            model=cfg.role_model("compaction"),
         )
 
     def _identify(self) -> identity.CallIdentity:
@@ -773,6 +816,8 @@ class Session:
         return next((s for s in self.skills.list() if s.source and s.source.resolve() == target), None)
 
     async def _turn(self, prompt: str, images: Sequence[Image] = ()) -> AsyncGenerator[Event, None]:
+        turn_id = trace_id("turn")
+        turn_started = time.monotonic()
         if not self._started:
             await self.hooks.fire(
                 "SessionStart", {"session_id": self.id, "resumed": self.resume_report is not None}
@@ -796,6 +841,7 @@ class Session:
             allowed_tools=set(self.options.allowed_tools) if self.options.allowed_tools else None,
             max_steps=self.options.max_steps,
             inbox=self.take_steering,
+            turn_id=turn_id,
         )
         skill_reads: dict[str, Skill] = {}  # Read calls of a SKILL.md, by call id
         try:
@@ -803,7 +849,14 @@ class Session:
                 if isinstance(event, (ToolUse, ToolResult, Compacted, Done)):
                     self._sync()  # saved as it goes, so a crash loses at most one step
                 if isinstance(event, Done):
-                    self.transcript.write("turn_end", reason=event.reason or "done")
+                    duration_ms = round((time.monotonic() - turn_started) * 1000, 3)
+                    await self._evaluate_turn(prompt, turn_id, event.reason or "done", duration_ms)
+                    self.transcript.write(
+                        "turn_end",
+                        turn=turn_id,
+                        reason=event.reason or "done",
+                        duration_ms=duration_ms,
+                    )
                 if isinstance(event, ToolUse) and (skill := self._skill_read(event)):
                     skill_reads[event.id] = skill
                 yield event
@@ -811,10 +864,21 @@ class Session:
                 if read is not None and isinstance(event, ToolResult) and not event.is_error:
                     yield SkillLoaded(read.name, count_tokens(event.output), "read")
         except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
-            self.transcript.write("turn_end", reason="interrupted")
+            self.transcript.write(
+                "turn_end",
+                turn=turn_id,
+                reason="interrupted",
+                duration_ms=round((time.monotonic() - turn_started) * 1000, 3),
+            )
             raise
         except Exception as e:  # recorded, so a failed turn can be told apart from a stopped one
-            self.transcript.write("turn_end", reason="error", error=f"{type(e).__name__}: {e}"[:1000])
+            self.transcript.write(
+                "turn_end",
+                turn=turn_id,
+                reason="error",
+                error=f"{type(e).__name__}: {e}"[:1000],
+                duration_ms=round((time.monotonic() - turn_started) * 1000, 3),
+            )
             raise
         finally:
             # If the turn was interrupted mid tool call, keep the history valid.
@@ -822,10 +886,69 @@ class Session:
             self._sync()
             self._log_world()
 
+    async def _evaluate_turn(self, prompt: str, turn_id: str, reason: str, duration_ms: float) -> None:
+        """Run observers after the trajectory is complete; failures never change its outcome."""
+        if not self.options.evaluators:
+            return
+        context = EvaluationContext(
+            session_id=self.id,
+            turn_id=turn_id,
+            prompt=prompt,
+            reason=reason,
+            working_dir=self.workspace.root,
+            messages=tuple(copy.deepcopy(self.history.messages)),
+            duration_ms=duration_ms,
+        )
+        for evaluator in self.options.evaluators:
+            name = getattr(evaluator, "__name__", type(evaluator).__name__)
+            started = time.monotonic()
+            try:
+                result = await asyncio.wait_for(
+                    _invoke_evaluator(evaluator, context), timeout=self.options.evaluator_timeout
+                )
+                if isinstance(result, Mapping):
+                    data = dict(result)
+                elif is_dataclass(result) and not isinstance(result, type):
+                    data = asdict(result)
+                else:
+                    data = {"result": result}
+                self.transcript.write(
+                    "evaluation",
+                    turn=turn_id,
+                    evaluator=name,
+                    status="ok",
+                    duration_ms=round((time.monotonic() - started) * 1000, 3),
+                    result=data,
+                )
+            except TimeoutError:
+                self.transcript.write(
+                    "evaluation",
+                    turn=turn_id,
+                    evaluator=name,
+                    status="timeout",
+                    duration_ms=round((time.monotonic() - started) * 1000, 3),
+                    timeout_seconds=self.options.evaluator_timeout,
+                )
+            except Exception as e:
+                self.transcript.write(
+                    "evaluation",
+                    turn=turn_id,
+                    evaluator=name,
+                    status="error",
+                    duration_ms=round((time.monotonic() - started) * 1000, 3),
+                    error=f"{type(e).__name__}: {e}"[:1000],
+                )
+
     def steer(self, text: str) -> None:
         """Say something to the agent while a turn is running: it arrives as a user message
         before the agent's next step. If the turn ends first, `take_steering()` returns it."""
         self._steering.append(text)
+
+    def record_suggestion(self, action: str, *, chars: int = 0) -> None:
+        """Record suggestion UX outcomes without saving the suggested text."""
+        if action not in ("shown", "accepted"):
+            raise ValueError("suggestion action must be 'shown' or 'accepted'")
+        self.transcript.write("suggestion", action=action, chars=chars)
 
     @property
     def pending_steering(self) -> tuple[str, ...]:

@@ -243,6 +243,16 @@ async def test_websearch_asks_the_model_to_search(tmp_path):
     assert UNTRUSTED in out and "https://example.com/aero" in out
 
 
+async def test_websearch_uses_the_search_digest_model_role(tmp_path):
+    llm = FakeLLM("anthropic")
+    await call(
+        WebSearchTool(lambda: llm, lambda: "search-specialist"),
+        {"query": "best laptop 2026"},
+        make_ctx(tmp_path),
+    )
+    assert llm.calls[0][1] == {"web_search": True, "model": "search-specialist"}
+
+
 async def test_websearch_explains_when_the_provider_has_no_search(tmp_path):
     with pytest.raises(ToolError, match="isn't available with DeepSeek"):
         await call(WebSearchTool(lambda: FakeLLM("deepseek")), {"query": "anything"}, make_ctx(tmp_path))

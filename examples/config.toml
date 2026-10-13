@@ -15,6 +15,14 @@
 # request_timeout = 1800               # seconds per model call
 # request_retries = 3                  # on 429/5xx (honoring Retry-After) or a refused connection
 
+# Background jobs can use distinct models from the active provider. Use bare model IDs,
+# not provider:model specifications. Unset classifier/search roles use the provider's
+# legacy small_model; compaction falls back to compaction_model, then the active model.
+# [models.roles]
+# safety_classifier = "claude-haiku-4-5"
+# search_digest = "claude-haiku-4-5"
+# compaction = "claude-sonnet-5"
+
 # --- Workspace & permissions -------------------------------------------------
 # working_dir = "~/code/project"       # default: the directory you launch from
 # permission_mode = "default"          # default | auto | plan | ask | bypassPermissions
@@ -70,6 +78,7 @@
 # shows the limits.
 # [sandbox]
 # enabled = true
+# required = false                    # true: fail startup if no sandbox backend is active
 # allow_write = ["~/code/other-repo"]  # more writable dirs (protected like the project)
 # allow_localhost = false              # true: tests may start and reach local servers
 # allow_hosts = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com",

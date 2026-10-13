@@ -531,11 +531,15 @@ class LLMClient:
         return self.provider.small_model or self.model
 
     async def one_shot_small(
-        self, prompt: str, *, system: str | None = None, web_search: bool = False
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        web_search: bool = False,
+        model: str | None = None,
     ) -> str:
-        """`one_shot` on the small model. If the small model refuses the request (too long for
-        its window, a tool it lacks, rate limited), the main model answers instead."""
-        small = self.small_model
+        """`one_shot` on a background model. If it refuses, the main model answers instead."""
+        small = model or self.small_model
         if small != self.model:
             try:
                 return await self.one_shot(prompt, system=system, model=small, web_search=web_search)

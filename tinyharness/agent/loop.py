@@ -21,6 +21,7 @@ import contextlib
 import functools
 import json
 import re
+import time
 from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -30,6 +31,7 @@ from pydantic import ValidationError
 from tinyharness.agent.compaction import TAIL_MIN
 from tinyharness.agent.history import History, Image, Message, ReasoningState, ToolCall
 from tinyharness.agent.runaway import RunawayGuard
+from tinyharness.agent.transcript import trace_id, trace_scope, update_trace
 from tinyharness.agent.world import file_meta
 from tinyharness.events import (
     AssistantText,
@@ -48,6 +50,7 @@ from tinyharness.events import (
     ToolUse,
 )
 from tinyharness.images import fit_image
+from tinyharness.llm import identity
 from tinyharness.llm.client import (
     ContextOverflowError,
     ImagesUnsupportedError,
@@ -150,6 +153,7 @@ class LoopDeps:
     # Subagents running side by side share one: their calls that change things take turns,
     # so two never write at the same moment, while their model calls overlap freely.
     write_lock: asyncio.Lock | None = None
+    turn_id: str = ""
 
 
 @dataclass
@@ -157,6 +161,8 @@ class _ApprovedCall:
     call: ToolCall
     tool: Tool[Any]
     args: Any  # the tool's validated Input model
+    model_call: str = ""
+    routing_decision: str = ""
 
 
 @dataclass
@@ -180,9 +186,45 @@ class _Turn:
     route: str = ""
     shown: int = 0  # chars of text sent as AssistantText; -1 once a call written as text began
     held_from: int = 0  # where that call began
+    model_call: str = ""
+    routing_decision: str = ""
 
 
 async def run_agent_loop(
+    prompt: str, history: History, deps: LoopDeps, images: Sequence[Image] = ()
+) -> AsyncGenerator[Event, None]:
+    """Run one attributed turn; the implementation stays separate so scope always closes."""
+    turn_id = deps.turn_id or trace_id("turn")
+    started = time.monotonic()
+    completed = False
+    status, error = "interrupted", ""
+    with trace_scope(turn=turn_id, step=0):
+        deps.transcript.write("turn_start")
+        try:
+            async for event in _run_agent_loop(prompt, history, deps, images):
+                if isinstance(event, Done):
+                    deps.transcript.write(
+                        "turn_complete",
+                        duration_ms=round((time.monotonic() - started) * 1000, 3),
+                    )
+                    completed = True
+                yield event
+        except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
+            raise
+        except BaseException as exc:
+            status, error = "error", f"{type(exc).__name__}: {exc}"[:500]
+            raise
+        finally:
+            if not completed:
+                deps.transcript.write(
+                    "turn_complete",
+                    status=status,
+                    duration_ms=round((time.monotonic() - started) * 1000, 3),
+                    **({"error": error} if error else {}),
+                )
+
+
+async def _run_agent_loop(
     prompt: str, history: History, deps: LoopDeps, images: Sequence[Image] = ()
 ) -> AsyncGenerator[Event, None]:
     submitted = await _fire_hook(deps, "UserPromptSubmit", {"prompt": prompt})
@@ -196,7 +238,8 @@ async def run_agent_loop(
     failures = _Failures()
     stop_blocks = 0
     unreadable_calls = 0
-    for _ in range(deps.max_steps):
+    for step in range(1, deps.max_steps + 1):
+        update_trace(step=step, model_call=None, routing_decision=None, tool_call=None)
         # Messages from teammates arrive between steps, as a user message.
         for note in deps.inbox() if deps.inbox is not None else []:
             # (The main session's inbox carries the user's own messages typed mid-turn.)
@@ -217,11 +260,17 @@ async def run_agent_loop(
         except ContextOverflowError:
             # The usual summary was not enough (or the estimate was low): keep only the
             # smallest tail this time, so the retry doesn't fail the same way.
+            compact_started = time.monotonic()
             if not await deps.compactor.summarize(
                 history, tail_tokens=TAIL_MIN, notes=summary_notes(deps.ctx)
             ):
                 raise
-            deps.transcript.write("compaction", kind="summary", reason="context overflow")
+            deps.transcript.write(
+                "compaction",
+                kind="summary",
+                reason="context overflow",
+                duration_ms=round((time.monotonic() - compact_started) * 1000, 3),
+            )
             yield Compacted("summary")
             turn = _Turn()
             async for event in _ask_model(history, available, deps, turn):
@@ -326,7 +375,12 @@ async def run_agent_loop(
             continue
         empty_replies = 0
         deps.transcript.write(
-            "assistant", text=text, tool_calls=[c.to_dict() for c in calls], finish=turn.finish_detail
+            "assistant",
+            text=text,
+            tool_calls=[c.to_dict() for c in calls],
+            finish=turn.finish_detail,
+            model_call=turn.model_call or None,
+            routing_decision=turn.routing_decision or None,
         )
         history.append(Message(role="assistant", content=text or None, tool_calls=calls, state=turn.state))
         if turn.usage is not None:
@@ -356,7 +410,17 @@ async def run_agent_loop(
                 history.add_tool_result(call.id, "(not run: the user interrupted)")
                 continue
             cut_off = turn.finish_reason == "length"
-            async for event in _prepare_call(call, available, history, deps, batch, failures, cut_off):
+            async for event in _prepare_call(
+                call,
+                available,
+                history,
+                deps,
+                batch,
+                failures,
+                cut_off,
+                model_call=turn.model_call,
+                routing_decision=turn.routing_decision,
+            ):
                 yield event
 
         # The user said "no". Skip the rest of the batch (it was planned without their
@@ -377,6 +441,14 @@ async def run_agent_loop(
 
         # 4. Run the approved calls. Read-only batches run concurrently.
         parallel = len(approved) > 1 and all(a.tool.runs_alongside(a.args) for a in approved)
+        deps.transcript.write(
+            "tools_dispatched",
+            tools=[a.tool.name for a in approved],
+            tool_calls=[a.call.id for a in approved],
+            parallel=parallel,
+            model_call=approved[0].model_call or None,
+            routing_decision=approved[0].routing_decision or None,
+        )
         yield ToolsDispatched([a.tool.name for a in approved], parallel)
         # 5. Report each result as its call finishes (a quick Read isn't held back by a slow
         #    search), with any credential values masked so they never enter the model's
@@ -401,7 +473,12 @@ async def run_agent_loop(
                     note_outside(deps.ctx, source)
                 output += failures.note(item.tool.name, output, is_error)
                 deps.transcript.write(
-                    "tool_result", tool=item.tool.name, result=output[:TRANSCRIPT_RESULT_CHARS]
+                    "tool_result",
+                    tool=item.tool.name,
+                    result=output[:TRANSCRIPT_RESULT_CHARS],
+                    model_call=item.model_call or None,
+                    routing_decision=item.routing_decision or None,
+                    tool_call=item.call.id,
                 )
                 # Which file (and which version of it) this result came from, for resuming later.
                 meta = {} if is_error else file_meta(item.tool, item.args, deps.ctx)
@@ -443,7 +520,12 @@ async def _wrap_up(history: History, deps: LoopDeps) -> AsyncGenerator[Event, No
     if not text.strip() and not calls:
         return  # an empty assistant message would be rejected by the next request
     deps.transcript.write(
-        "assistant", text=text, tool_calls=[c.to_dict() for c in calls], finish=turn.finish_detail
+        "assistant",
+        text=text,
+        tool_calls=[c.to_dict() for c in calls],
+        finish=turn.finish_detail,
+        model_call=turn.model_call or None,
+        routing_decision=turn.routing_decision or None,
     )
     # Calls it made anyway are kept, each answered, so the history stays valid (saved
     # reasoning can contain them, and every provider wants a result for every call).
@@ -586,14 +668,57 @@ async def _ask_model(
     tools = [t.spec() for t in available.values()]
     guard = RunawayGuard()
     reply = deps.compactor.reply_tokens  # the room compaction keeps for the reply, when it is known
-    stream_ = deps.llm.stream(history.messages, tools, model=deps.model, max_tokens=reply)
-    async with contextlib.aclosing(stream_) as stream:
-        async for chunk in stream:
-            if (why := guard.check(chunk)) is not None:
-                raise RunawayOutputError(why)
-            for event in _take(chunk, turn):
-                yield event
-    deps.compactor.mark_call()
+    call_id, routing_id = trace_id("call"), trace_id("route")
+    turn.model_call = call_id
+    turn.routing_decision = routing_id
+    model = deps.model or deps.llm.model
+    provider = getattr(getattr(deps.llm, "provider", None), "name", "")
+    role = getattr(identity.CURRENT.get(), "role", "lead")
+    started, first = time.monotonic(), None
+    status, error = "completed", ""
+    with trace_scope(model_call=call_id, routing_decision=routing_id):
+        deps.transcript.write(
+            "routing_decision",
+            provider=provider,
+            model=model,
+            role=role,
+            source=("credential_default" if deps.ctx.config.credential_selected else "configured"),
+        )
+        deps.transcript.write(
+            "model_call_start",
+            provider=provider,
+            model=model,
+            role=role,
+        )
+        try:
+            stream_ = deps.llm.stream(history.messages, tools, model=deps.model, max_tokens=reply)
+            async with contextlib.aclosing(stream_) as stream:
+                async for chunk in stream:
+                    if first is None and (
+                        chunk.text or chunk.reasoning or chunk.reasoning_text or chunk.tool_call_delta
+                    ):
+                        first = time.monotonic()
+                        deps.transcript.write("model_first_token", ttft_ms=round((first - started) * 1000, 3))
+                    if (why := guard.check(chunk)) is not None:
+                        raise RunawayOutputError(why)
+                    for event in _take(chunk, turn):
+                        yield event
+            deps.compactor.mark_call()
+        except BaseException as exc:
+            status, error = "failed", f"{type(exc).__name__}: {exc}"[:500]
+            raise
+        finally:
+            deps.transcript.write(
+                "model_call_end",
+                provider=provider,
+                model=model,
+                status=status,
+                duration_ms=round((time.monotonic() - started) * 1000, 3),
+                ttft_ms=round((first - started) * 1000, 3) if first is not None else None,
+                finish=turn.finish_reason,
+                finish_detail=turn.finish_detail,
+                **({"error": error} if error else {}),
+            )
 
 
 def _dropped_replies(count: int, route: str) -> str:
@@ -670,15 +795,31 @@ def _held(turn: _Turn) -> str:
 async def _compact(history: History, deps: LoopDeps) -> AsyncGenerator[Event, None]:
     compactor = deps.compactor
     spill = deps.ctx.scratch.dir if deps.ctx.scratch is not None else None  # where cut text is kept
+    started = time.monotonic()
     if n := compactor.budget_cap(history, spill):
-        deps.transcript.write("compaction", kind="budget_cap", count=n)
+        deps.transcript.write(
+            "compaction",
+            kind="budget_cap",
+            count=n,
+            duration_ms=round((time.monotonic() - started) * 1000, 3),
+        )
         yield Compacted("budget_cap", n)
+    started = time.monotonic()
     if n := compactor.microcompact(history, spill):
-        deps.transcript.write("compaction", kind="microcompact", count=n)
+        deps.transcript.write(
+            "compaction",
+            kind="microcompact",
+            count=n,
+            duration_ms=round((time.monotonic() - started) * 1000, 3),
+        )
         yield Compacted("microcompact", n)
-    if compactor.needs_summary(history) and await compactor.summarize(history, notes=summary_notes(deps.ctx)):
-        deps.transcript.write("compaction", kind="summary")
-        yield Compacted("summary")
+    if compactor.needs_summary(history):
+        started = time.monotonic()
+        if await compactor.summarize(history, notes=summary_notes(deps.ctx)):
+            deps.transcript.write(
+                "compaction", kind="summary", duration_ms=round((time.monotonic() - started) * 1000, 3)
+            )
+            yield Compacted("summary")
 
 
 async def _prepare_call(
@@ -689,6 +830,8 @@ async def _prepare_call(
     batch: _Batch,
     failures: _Failures | None = None,
     cut_off: bool = False,
+    model_call: str = "",
+    routing_decision: str = "",
 ) -> AsyncGenerator[Event, None]:
     """Parse, validate and permission-check one call. Rejections are answered
     immediately (the model must get a result for every call); approvals are
@@ -698,7 +841,14 @@ async def _prepare_call(
     def reject(message: str) -> ToolResult:
         if failures is not None and message.startswith("error:"):  # not a denial: a bad call
             message += failures.note(call.name, message, True)
-        deps.transcript.write("tool_result", tool=call.name, error=message)
+        deps.transcript.write(
+            "tool_result",
+            tool=call.name,
+            error=message,
+            model_call=model_call or None,
+            routing_decision=routing_decision or None,
+            tool_call=call.id,
+        )
         history.add_tool_result(call.id, message)
         return ToolResult(call.name, message, is_error=True, id=call.id)
 
@@ -729,19 +879,38 @@ async def _prepare_call(
 
     summary = tool.describe(args)
     yield ToolUse(tool.name, raw, summary, id=call.id)
-    deps.transcript.write("tool_use", tool=tool.name, args=raw)
-
-    decision = await deps.gate.check(
-        tool,
-        raw,
-        tool.target_path(args),
-        target_host=tool.target_host(args),
-        summary=summary,
-        history_tail=_tail(history),
-    )
     deps.transcript.write(
-        "permission", tool=tool.name, allow=decision.allow, source=decision.source, reason=decision.reason
+        "tool_use",
+        tool=tool.name,
+        args=raw,
+        model_call=model_call or None,
+        routing_decision=routing_decision or None,
+        tool_call=call.id,
     )
+
+    started = time.monotonic()
+    with trace_scope(
+        model_call=model_call or None,
+        routing_decision=routing_decision or None,
+        tool_call=call.id,
+    ):
+        deps.transcript.write("permission_start", tool=tool.name)
+        decision = await deps.gate.check(
+            tool,
+            raw,
+            tool.target_path(args),
+            target_host=tool.target_host(args),
+            summary=summary,
+            history_tail=_tail(history),
+        )
+        deps.transcript.write(
+            "permission",
+            tool=tool.name,
+            allow=decision.allow,
+            source=decision.source,
+            reason=decision.reason,
+            duration_ms=round((time.monotonic() - started) * 1000, 3),
+        )
     yield PermissionDecision(tool.name, decision.allow, decision.source, decision.reason)
 
     if decision.allow:
@@ -749,7 +918,7 @@ async def _prepare_call(
             args = tool.parse(decision.arguments)
         # Act on the path that was checked, not a fresh resolution of it (see Decision.path).
         pinned = tool.pin_path(args, decision.path) if decision.path is not None else args
-        batch.approved.append(_ApprovedCall(call, tool, pinned))
+        batch.approved.append(_ApprovedCall(call, tool, pinned, model_call, routing_decision))
     elif decision.interrupt:
         batch.interrupted, batch.feedback = True, decision.feedback
         yield reject("The user rejected this tool call.")
@@ -764,14 +933,32 @@ async def _execute(item: _ApprovedCall, deps: LoopDeps) -> tuple[ToolOutput, boo
         if deps.write_lock is not None and item.tool.writes(item.args)
         else contextlib.nullcontext()
     )
-    try:
-        async with turns:
-            result = await item.tool.run(item.args, deps.ctx)
-    except ToolError as e:
-        return ToolOutput(f"error: {e}"), True
-    except Exception as e:
-        return ToolOutput(f"error: {type(e).__name__}: {e}"), True
-    return (result if isinstance(result, ToolOutput) else ToolOutput(result)), False
+    started = time.monotonic()
+    with trace_scope(
+        model_call=item.model_call or None,
+        routing_decision=item.routing_decision or None,
+        tool_call=item.call.id,
+    ):
+        deps.transcript.write("tool_start", tool=item.tool.name)
+        try:
+            async with turns:
+                result = await item.tool.run(item.args, deps.ctx)
+        except ToolError as e:
+            output, failed = ToolOutput(f"error: {e}"), True
+        except Exception as e:
+            output, failed = ToolOutput(f"error: {type(e).__name__}: {e}"), True
+        else:
+            output, failed = (
+                result if isinstance(result, ToolOutput) else ToolOutput(result),
+                False,
+            )
+        deps.transcript.write(
+            "tool_end",
+            tool=item.tool.name,
+            status="error" if failed else "ok",
+            duration_ms=round((time.monotonic() - started) * 1000, 3),
+        )
+        return output, failed
 
 
 def summary_notes(ctx: ToolContext) -> str:
@@ -783,7 +970,16 @@ def _account(turn: _Turn, deps: LoopDeps) -> TokenUsage:
     """Price one model call (unless the provider already did), add it to the session's
     meter and report it."""
     assert turn.usage is not None
-    return record_usage(turn.usage, deps.llm, deps.ctx, deps.transcript, model=deps.model, route=turn.route)
+    return record_usage(
+        turn.usage,
+        deps.llm,
+        deps.ctx,
+        deps.transcript,
+        model=deps.model,
+        route=turn.route,
+        model_call=turn.model_call,
+        routing_decision=turn.routing_decision,
+    )
 
 
 def record_usage(
@@ -795,6 +991,8 @@ def record_usage(
     model: str | None = None,
     route: str = "",
     kind: str = "",
+    model_call: str = "",
+    routing_decision: str = "",
 ) -> TokenUsage:
     """Price one model call (unless the provider already did), add it to the session's
     meter and write it to the log. `kind` marks calls outside the agent's turn ("aside")."""
@@ -813,6 +1011,8 @@ def record_usage(
         cached=usage.cached,
         output=usage.output,
         cost=usage.cost,
+        model_call=model_call or None,
+        routing_decision=routing_decision or None,
         **({"route": route} if route else {}),
         **({"kind": kind} if kind else {}),
     )

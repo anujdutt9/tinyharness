@@ -155,7 +155,10 @@ async def test_a_model_that_takes_no_images_is_asked_again_with_notes(tmp_path):
                 yield chunk
 
     history = History(
-        [Message(role="system", content="s"), Message(role="user", content="check it", images=[as_image(png(10, 10))])]
+        [
+            Message(role="system", content="s"),
+            Message(role="user", content="check it", images=[as_image(png(10, 10))]),
+        ]
     )
     llm = TextOnly(["I can't see images; the HTML validates."])
     events = await run_with(tmp_path, llm, history)

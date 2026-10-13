@@ -11,6 +11,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from tinyharness.version import __version__
+
 REQUIRED = [
     "tinyharness/py.typed",
     "tinyharness/llm/providers.toml",
@@ -21,11 +23,16 @@ REQUIRED = [
 ]
 
 
-def main() -> None:
-    wheels = sorted(Path("dist").glob("tinyharness-*.whl"))
+def wheel_for_version(version: str, directory: Path = Path("dist")) -> Path:
+    """Pick the wheel for the source version, never a stale artifact from another build."""
+    wheels = sorted(directory.glob(f"tinyharness-{version}-*.whl"))
     if not wheels:
-        sys.exit("no wheel in dist/; run `uv build` first")
-    wheel = wheels[-1]
+        sys.exit(f"no tinyharness {version} wheel in {directory}/; run `uv build` first")
+    return wheels[-1]
+
+
+def main() -> None:
+    wheel = wheel_for_version(__version__)
     names = set(zipfile.ZipFile(wheel).namelist())
     if missing := [f for f in REQUIRED if f not in names]:
         sys.exit(f"{wheel.name} is missing: {', '.join(missing)}")

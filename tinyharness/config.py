@@ -35,7 +35,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from tinyharness.llm.providers import Provider, load_catalog
 from tinyharness.llm.types import Effort
@@ -62,12 +62,35 @@ class SandboxSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True  # False: commands run unsandboxed, and every one asks first
+    required: bool = False  # fail closed when no supported sandbox backend is active
     allow_write: list[Path] = Field(default_factory=list)  # more writable dirs, e.g. a second repo
     allow_localhost: bool = False  # let commands use loopback (tests that start a local server)
     # Hosts commands may reach from inside the sandbox, through a local proxy: package
     # registries, GitHub and script CDNs by default. `*.example.com` covers subdomains.
     # [] turns the network off entirely. Anything else needs sandbox=false (it asks).
     allow_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))
+
+    @model_validator(mode="after")
+    def _required_is_enabled(self) -> SandboxSettings:
+        if self.required and not self.enabled:
+            raise ValueError("sandbox.required = true needs sandbox.enabled = true")
+        return self
+
+
+class ModelRoles(BaseModel):
+    """Active-provider model IDs for classifier, search digestion, and compaction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    safety_classifier: str | None = None
+    search_digest: str | None = None
+    compaction: str | None = None
+
+
+class ModelSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    roles: ModelRoles = Field(default_factory=ModelRoles)
 
 
 class ExtensionSettings(BaseModel):
@@ -104,9 +127,9 @@ class Config(BaseModel):
     # Code: the model decides how many to start; past this, an Agent call fails so the model
     # can wait, and Team tasks wait their turn. TINYHARNESS_MAX_PARALLEL_AGENTS overrides.
     max_parallel_agents: int = Field(default=20, ge=1)
-    # True when nothing named a provider or model and one was picked from the keys found
-    # (an installed CLI then asks the user instead).
-    auto_selected: bool = Field(default=False, exclude=True)
+    # True when no provider/model was named and credentials chose the first usable provider.
+    # This is not task-aware routing; `auto_selected` below is its compatibility alias.
+    credential_selected: bool = Field(default=False, exclude=True)
 
     # --- workspace & permissions ---
     working_dir: Path = Field(
@@ -117,6 +140,7 @@ class Config(BaseModel):
     permission_mode: PermissionMode = PermissionMode.DEFAULT
     permissions: PermissionSettings = Field(default_factory=lambda: PermissionSettings())
     sandbox: SandboxSettings = Field(default_factory=lambda: SandboxSettings())
+    models: ModelSettings = Field(default_factory=ModelSettings)
     extensions: ExtensionSettings = Field(default_factory=lambda: ExtensionSettings())
     scratch_max_age_hours: int = 24
 
@@ -161,7 +185,7 @@ class Config(BaseModel):
     # between 2,000 and 15,000 tokens.
     compaction_preserve_recent_tokens: int | None = Field(default=None, ge=0)
     # The one model every compaction summary uses (lead and subagents alike), e.g. a provider's
-    # cheaper model; None = the agent's own model.
+    # cheaper model; None = the active session model.
     compaction_model: str | None = None
 
     @field_validator("working_dir", mode="after")
@@ -170,6 +194,13 @@ class Config(BaseModel):
         return v.expanduser().resolve()
 
     def model_post_init(self, context: Any) -> None:
+        for role, model in self.models.roles:
+            head, sep, _ = (model or "").partition(":")
+            if sep and head in self.providers:
+                raise ValueError(
+                    f"models.roles.{role} must be a model ID for the active provider, "
+                    f"not a provider:model specification"
+                )
         provider, model = self.parse_model(self.model) if self.model else (self.provider, "")
         auto = not provider
         if auto:
@@ -180,7 +211,7 @@ class Config(BaseModel):
             provider = (fresh or with_key or list(self.providers))[0]
         self.provider = provider
         self.select(f"{provider}:{model}")
-        self.auto_selected = auto
+        self.credential_selected = auto
 
     # -- the active provider and model ------------------------------------------------
 
@@ -202,8 +233,22 @@ class Config(BaseModel):
 
     @property
     def small_model(self) -> str:
-        """Cheap model for background work: the auto-mode classifier and WebSearch digests."""
+        """Deprecated compatibility alias for role-specific background models."""
         return self.provider_info.small_model or self.model
+
+    @property
+    def auto_selected(self) -> bool:
+        """Deprecated name for credential-based provider selection."""
+        return self.credential_selected
+
+    def role_model(self, role: str) -> str:
+        """Configured model for a background role, with compatibility-preserving defaults."""
+        selected = getattr(self.models.roles, role)
+        if role == "compaction" and not selected:
+            selected = self.compaction_model
+        if selected:
+            return selected
+        return self.small_model if role in ("safety_classifier", "search_digest") else self.model
 
     def price(self, provider: str, model: str) -> Price | None:
         """A price set in the config for this model, if any."""
@@ -232,7 +277,7 @@ class Config(BaseModel):
             raise ValueError(f"unknown provider {provider!r}; choose one of: {', '.join(self.providers)}")
         self.provider = provider
         self.model = model or self.providers[provider].default_model
-        self.auto_selected = False
+        self.credential_selected = False
 
     def use_provider(self, name: str) -> None:
         """Switch provider, using its default model."""

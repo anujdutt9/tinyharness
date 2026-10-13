@@ -235,6 +235,39 @@ async def test_each_model_call_refreshes_the_cache_clock(tmp_path):
     assert not deps.compactor.cache_cold
 
 
+async def test_trace_records_model_tool_permission_and_turn_latency(tmp_path):
+    llm = ScriptedLLM([[("Change", "{}")], "done"])
+    await run(tmp_path, llm, [sleep_tool("Change", False)])
+    records = [
+        json.loads(line)
+        for line in (state_dir(tmp_path) / "sessions" / "test.jsonl").read_text().splitlines()
+    ]
+    by_event = {record["event"]: record for record in records}
+    assert by_event["model_first_token"]["ttft_ms"] >= 0
+    assert by_event["model_call_end"]["duration_ms"] >= 0
+    assert by_event["routing_decision"]["model"]
+    assert by_event["permission"]["duration_ms"] >= 0
+    assert by_event["tool_end"]["duration_ms"] >= 0
+    assert by_event["turn_complete"]["duration_ms"] >= 0
+    assert by_event["tool_end"]["tool_call"]
+    assert by_event["tool_end"]["model_call"]
+    assert by_event["model_call_end"]["routing_decision"]
+
+
+async def test_every_main_loop_model_call_has_exactly_one_trace_start_and_end(tmp_path):
+    from collections import Counter
+
+    await run(tmp_path, ScriptedLLM([[("Change", "{}")], "done"]), [sleep_tool("Change", False)])
+    records = [
+        json.loads(line)
+        for line in (state_dir(tmp_path) / "sessions" / "test.jsonl").read_text().splitlines()
+    ]
+    starts = Counter(r["model_call"] for r in records if r["event"] == "model_call_start")
+    ends = Counter(r["model_call"] for r in records if r["event"] == "model_call_end")
+    assert starts == ends and starts
+    assert set(starts.values()) == {1}
+
+
 async def test_reasoning_state_is_kept_on_the_reply(tmp_path):
     from tinyharness.agent.history import ReasoningState
     from tinyharness.llm.types import StreamChunk
@@ -642,10 +675,17 @@ async def test_a_tool_call_cut_off_by_the_output_limit_is_not_run(tmp_path):
 
 
 async def test_a_filtered_empty_reply_is_reported_not_retried(tmp_path):
+    """Seen live: failed HTTP model calls must mark the trace as errors, not interruptions."""
     llm = ScriptedLLM([[StreamChunk(finish_reason="filtered", finish_detail="content_filter")], "never"])
     with pytest.raises(LLMError, match=r"withheld the model's reply \(content_filter\)"):
         await run(tmp_path, llm, [])
     assert len(llm.requests) == 1
+    records = [
+        json.loads(line)
+        for line in (state_dir(tmp_path) / "sessions" / "test.jsonl").read_text().splitlines()
+    ]
+    [complete] = [record for record in records if record["event"] == "turn_complete"]
+    assert complete["status"] == "error" and "LLMError" in complete["error"]
 
 
 async def test_a_tool_call_in_the_step_limit_reply_leaves_the_history_valid(tmp_path):

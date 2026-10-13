@@ -170,8 +170,7 @@ async def run_subagent(
                 reserved=ctx.config.compaction_reserved,
                 preserve_recent_tokens=ctx.config.compaction_preserve_recent_tokens,
                 threshold=ctx.config.auto_compact_threshold,
-                # Unset: the subagent's own model, not the session's (its client may be the session's).
-                model=ctx.config.compaction_model or model,
+                model=ctx.config.role_model("compaction"),
             ),
             transcript=transcript,
             ctx=ctx,

@@ -746,6 +746,13 @@ async def test_background_work_uses_the_small_model():
     assert used == ["claude-haiku-4-5"]
 
 
+async def test_background_work_can_select_a_role_specific_model():
+    llm = client("anthropic", Server(), model="claude-sonnet-5")
+    used = recording(llm)
+    assert await llm.one_shot_small("digest", model="claude-opus-4-1") == "ok"
+    assert used == ["claude-opus-4-1"]
+
+
 async def test_background_work_falls_back_to_the_main_model():
     llm = client("anthropic", Server(), model="claude-sonnet-5")
     used = recording(llm, fail_on="claude-haiku-4-5", error=ContextOverflowError("too long"))
@@ -1054,7 +1061,9 @@ def _shot():
 async def test_a_model_configured_without_images_gets_a_note_instead():
     from tinyharness.llm.providers import Provider
 
-    local = Provider(name="local", base_url="http://127.0.0.1:8000/v1", models=[{"id": "planner", "images": False}])
+    local = Provider(
+        name="local", base_url="http://127.0.0.1:8000/v1", models=[{"id": "planner", "images": False}]
+    )
     server = Server(OK_REPLY)
     llm = LLMClient(local, "", "planner", transport=httpx.MockTransport(server))
     history = [Message(role="user", content="check this", images=[_shot()])]
@@ -1081,12 +1090,18 @@ def test_vllm_refusing_images_is_recognized():
     from tinyharness.llm.client import _http_error
     from tinyharness.llm.types import ImagesUnsupportedError, ImageTooLargeError
 
-    body = ('{"error":{"message":"At most 0 image(s) may be provided in one prompt. (parameter=image)",'
-            '"type":"BadRequestError","param":"image","code":400}}')
-    assert isinstance(_http_error(400, body, "http://127.0.0.1:8080/v1/chat/completions"), ImagesUnsupportedError)
+    body = (
+        '{"error":{"message":"At most 0 image(s) may be provided in one prompt. (parameter=image)",'
+        '"type":"BadRequestError","param":"image","code":400}}'
+    )
+    assert isinstance(
+        _http_error(400, body, "http://127.0.0.1:8080/v1/chat/completions"), ImagesUnsupportedError
+    )
     other = '{"error":{"message":"This model does not support image input"}}'
     assert isinstance(_http_error(400, other, "x"), ImagesUnsupportedError)
-    assert not isinstance(_http_error(400, '{"error":"image exceeds the limit"}', "x"), ImagesUnsupportedError)
+    assert not isinstance(
+        _http_error(400, '{"error":"image exceeds the limit"}', "x"), ImagesUnsupportedError
+    )
     assert isinstance(_http_error(400, '{"error":"image exceeds the limit"}', "x"), ImageTooLargeError)
 
 

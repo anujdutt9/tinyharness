@@ -968,15 +968,15 @@ async def test_a_subagent_compacts_at_the_configured_threshold(tmp_path, monkeyp
     from tinyharness.config import Config
     from tinyharness.tools.base import ToolContext
 
-    ctx = ToolContext(workspace=Workspace(tmp_path), config=Config(working_dir=tmp_path, auto_compact_threshold=0.7))
+    ctx = ToolContext(
+        workspace=Workspace(tmp_path), config=Config(working_dir=tmp_path, auto_compact_threshold=0.7)
+    )
     gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
     await run_subagent(READER, "x", ctx=ctx, llm=ScriptedLLM([]), tools=default_registry(), gate=gate)
     assert seen["threshold"] == 0.7
 
 
-async def test_a_subagent_summarizes_on_its_own_model_unless_one_is_configured(tmp_path, monkeypatch):
-    """A subagent on another model of the session's provider shares the session's client, whose
-    default is the session's model: its summaries went there, not to its own model."""
+async def test_a_subagent_uses_compaction_role_legacy_and_active_model_fallbacks(tmp_path, monkeypatch):
     seen = []
 
     async def fake_loop(task, history, deps):
@@ -989,12 +989,21 @@ async def test_a_subagent_summarizes_on_its_own_model_unless_one_is_configured(t
     from tinyharness.tools.base import ToolContext
 
     gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
-    for compaction_model in (None, "big"):
-        ctx = ToolContext(workspace=Workspace(tmp_path), config=Config(working_dir=tmp_path, compaction_model=compaction_model))
+    cases = [("summary-role", None), (None, "legacy"), (None, None)]
+    for role, legacy in cases:
+        ctx = ToolContext(
+            workspace=Workspace(tmp_path),
+            config=Config(
+                working_dir=tmp_path,
+                model="lead-model",
+                compaction_model=legacy,
+                models={"roles": {"compaction": role}},
+            ),
+        )
         await run_subagent(
             READER, "x", ctx=ctx, llm=ScriptedLLM([]), tools=default_registry(), gate=gate, model="small-9b"
         )
-    assert seen == ["small-9b", "big"]
+    assert seen == ["summary-role", "legacy", "lead-model"]
 
 
 async def test_every_member_result_is_saved_and_named_short_ones_too(tmp_path):
@@ -1028,11 +1037,17 @@ async def test_a_subagent_transcript_names_the_session_that_started_it(tmp_path)
     lead = identity.for_session("s1")
     token = identity.CURRENT.set(identity.child(lead, "reader"))
     try:
-        await run_subagent(READER, "x", ctx=ctx, llm=ScriptedLLM(["done"]), tools=default_registry(), gate=gate)
+        await run_subagent(
+            READER, "x", ctx=ctx, llm=ScriptedLLM(["done"]), tools=default_registry(), gate=gate
+        )
     finally:
         identity.CURRENT.reset(token)
     from tinyharness.paths import state_dir
 
     (log,) = state_dir(tmp_path).joinpath("sidechains").glob("*.jsonl")
     start = json.loads(log.read_text().splitlines()[0])
-    assert start["session"] == "s1" and start["parent"] == "s1-lead" and start["agent_id"].startswith("s1-reader-")
+    assert (
+        start["session"] == "s1"
+        and start["parent"] == "s1-lead"
+        and start["agent_id"].startswith("s1-reader-")
+    )

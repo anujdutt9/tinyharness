@@ -73,6 +73,21 @@ tools, and a model that writes its calls as text gets the tools in its prompt in
 (`tool_calls = "text"` forces it). An agent file can then pick a model with
 `model: local:worker`.
 
+Background model work is configured by role rather than one catch-all model:
+
+```toml
+[models.roles]
+safety_classifier = "claude-haiku-4-5"
+search_digest = "claude-haiku-4-5"
+compaction = "claude-sonnet-5"
+```
+
+Role values are model IDs on the active provider. Do not include a provider prefix such
+as `openai:`; cross-provider background roles are not supported in this release.
+Unset classifier and search roles fall back to the active provider's `small_model` for
+compatibility. An unset compaction role uses `compaction_model`, then the active model.
+The same resolved compaction role is used by the lead and subagents.
+
 | Location | Contents |
 |---|---|
 | `~/.tinyharness/` | your skills, agents, plugins, `hooks.toml`, `AGENT.md`; `projects/<project>/` holds each project's conversation logs and scratch files |

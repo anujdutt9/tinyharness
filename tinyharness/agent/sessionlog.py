@@ -132,7 +132,24 @@ def replay(records: list[dict[str, Any]]) -> Replayed:
             case "files":
                 out.reported.update(r.get("files", {}))
             case "world":
-                out.world = {k: v for k, v in r.items() if k not in ("ts", "event")}
+                out.world = {
+                    k: v
+                    for k, v in r.items()
+                    if k
+                    not in (
+                        "schema",
+                        "ts",
+                        "event",
+                        "session",
+                        "turn",
+                        "step",
+                        "agent",
+                        "model_call",
+                        "routing_decision",
+                        "tool_call",
+                        "harness_version",
+                    )
+                }
     out.history.messages = [messages[i] for i in order]
     return out
 

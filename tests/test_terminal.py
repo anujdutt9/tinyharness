@@ -72,7 +72,8 @@ def screen_of(
     stream = pyte.ByteStream(screen)
     pid, fd = pty.fork()
     if pid == 0:  # the child: the app, in the pseudo-terminal
-        os.execv(sys.executable, [sys.executable, "-c", app])
+        env = {**os.environ, "TERM": "xterm-256color"}
+        os.execve(sys.executable, [sys.executable, "-c", app], env)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     if answers_cursor:
         screen.write_process_input = lambda data: os.write(fd, data.encode())
@@ -128,7 +129,8 @@ def frames_of(app: str, steps: list[tuple[Callable[[list[str]], bool], bytes]], 
     stream = pyte.ByteStream(screen)
     pid, fd = pty.fork()
     if pid == 0:
-        os.execv(sys.executable, [sys.executable, "-c", app])
+        env = {**os.environ, "TERM": "xterm-256color"}
+        os.execve(sys.executable, [sys.executable, "-c", app], env)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     screen.write_process_input = lambda data: os.write(fd, data.encode())
     frames: list[list[str]] = []

@@ -2,8 +2,9 @@ import io
 
 import pytest
 
-from tinyharness import MissingAPIKeyError, Session, SessionOptions
+from tinyharness import MissingAPIKeyError, SandboxRequiredError, Session, SessionOptions
 from tinyharness.agent.history import Message
+from tinyharness.config import Config
 
 
 @pytest.fixture(autouse=True)
@@ -62,6 +63,49 @@ def test_switching_provider_keeps_the_conversation(session, monkeypatch):
 def test_missing_key_at_startup_names_the_variable(tmp_path):
     with pytest.raises(MissingAPIKeyError, match="ANTHROPIC_API_KEY"):
         Session(SessionOptions(config_path=tmp_path / "none.toml", working_dir=tmp_path / "w"))
+
+
+def test_required_sandbox_fails_closed_before_a_callback_can_approve(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr("tinyharness.session.detect_sandbox", lambda: None)
+    config = Config(working_dir=tmp_path, sandbox={"required": True})
+    with pytest.raises(SandboxRequiredError, match="no supported sandbox backend"):
+        Session(SessionOptions(permission_callback=lambda request: None), config=config)
+
+
+def test_session_wires_background_models_by_role(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    config = Config(
+        working_dir=tmp_path,
+        models={"roles": {"safety_classifier": "guard", "compaction": "summarizer"}},
+    )
+    configured = Session(config=config)
+    try:
+        assert configured.gate.classifier.model == "guard"
+        assert configured.compactor.model == "summarizer"
+    finally:
+        configured.close()
+
+
+@pytest.mark.parametrize(
+    ("role", "legacy", "expected"),
+    [("summarizer", None, "summarizer"), (None, "legacy", "legacy"), (None, None, "lead")],
+)
+def test_lead_compaction_uses_role_legacy_and_active_model_fallbacks(
+    tmp_path, monkeypatch, role, legacy, expected
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    config = Config(
+        working_dir=tmp_path,
+        model="lead",
+        compaction_model=legacy,
+        models={"roles": {"compaction": role}},
+    )
+    configured = Session(config=config)
+    try:
+        assert configured.compactor.model == expected
+    finally:
+        configured.close()
 
 
 def test_a_key_added_while_running_is_picked_up(session, tmp_path, monkeypatch):
@@ -228,6 +272,71 @@ async def test_every_turn_records_how_it_ended(session):
     ends = [r for r in records if r["event"] == "turn_end"]
     assert [e["reason"] for e in ends] == ["stop", "error"]
     assert "upstream exploded" in ends[1]["error"]
+
+
+async def test_post_turn_evaluator_is_observational_and_logged(tmp_path, monkeypatch):
+    import json
+
+    from conftest import ScriptedLLM
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+
+    async def evaluator(context):
+        context.messages[-1].content = "mutated copy"
+        return {"passed": True, "messages": len(context.messages)}
+
+    options = SessionOptions(
+        config_path=tmp_path / "none.toml",
+        working_dir=tmp_path / "work",
+        evaluators=[evaluator],
+    )
+    evaluated = Session(options)
+    try:
+        evaluated.llm.stream = ScriptedLLM(["real answer"]).stream
+        [event async for event in evaluated.run("hi")]
+        assert evaluated.history.messages[-1].content == "real answer"
+        records = [json.loads(line) for line in evaluated.transcript.path.read_text().splitlines()]
+        [result] = [record for record in records if record["event"] == "evaluation"]
+        assert result["status"] == "ok" and result["result"]["passed"] is True
+        assert result["turn"] and result["duration_ms"] >= 0
+    finally:
+        evaluated.close()
+
+
+async def test_evaluator_timeout_and_failure_do_not_delay_done(tmp_path, monkeypatch):
+    import asyncio
+    import json
+
+    from conftest import ScriptedLLM
+    from tinyharness.events import Done
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+
+    async def slow(context):
+        await asyncio.sleep(60)
+
+    def broken(context):
+        raise RuntimeError("bad evaluator")
+
+    evaluated = Session(
+        SessionOptions(
+            config_path=tmp_path / "none.toml",
+            working_dir=tmp_path / "work",
+            evaluators=[slow, broken],
+            evaluator_timeout=0.01,
+        )
+    )
+    try:
+        evaluated.llm.stream = ScriptedLLM(["real answer"]).stream
+        events = [event async for event in evaluated.run("hi")]
+        assert isinstance(events[-1], Done)
+        records = [json.loads(line) for line in evaluated.transcript.path.read_text().splitlines()]
+        evaluations = [record for record in records if record["event"] == "evaluation"]
+        assert [record["status"] for record in evaluations] == ["timeout", "error"]
+        assert evaluations[0]["timeout_seconds"] == 0.01
+        assert evaluated.history.messages[-1].content == "real answer"
+    finally:
+        evaluated.close()
 
 
 def test_skills_are_listed_in_the_prompt_with_where_to_read_them(tmp_path, monkeypatch):

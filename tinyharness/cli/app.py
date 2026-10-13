@@ -384,7 +384,7 @@ async def first_run_setup(options: SessionOptions, console: Console, *, force: b
     if not force and source_checkout() is not None:
         return True
     config = options.resolve_config()
-    if not (force or config.auto_selected or not config.has_key(config.provider)):
+    if not (force or config.credential_selected or not config.has_key(config.provider)):
         return True
     name = await run_setup(console, config)
     if name is None:

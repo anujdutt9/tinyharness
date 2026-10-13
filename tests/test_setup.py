@@ -36,12 +36,12 @@ def test_an_installed_copy_reads_no_env_files(installed, tmp_path):
     assert not cfg.has_key("openai")
 
 
-def test_a_provider_picked_from_the_keys_found_is_marked_auto(monkeypatch, tmp_path):
+def test_a_provider_picked_from_credentials_is_named_accurately(monkeypatch, tmp_path):
     monkeypatch.setenv("GEMINI_API_KEY", "g")
     cfg = load_config(tmp_path / "none.toml")
-    assert cfg.auto_selected
+    assert cfg.credential_selected and cfg.auto_selected  # compatibility alias
     cfg.use_provider("gemini")
-    assert not cfg.auto_selected
+    assert not cfg.credential_selected and not cfg.auto_selected
 
 
 @pytest.mark.parametrize(

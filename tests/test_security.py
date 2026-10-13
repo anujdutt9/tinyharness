@@ -136,6 +136,9 @@ def test_session_logs_mask_credentials_but_keep_reasoning_intact(tmp_path, monke
     assert pasted not in text and "sk-configured0123456789abcdef" not in text
     assert "[REDACTED API KEY]" in text and "[REDACTED OPENAI_API_KEY]" in text
     last = json.loads(text.splitlines()[-1])
+    assert last["schema"] == 1 and last["session"] == "s1"
+    assert last["harness_version"]
+    assert {"turn", "step", "agent", "model_call", "routing_decision", "tool_call"} <= last.keys()
     assert last["message"]["state"]["data"]["sig"] == blob  # resuming must send it back unchanged
     assert stat.S_IMODE(log.path.stat().st_mode) == 0o600
     assert stat.S_IMODE((state_dir(tmp_path) / "sessions").stat().st_mode) == 0o700

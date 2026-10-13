@@ -99,7 +99,9 @@ The CLI and the SDK consume the same typed event stream. For headless runs, pass
 code (`SessionOptions(extensions=[...])`) and tested against a scripted model
 (`tinyharness.testing`). Subagents can be defined in
 code (`AgentSpec`) or Markdown, each on any provider's model, and conversations can be
-resumed from code (`SessionOptions(resume="latest")`). See [`examples/`](https://github.com/anujdutt9/tinyharness/tree/main/examples) for a
+resumed from code (`SessionOptions(resume="latest")`). Post-turn evaluators can be passed
+with `SessionOptions(evaluators=[...], evaluator_timeout=30.0)`; their bounded results are
+appended to the versioned trace without changing the completed conversation. See [`examples/`](https://github.com/anujdutt9/tinyharness/tree/main/examples) for a
 one-shot query, a multi-turn session, resuming, a custom tool, a permission policy with
 hooks, skills, subagents on different models, and an extension.
 
@@ -115,7 +117,7 @@ hooks, skills, subagents on different models, and an extension.
 | **Context** | Cap oversized messages, stub old tool output, then summarize, without rebuilding the prompt cache every turn |
 | **Subagents and teams** | Isolated contexts on any model; `Team` runs a dependency graph of tasks; the model picks the team's size, up to 20 subagents at once (`max_parallel_agents`) |
 | **Skills, hooks, plugins** | `SKILL.md` skills (compatible with Claude Code's), shell or Python hooks on 5 events, plugins that bundle them |
-| **Resume** | Lossless JSONL logs outside your repo; on resume, the agent is told what changed while you were away |
+| **Resume & traces** | Lossless, schema-versioned JSONL logs outside your repo with correlated main-loop model/tool decisions and latency; on resume, the agent is told what changed while you were away |
 
 Each of these in detail: [docs/features.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/features.md).
 
@@ -175,7 +177,7 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy
 uv build && uv run python scripts/check_dist.py   # build and smoke-test the package
 ```
 
-Releasing: bump `__version__` in `tinyharness/__init__.py`, add a
+Releasing: bump `__version__` in `tinyharness/version.py`, add a
 [CHANGELOG](https://github.com/anujdutt9/tinyharness/blob/main/CHANGELOG.md) entry, then push a matching tag (`git tag v0.2.0 && git push --tags`).
 The release workflow tests, builds and publishes to PyPI.
 

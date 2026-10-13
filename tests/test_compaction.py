@@ -397,7 +397,13 @@ async def test_an_empty_summary_keeps_the_history():
         async def one_shot(self, prompt, **_):
             return ""
 
-    h = history(Message(role="system", content="sys"), user("a " * 3000), assistant("b " * 3000), user("go on"), assistant("ok"))
+    h = history(
+        Message(role="system", content="sys"),
+        user("a " * 3000),
+        assistant("b " * 3000),
+        user("go on"),
+        assistant("ok"),
+    )
     before = list(h.messages)
     assert not await Compactor(Thinker([])).summarize(h, keep_tail=1)
     assert h.messages == before
@@ -415,7 +421,13 @@ async def test_the_summary_runs_on_the_compaction_model_as_role_compaction():
 
     token = identity.CURRENT.set(identity.for_session("s1"))
     try:
-        h = history(Message(role="system", content="sys"), user("a " * 3000), assistant("b " * 3000), user("go on"), assistant("ok"))
+        h = history(
+            Message(role="system", content="sys"),
+            user("a " * 3000),
+            assistant("b " * 3000),
+            user("go on"),
+            assistant("ok"),
+        )
         assert await Compactor(Client([]), model="qwen-9b").summarize(h, keep_tail=1)
         assert identity.CURRENT.get().role == "lead"  # restored after the call
     finally:
@@ -428,9 +440,13 @@ async def test_the_summary_runs_on_the_compaction_model_as_role_compaction():
 
 def test_usable_is_the_window_less_the_models_output():
     assert compactor(context_window=200_000, max_output=8_192).usable == 200_000 - 8_192
-    assert compactor(context_window=200_000, max_output=128_000).usable == 200_000 - 32_000  # at most 32K held back
+    assert (
+        compactor(context_window=200_000, max_output=128_000).usable == 200_000 - 32_000
+    )  # at most 32K held back
     assert compactor(context_window=200_000).usable == 200_000 - 32_000  # unknown output: 32K
-    assert compactor(context_window=65_536, max_output=lambda: 8_192).usable == 65_536 - 8_192  # read when asked
+    assert (
+        compactor(context_window=65_536, max_output=lambda: 8_192).usable == 65_536 - 8_192
+    )  # read when asked
     assert compactor(context_window=65_536, reserved=17_000).usable == 65_536 - 17_000  # the config's own
 
 
@@ -498,7 +514,9 @@ async def test_when_not_even_the_last_step_fits_everything_is_summarized():
 
 
 async def test_a_lone_request_is_not_summarized():
-    assert not await compactor(preserve_recent_tokens=0).summarize(history(Message(role="system", content="s"), user("go")))
+    assert not await compactor(preserve_recent_tokens=0).summarize(
+        history(Message(role="system", content="s"), user("go"))
+    )
 
 
 async def test_after_a_summary_it_waits_for_new_history_before_summarizing_again():
@@ -537,7 +555,11 @@ async def test_the_summary_request_is_built_like_opencodes():
     assert await Compactor(Client([])).summarize(h, keep_tail=1)
     prompt = seen["prompt"]
     assert prompt.startswith("Here is the conversation so far:\n\n<conversation>\n")
-    assert prompt.index("</conversation>") < prompt.index("<prior-summary>") < prompt.index("Summarize the conversation")
+    assert (
+        prompt.index("</conversation>")
+        < prompt.index("<prior-summary>")
+        < prompt.index("Summarize the conversation")
+    )
     assert "revenue fell 12% in July" in prompt.split("<prior-summary>")[1]
     assert "[earlier summary]" not in prompt  # the prior summary is its own block, not part of the history
     assert "### Completed — Do Not Repeat" in prompt
@@ -582,7 +604,9 @@ def test_the_estimate_is_calibrated_against_the_providers_counts():
 def test_calibration_ignores_a_rewritten_history():
     from tinyharness.llm.usage import Usage
 
-    c = compactor(stub_tool_results_over=100, keep_tail_messages=1, protect_tool_tokens=0, min_savings=0, cache_ttl=0)
+    c = compactor(
+        stub_tool_results_over=100, keep_tail_messages=1, protect_tool_tokens=0, min_savings=0, cache_ttl=0
+    )
     h = history(user("go"), assistant("", "a"))
     c.observe(h, Usage(input=100, output=10))
     h.messages += [tool("a", BIG), assistant("", "b")]
@@ -716,7 +740,9 @@ def test_a_cached_tokenizer_is_loaded_without_asking_the_hub(monkeypatch, tmp_pa
         return cache[repo]
 
     monkeypatch.setitem(sys.modules, "tokenizers", types.SimpleNamespace(Tokenizer=Tokenizer))
-    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(hf_hub_download=hf_hub_download))
+    monkeypatch.setitem(
+        sys.modules, "huggingface_hub", types.SimpleNamespace(hf_hub_download=hf_hub_download)
+    )
     tokens.model_counter.cache_clear()
     try:
         assert tokens.model_counter("org/cached")("a b c") == 3

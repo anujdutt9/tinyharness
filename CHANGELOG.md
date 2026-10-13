@@ -9,7 +9,29 @@ the SDK, and every break is listed here.
 
 First release.
 
+### Added
+- `[sandbox] required = true` now fails closed at session startup when no supported
+  sandbox is active, so unattended runs cannot approve an unsandboxed fallback.
+- Session JSONL records now use trace schema 1 and carry session, turn, agent, model-call,
+  routing-decision and tool-call IDs plus the harness version. Main-loop model calls and
+  permission, tool, compaction and total-turn latency are recorded for evaluation.
+- Background model policies can now be set independently under `[models.roles]` for the
+  safety classifier, search digest and compaction. Lead and subagent compaction use the
+  same resolution; provider `small_model` and `compaction_model` remain compatibility fallbacks.
+- SDK sessions accept post-turn `evaluators`; each gets a deep-copied trajectory and its
+  result, error or timeout is appended to the trace without changing the completed task.
+
+### Changed
+- Credential-based provider fallback is now named `credential_selected` internally;
+  `auto_selected` remains a compatibility alias and no longer occupies future routing terminology.
+- Prompt-suggestion shown/accepted events are recorded without their text so the default
+  model call can be evaluated before changing its behavior.
+- Removed the obsolete compaction implementation plan; the current design remains in the
+  feature documentation and `agent/compaction.py` rationale.
+
 ### Fixed
+- The distribution smoke test now checks the source version's wheel instead of silently
+  selecting a stale, higher-version artifact left in `dist/`.
 - Auto mode no longer turns a small model's unnecessary `sandbox=false` on routine
   listings, searches, copies, directory creation, or test commands into a permission
   storm: it silently keeps the command inside the sandbox. Commands that genuinely need

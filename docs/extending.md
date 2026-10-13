@@ -129,6 +129,22 @@ def guard(event, payload):
 SessionOptions(hooks=[Hook(event="PreToolUse", type="python", callable=guard)])
 ```
 
+## Post-turn evaluators
+
+SDK hosts can attach observational evaluators. They run after the agent loop has completed
+but before the final `Done` event reaches the SDK consumer. Each receives a deep-copied
+message snapshot and writes its return value to the session JSONL as an `evaluation` event.
+Each evaluator has a 30-second default timeout; a failure or timeout is logged and never
+changes the task's answer or history. Set a shorter bound with `evaluator_timeout`.
+
+```python
+async def tests_passed(ctx):
+    return {"passed": (ctx.working_dir / ".tests-passed").exists()}
+
+
+SessionOptions(evaluators=[tests_passed], evaluator_timeout=10.0)
+```
+
 ## Subagents
 
 Subagents and teams come with the `agents` extension (`/extensions on agents`). The

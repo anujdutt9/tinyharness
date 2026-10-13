@@ -349,6 +349,7 @@ class Repl:
             the rest of an earlier message), or the highlighted (else first) menu entry."""
             buffer = event.current_buffer
             if not buffer.text and self.suggestion and not self.turn_running:
+                self.session.record_suggestion("accepted", chars=len(self.suggestion))
                 buffer.insert_text(self.suggestion)
             elif buffer.suggestion and buffer.suggestion.text:
                 buffer.insert_text(buffer.suggestion.text)
@@ -565,6 +566,8 @@ class Repl:
         async def suggest() -> None:
             try:
                 self.suggestion = await self.session.suggest_next()
+                if self.suggestion:
+                    self.session.record_suggestion("shown", chars=len(self.suggestion))
             except Exception as e:  # a missing suggestion isn't worth an error panel
                 log.debug("no prompt suggestion: %s", e)
                 return

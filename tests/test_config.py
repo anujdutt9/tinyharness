@@ -80,6 +80,38 @@ def test_config_file_values(tmp_path):
     assert cfg.working_dir.is_dir()
 
 
+def test_background_model_roles_are_separate_and_keep_legacy_fallbacks(tmp_path):
+    cfg = load_config(
+        write_config(
+            tmp_path,
+            'provider = "openai"\n[providers.openai]\nsmall_model = "legacy-small"\n'
+            '[models.roles]\nsafety_classifier = "guard"\nsearch_digest = "digest"\n'
+            'compaction = "summarizer"\n',
+        )
+    )
+    assert cfg.role_model("safety_classifier") == "guard"
+    assert cfg.role_model("search_digest") == "digest"
+    assert cfg.role_model("compaction") == "summarizer"
+    assert cfg.small_model == "legacy-small"
+
+
+def test_compaction_role_keeps_legacy_and_active_model_fallbacks(tmp_path):
+    legacy = load_config(write_config(tmp_path, 'model = "lead"\ncompaction_model = "legacy"\n'))
+    default = load_config(write_config(tmp_path, 'model = "lead"\n'))
+    assert legacy.role_model("compaction") == "legacy"
+    assert default.role_model("compaction") == "lead"
+
+
+def test_background_roles_reject_cross_provider_specs(tmp_path):
+    with pytest.raises(ValueError, match="must be a model ID for the active provider"):
+        load_config(write_config(tmp_path, '[models.roles]\ncompaction = "openai:gpt-6-sol"\n'))
+
+
+def test_required_sandbox_cannot_be_disabled(tmp_path):
+    with pytest.raises(ValueError, match=r"needs sandbox\.enabled"):
+        load_config(write_config(tmp_path, "[sandbox]\nenabled = false\nrequired = true\n"))
+
+
 def test_legacy_sandbox_root_key_still_works(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text(f'sandbox_root = "{tmp_path}/legacy"\n')
@@ -105,6 +137,7 @@ def test_defaults_to_the_first_provider_with_a_key(tmp_path, monkeypatch):
     cfg = load_config(write_config(tmp_path))
     assert cfg.provider == "gemini"
     assert cfg.model == cfg.provider_info.default_model
+    assert cfg.credential_selected and cfg.auto_selected  # old name remains a read-only alias
 
 
 def test_with_no_keys_the_first_catalog_provider_is_chosen(tmp_path):

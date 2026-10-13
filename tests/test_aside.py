@@ -4,6 +4,7 @@ suggestion shown in the input box after a turn."""
 import asyncio
 import contextlib
 import io
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -188,6 +189,11 @@ async def test_a_finished_turn_brings_a_suggestion(repl):
     await repl._turn_in_background(repl.session.run("fix it"))
     await repl._suggesting
     assert repl.suggestion == "commit it"
+    records = [json.loads(line) for line in repl.session.transcript.path.read_text().splitlines()]
+    assert any(
+        record["event"] == "suggestion" and record["action"] == "shown" and record["chars"] == 9
+        for record in records
+    )
 
 
 async def test_suggestions_can_be_turned_off(repl):
