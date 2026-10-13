@@ -15,6 +15,11 @@ dist/
 .env
 .tinyharness/
 *.local.md
+# Session traces may contain prompts, paths and project content. Keep raw evidence local;
+# release reports contain only redacted aggregates.
+**/sessions/*.jsonl
+**/sidechains/*.jsonl
+smoke-logs/
 
 # Editors / OS
 .claude/

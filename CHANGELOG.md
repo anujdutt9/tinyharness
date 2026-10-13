@@ -9,6 +9,10 @@ the SDK, and every break is listed here.
 
 First release.
 
+Release validation is summarized in
+[`docs/releases/v0.1.0-smoke.md`](docs/releases/v0.1.0-smoke.md). Raw session traces are
+intentionally excluded because they can contain prompts, filesystem paths and project context.
+
 ### Added
 - `[sandbox] required = true` now fails closed at session startup when no supported
   sandbox is active, so unattended runs cannot approve an unsandboxed fallback.
