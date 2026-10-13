@@ -116,7 +116,7 @@ hooks, skills, subagents on different models, and an extension.
 | **Sandbox** | Seatbelt on macOS: commands write only inside the project, can't read credential files, and reach only an allowlist of hosts (package registries, GitHub, CDNs) through a local proxy; `/sandbox` shows it |
 | **Context** | Cap oversized messages, stub old tool output, then summarize, without rebuilding the prompt cache every turn |
 | **Subagents and teams** | Isolated contexts on any model; `Team` runs a dependency graph of tasks; the model picks the team's size, up to 20 subagents at once (`max_parallel_agents`) |
-| **Skills, hooks, plugins** | `SKILL.md` skills (compatible with Claude Code's), shell or Python hooks on 5 events, plugins that bundle them |
+| **Skills, hooks, plugins** | Portable `SKILL.md` skills, shell or Python hooks on 5 events, and plugins that bundle them |
 | **Resume & traces** | Lossless, schema-versioned JSONL logs outside your repo with correlated main-loop model/tool decisions and latency; on resume, the agent is told what changed while you were away |
 
 Each of these in detail: [docs/features.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/features.md).

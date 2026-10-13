@@ -342,7 +342,7 @@ def test_long_project_paths_get_short_unique_names(tmp_path):
 
 
 async def test_clear_keeps_the_old_conversation_resumable(work):
-    """As in Claude Code: /clear moves on to a new conversation; the old one isn't lost."""
+    """The /clear command starts a new conversation without losing the old one."""
     first = Session(options(work))
     await turn(first, "build the deck", "Built it.")
     old_id, before = first.id, contents(first)

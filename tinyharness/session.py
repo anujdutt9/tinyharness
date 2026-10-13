@@ -742,8 +742,8 @@ class Session:
         return True
 
     def clear(self) -> None:
-        """Start a new conversation, as Claude Code's /clear does: the old one stays saved
-        as it was (`tinyharness -r` picks it), and this one gets its own id and log.
+        """Start a new conversation: the old one stays saved as it was (`tinyharness -r`
+        picks it), and this one gets its own id and log.
         Permissions and scratch space are kept, and so are the token and cost totals: they're
         what the session spent (see UsageMeter.since_clear)."""
         had_conversation = any(m.role != "system" for m in self.history.messages)

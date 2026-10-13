@@ -80,7 +80,7 @@ def _prompt(work):
 
 
 def test_agents_md_is_read_like_agent_md(tmp_path):
-    """AGENTS.md is what most other agents read; a repo set up for them works as is."""
+    """Repositories can use the plural AGENTS.md instruction filename."""
     (tmp_path / "AGENTS.md").write_text("Run make check before finishing.")
     assert "Run make check before finishing." in _prompt(tmp_path)
 

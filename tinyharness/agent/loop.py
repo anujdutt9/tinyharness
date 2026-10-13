@@ -1057,8 +1057,7 @@ def _shrink_images(history: History) -> int:
 def _tail(history: History, items: int = 8, chars: int = 500) -> str:
     """Recent context for the auto-mode classifier: the user's messages and the agent's
     tool calls. Not tool output, the agent's own text or teammates' messages: a web page
-    or file could say "the user already approved this", and the classifier would read it.
-    (Claude Code's auto mode leaves them out for the same reason.)"""
+    or file could say "the user already approved this", and the classifier would read it."""
     lines: list[str] = []
     for m in history.messages:
         if m.role == "user" and m.content and not m.content.startswith(TEAMMATE_NOTE):

@@ -33,8 +33,8 @@ from tinyharness.tools.base import Tool, ToolContext, ToolInput, note_outside
 
 HEAD_BYTES = 15_000  # output kept from the start...
 TAIL_BYTES = 15_000  # ...and from the end
-# Nothing waits for a person: no pagers, colors, terminal UIs or password prompts (the
-# same settings Codex and deepseek-harness use). A command that would ask hangs until it times out.
+# Nothing waits for a person: no pagers, colors, terminal UIs or password prompts.
+# A command that would ask hangs until it times out.
 NONINTERACTIVE_ENV = {
     "PAGER": "cat",
     "GIT_PAGER": "cat",

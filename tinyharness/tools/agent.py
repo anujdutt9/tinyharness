@@ -10,17 +10,16 @@ from tinyharness.subagents import AgentSpec
 from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
 
 DEFAULT_AGENT = "general-purpose"
-# Subagents running at once across a session, as in Claude Code: the model decides how
-# many to start, this is only the ceiling (config: max_parallel_agents).
+# The model decides how many subagents to start; this is only the session-wide ceiling
+# (config: max_parallel_agents).
 MAX_PARALLEL_AGENTS = 20
 Spawner = Callable[..., Awaitable[str]]  # (spec, prompt, ctx, *, label=...) -> final answer
 
 
 class AgentSlots:
     """The session's ceiling on subagents running at once, shared by Agent calls and Team
-    teammates. An Agent call past it fails right away, so the model can wait for the
-    running ones (Claude Code does the same); a Team task waits for a free slot instead,
-    since the team's plan is already laid out."""
+    teammates. An Agent call past it fails right away, so the model can wait for running
+    calls; a Team task waits for a free slot instead, since its plan is already laid out."""
 
     def __init__(self, limit: int = MAX_PARALLEL_AGENTS) -> None:
         self.limit = limit
@@ -46,8 +45,7 @@ class AgentSlots:
 
 
 class AgentInput(ToolInput):
-    # Optional: models often leave it out (other harnesses default it), and a required
-    # field made those calls fail and be retried.
+    # Optional because models often leave it out; requiring it made calls fail and retry.
     subagent_type: str = Field(
         default="",
         description="Which agent, from the list in this tool's description (default: general-purpose)",

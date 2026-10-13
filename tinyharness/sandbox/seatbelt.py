@@ -1,8 +1,8 @@
 """macOS backend: Seatbelt, via /usr/bin/sandbox-exec.
 
-Apple marks sandbox-exec deprecated, but it ships on every Mac and is what Codex,
-Claude Code and Cursor use. The profile starts from `(allow default)` so ordinary
-tools work, then takes away writes, secret reads, the network, and the ways a
+Apple marks sandbox-exec deprecated, but it still ships on every supported macOS
+version. The profile starts from `(allow default)` so ordinary tools work, then takes
+away writes, secret reads, the network, and the ways a
 process can get something *else* to act for it outside the sandbox:
 
     open / LaunchServices   `open evil.command` would run it in Terminal, unsandboxed

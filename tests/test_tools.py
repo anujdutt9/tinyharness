@@ -80,7 +80,7 @@ def agent_tool(**agents):
 
 
 async def test_agent_without_subagent_type_runs_general_purpose(tmp_path):
-    """Models often leave it out (other harnesses default it); that used to fail the call."""
+    """Models often leave the type out; that used to fail the call."""
     from conftest import make_ctx
 
     tool, ran = agent_tool()

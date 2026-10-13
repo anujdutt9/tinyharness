@@ -9,9 +9,8 @@ Both live outside the project (never committed) and outside what sandboxed comma
 write, so only the Memory tool changes them, and the permission gate sees every change.
 A session reads them once, at its start (see extensions/memory.py): saving a note
 changes the next session's system prompt, never this one's, so the cached prefix holds.
-Hermes Agent does the same (a frozen snapshot plus a dedicated tool with a size budget);
-Claude Code and Gemini CLI write memory files with the generic Write tool, which here
-would ask every time, since ~/.tinyharness is protected.
+The frozen snapshot and dedicated tool keep memory updates bounded and explicit. A generic
+Write call would ask every time because ~/.tinyharness is protected.
 """
 
 from __future__ import annotations
@@ -31,8 +30,8 @@ from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
 
 Scope = Literal["user", "project"]
 
-# Characters, as Hermes counts them: every note is in every request of every later
-# session, so the budget is small. A full memory makes the model merge or drop notes.
+# Every note is in every request of every later session, so the character budget is small.
+# A full memory makes the model merge or drop notes.
 LIMITS: dict[Scope, int] = {"user": 1500, "project": 3000}
 TITLES: dict[Scope, str] = {"user": "user memory", "project": "project memory"}
 

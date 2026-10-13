@@ -464,8 +464,7 @@ class Repl:
         return without_links(captured.get().rstrip("\n"))
 
     def _pending(self, width: int) -> str:
-        """Messages waiting for the agent's next step, and how to send them now (as Codex
-        shows them): `• Sent after the agent's current step (esc: stop it and send now)`."""
+        """Messages waiting for the next step, and how to send them immediately."""
         pending = self.session.pending_steering
         if not pending:
             return ""

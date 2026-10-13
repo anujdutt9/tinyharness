@@ -283,8 +283,7 @@ async def test_teammates_past_the_subagent_limit_wait_their_turn(tmp_path):
 
 
 async def test_an_agent_call_past_the_limit_fails_and_shares_it_with_the_team(tmp_path):
-    """Agent calls and teammates count against one ceiling; an Agent call that finds it
-    full fails at once (the model can wait), as in Claude Code."""
+    """Agent calls and teammates share one ceiling; a full Agent call fails immediately."""
     slots = AgentSlots(1)
     release = asyncio.Event()
 

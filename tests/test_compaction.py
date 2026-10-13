@@ -435,7 +435,7 @@ async def test_the_summary_runs_on_the_compaction_model_as_role_compaction():
     assert seen == {"role": "compaction", "model": "qwen-9b"}
 
 
-# ---- when to summarize and how much to keep: from the model (opencode's rules) ----
+# ---- when to summarize and how much to keep: sized from the model ----
 
 
 def test_usable_is_the_window_less_the_models_output():
@@ -533,7 +533,7 @@ async def test_after_a_summary_it_waits_for_new_history_before_summarizing_again
     assert c.needs_summary(h)
 
 
-async def test_the_summary_request_is_built_like_opencodes():
+async def test_the_summary_request_separates_history_prior_summary_and_instructions():
     """The history in <conversation> tags with the instructions after it, and the system prompt
     saying not to continue: with the instructions only in the system prompt and the history
     ending in the agent's words, the 27B continued the conversation (a 37-token "summary")."""

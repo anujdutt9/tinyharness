@@ -123,9 +123,9 @@ class Config(BaseModel):
     effort: Effort | None = None
     request_timeout: float = 1800.0  # seconds; slow reasoning models can take minutes per turn
     request_retries: int = 3  # on 429/5xx or a refused connection, before the reply starts
-    # Subagents running at once (Agent calls and Team teammates together), as in Claude
-    # Code: the model decides how many to start; past this, an Agent call fails so the model
-    # can wait, and Team tasks wait their turn. TINYHARNESS_MAX_PARALLEL_AGENTS overrides.
+    # Subagents running at once (Agent calls and Team teammates together): the model decides
+    # how many to start; past this, an Agent call fails so it can wait, and Team tasks wait
+    # their turn. TINYHARNESS_MAX_PARALLEL_AGENTS overrides.
     max_parallel_agents: int = Field(default=20, ge=1)
     # True when no provider/model was named and credentials chose the first usable provider.
     # This is not task-aware routing; `auto_selected` below is its compatibility alias.
@@ -164,7 +164,7 @@ class Config(BaseModel):
 
     # --- the CLI ---
     # After each turn, suggest your likely next message in the input box (Tab takes it), as
-    # Claude Code does: one short extra model call per turn, mostly read from the cache.
+    # One short extra model call per turn, mostly read from the cache.
     prompt_suggestions: bool = True
 
     # --- tool calls ---
@@ -175,7 +175,7 @@ class Config(BaseModel):
 
     # --- context management ---
     context_window_tokens: int | None = None  # None = what the provider reports for the model
-    # When to summarize, as opencode does: once the history leaves less room than the model's
+    # When to summarize: once the history leaves less room than the model's
     # output limit (at most 32,000 tokens; the provider's model list or `max_output` in a
     # provider's `models` entry). `compaction_reserved` sets that room instead, in tokens;
     # `auto_compact_threshold` (a fraction of the window) overrides both.

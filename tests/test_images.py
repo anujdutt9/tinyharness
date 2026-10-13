@@ -64,7 +64,7 @@ def test_a_broken_image_is_an_error():
 
 
 def test_the_providers_image_error_is_recognized():
-    """What OpenRouter passed back from Claude (Vertex, then Anthropic)."""
+    """A routed provider response containing an oversized image error."""
     body = (
         '{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\\"type\\":\\"error\\",'
         '\\"error\\":{\\"type\\":\\"invalid_request_error\\",\\"message\\":\\"messages.12.content.1.image.source.'

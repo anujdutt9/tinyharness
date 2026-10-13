@@ -19,11 +19,11 @@ guarantees and why each exists):
   and the model is told to write in smaller pieces.
 - The history sent to a provider is always well formed: every tool call answered,
   empty messages dropped, other providers' tool-call ids replaced after `/model`.
-- Tool calls written as text (Hermes JSON, Qwen3-Coder XML) are recovered when a
+- Tool calls written as text (JSON or XML forms) are recovered when a
   server's tool-call parser fails on them; malformed arguments are repaired.
 - Compaction starts from the provider's own token count and can summarize inside one
   long task; the summary keeps the tool calls, files changed and the todo list.
-- When to summarize comes from the model, as in opencode: once the history leaves less
+- When to summarize comes from the model: once the history leaves less
   room than the model's output limit (at most 32,000 tokens, at most half the window).
   The recent tail kept word for word is a quarter of that usable room (2,000–15,000
   tokens), whole turns first. `compaction_reserved` and
@@ -69,7 +69,7 @@ Three tiers: cap oversized messages → stub old tool output → summarize histo
 
 ## Skills
 
-`SKILL.md` directories, loaded progressively; compatible with Claude Code skills
+`SKILL.md` directories, loaded progressively and portable across tools that use this format
 
 ## Subagents and teams
 

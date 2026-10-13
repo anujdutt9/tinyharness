@@ -777,7 +777,7 @@ def test_waiting_messages_show_above_the_input_with_how_to_send_them_now(repl):
 
 
 async def test_esc_stops_the_turn_and_sends_the_waiting_message_now(repl):
-    """Codex-style: a message typed mid-step waits for the next step, unless Esc says now."""
+    """A message typed mid-step waits for the next step unless Esc sends it immediately."""
     import asyncio
 
     from prompt_toolkit.application import create_app_session

@@ -12,8 +12,7 @@ message, so the model can Read it back instead of running the tool again.
   3. summarize     when the history leaves less room than the model's output needs,
                    have the model summarize everything but the recent tail
 
-When to summarize and how much to keep follow opencode (session/overflow.ts,
-session/compaction.ts), sized from the model, not fixed:
+When to summarize and how much to keep are sized from the model, not fixed:
 
   - usable = window − reserve, where reserve is the model's output limit (at most
     OUTPUT_TOKEN_MAX), or `reserved` from the config. Summarize once the history
@@ -50,7 +49,7 @@ the model. So tier 2 clears only when it pays:
     is written again anyway, so clearing is free and makes that write cheaper
   - cache warm: only once the history passes `clear_when_warm_at` of `usable`,
     to hold off the lossy summary, and only for at least `min_savings` tokens at
-    once (the idea behind Anthropic's `clear_at_least` and opencode's prune)
+    once, so the cache rewrite is worth the information it removes
 """
 
 from __future__ import annotations
@@ -89,7 +88,6 @@ CHECKPOINT_CONTINUATION = """[continuing from a context checkpoint]
 The checkpoint above is authoritative about execution state. Continue only from Active or Next Action. Do
 not repeat anything in Completed, and do not recreate completed Agent or Team calls; reuse their recorded
 results. If no work remains, report completion."""
-# opencode's defaults (provider/transform.ts OUTPUT_TOKEN_MAX, session/compaction.ts)
 OUTPUT_TOKEN_MAX = 32_000  # the most of the window held back for the reply
 TAIL_SHARE = 0.25  # of `usable`: the recent tail kept word for word ...
 TAIL_MIN, TAIL_MAX = 2_000, 15_000  # ... within these bounds
@@ -189,9 +187,9 @@ class Compactor:
     @property
     def reserve(self) -> int:
         """Tokens held back for the reply: `reserved`, or the model's output limit, at most
-        OUTPUT_TOKEN_MAX. Unlike opencode, at most half the window: model lists often give
-        the output limit as the whole window (or it is unknown on a 32K model), which would
-        summarize on every call."""
+        OUTPUT_TOKEN_MAX. At most half the window: model lists often give the output limit
+        as the whole window (or it is unknown on a 32K model), which would summarize on
+        every call."""
         if self.reserved is not None:
             return self.reserved
         window = self.context_window
@@ -199,8 +197,8 @@ class Compactor:
 
     @property
     def usable(self) -> int:
-        """How much of the window the history may fill and still leave the reply its room
-        (opencode's `usable`): the window less `reserve`."""
+        """How much of the window the history may fill and still leave the reply its room:
+        the window less `reserve`."""
         return max(0, self.context_window - self.reserve)
 
     @property
@@ -465,12 +463,12 @@ class Compactor:
         return info.context if info is not None and info.context else self.context_window
 
     def _cut_tokens(self, body: list[Message], budget: int) -> int:
-        """Where the kept tail starts, for a tail of at most `budget` tokens (opencode's
-        `select`): whole turns from the end (a turn starts at a user message), then the
+        """Where the kept tail starts, for a tail of at most `budget` tokens: whole turns
+        from the end (a turn starts at a user message), then the
         latest part of the turn that doesn't fit whole, never starting at a tool result.
         len(body): everything is summarized and a checkpoint continuation follows the summary,
-        when not even the last step fits, or when everything does (as opencode: the
-        provider's count, which an overflow reports, can exceed this estimate)."""
+        when not even the last step fits, or when everything does (the provider's count,
+        which an overflow reports, can exceed this estimate)."""
         if len(body) <= 1:
             return 0  # a lone request: nothing to summarize
         sizes = [self.estimate([m]) for m in body]
@@ -507,11 +505,10 @@ class Compactor:
         return start
 
     def _prompt(self, head: list[Message], notes: str) -> str:
-        """The summarizer's request, built as opencode's (core/session/compaction.ts `buildPrompt`):
-        the history inside <conversation> tags, an earlier summary in <prior-summary>, and the
-        instructions after them. With the instructions only in the system prompt and the history
-        ending in the agent's own words, a model continues the conversation instead (the 27B did,
-        with thinking off)."""
+        """Build the summarizer request with tagged history, a separately tagged earlier
+        summary, and instructions after both. With instructions only in the system prompt
+        and history ending in the agent's words, some models continue the conversation
+        instead of summarizing it."""
         prior = "\n\n".join(
             (m.content or "").removeprefix(SUMMARY_MARK).strip() for m in head if m.role == "system"
         )

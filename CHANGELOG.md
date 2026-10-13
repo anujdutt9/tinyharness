@@ -22,6 +22,8 @@ First release.
   result, error or timeout is appended to the trace without changing the completed task.
 
 ### Changed
+- Code comments and documentation now explain tinyharness behavior directly, without
+  relying on comparisons to other agent products or their implementations.
 - Credential-based provider fallback is now named `credential_selected` internally;
   `auto_selected` remains a compatibility alias and no longer occupies future routing terminology.
 - Prompt-suggestion shown/accepted events are recorded without their text so the default
@@ -88,8 +90,8 @@ First release.
   tools, even while the agent works; neither question nor answer joins the conversation.
   The answer shows above the input box until Esc closes it; `/output` prints it.
   It reuses the agent's cached prefix (one short call). SDK: `Session.aside()`.
-- After each turn the empty input box suggests your likely next message (Tab takes it), as
-  Claude Code does: one short call per turn, mostly cache reads. `prompt_suggestions =
+- After each turn the empty input box suggests your likely next message (Tab takes it):
+  one short call per turn, mostly cache reads. `prompt_suggestions =
   false` turns it off. SDK: `Session.suggest_next()`.
 - `ctrl+t` after a turn shows its hidden reasoning once, not again on every press.
 - Images: the model can see them. `Read` shows it a PNG, JPEG, GIF or WebP (a
@@ -99,8 +101,8 @@ First release.
   right after them for the others. Shrunk to fit (see below). SDK: `session.run(prompt, images)`,
   `tools.read.load_image`, and `ToolOutput` for tools that return pictures.
 - Checking a page by looking: the model renders it with Playwright through Bash (outside
-  the sandbox, since pages load scripts and fonts from the network) and Reads the PNG,
-  as in other harnesses. Pages use CDN links as usual. (Google Chrome.app can't start in
+  the sandbox, since pages load scripts and fonts from the network) and Reads the PNG.
+  Pages use CDN links as usual. (Google Chrome.app can't start in
   the sandbox; a Bash attempt now says so instead of just "Abort trap: 6".)
 - A running subagent shows its last few tool calls under it (outcome, first line of the
   result, time) with a count of earlier ones, so you can tell progress from going in
@@ -126,8 +128,8 @@ First release.
   and other apps (`open`, `osascript`, browsers) can't be reached, so it stops probing
   for them: `osascript` hangs until the timeout rather than failing.
 - The TodoWrite checklist is off by default: current models keep track of multi-step work
-  without one, and keeping it up costs steps and tokens (Claude Code dropped its todo
-  tools from Opus 4.8 on). Turn it on with `todo_list = true`, `TINYHARNESS_TODO_LIST=1`
+  without one, and keeping it up costs steps and tokens. Turn it on with
+  `todo_list = true`, `TINYHARNESS_TODO_LIST=1`
   or the SDK's `SessionOptions(todo_list=True)`, e.g. for smaller or older models or to
   watch a live plan. When on, it asks for a few coarse steps that match how the work is
   done, skips simple work, and lets one call finish several steps. Subagents never get
@@ -145,9 +147,9 @@ First release.
   covers the others on it. Reading a folder outside the project was one question per tool.
 - The auto-mode classifier sees only your messages and the agent's tool calls: no tool
   output, no agent text, no teammates' messages. A page or file saying "the user
-  approved this" can no longer argue for an action (Claude Code's auto mode does the same).
-- `AGENTS.md` is read as project instructions too (the name Codex, Cursor, Amp and Gemini
-  CLI use), next to `AGENT.md` and `CLAUDE.md`. When a project has none, the model is told,
+  approved this" can no longer argue for an action.
+- `AGENTS.md` is read as project instructions too, next to `AGENT.md` and `CLAUDE.md`.
+  When a project has none, the model is told,
   so it doesn't go looking. Reading a file that isn't there shows a quiet `not found`, not
   a red error.
 - The turn summary counts subagents' and teammates' tool calls too: `128 tools (111 by 4
@@ -161,15 +163,15 @@ First release.
   advice notes for servers (wrong whenever localhost is allowed) and apps are gone.
 - Images are shrunk to at most 2000 px a side (and 5 MB) before the model sees them: pasted
   screenshots and images the agent reads. A Retina screenshot used to go in at full size,
-  and once a request had several images, Claude rejected it and every request after it. If a provider still
+  and once a request had several images, the provider rejected it and every request after it. If a provider still
   rejects an image, the images in the conversation are shrunk further (or dropped, with a
   note) and the request is retried once. Adds Pillow as a dependency.
-- `/clear` starts a new conversation, as in Claude Code: the old one stays saved as it was
+- `/clear` starts a new conversation: the old one stays saved as it was
   (`tinyharness -r` picks it). It used to be emptied in place, so `-c` right after a
   `/clear` failed with "has nothing to resume". `-c` and the `-r` list now also skip
   conversations emptied that way.
 - A message you send while the agent works is listed above the input (`• Sent after the
-  agent's current step (esc: stop it and send now)`, as Codex shows it): wait, and it
+  agent's current step (esc: stop it and send now)`): wait, and it
   goes in after the current step; press Esc, and the step stops and your message goes
   in right away. When it reaches the agent, `↳ delivered to the agent: …` says so. SDK:
   `MessageDelivered` events and `Session.pending_steering`.
@@ -178,7 +180,7 @@ First release.
   so a gateway of your own can admit, queue and attribute per session and per agent.
   Each subagent gets its own id (its parent's as X-Parent-Agent-ID), also when several run
   at once. Off by default. SDK: `tinyharness.llm.identity`.
-- One ceiling on subagents running at once, as in Claude Code: `max_parallel_agents`
+- One ceiling on subagents running at once: `max_parallel_agents`
   (default 20; `TINYHARNESS_MAX_PARALLEL_AGENTS`), shared by Agent calls and Team
   teammates. The model decides the team's size (the Team tool suggests 3-5); past the
   ceiling an Agent call fails so the model can wait, and Team tasks wait their turn.
@@ -338,7 +340,7 @@ First release.
 
 ### Project instructions
 - AGENTS.md (and AGENT.md, CLAUDE.md) are read from the repository's root down to the
-  folder tinyharness runs in, as Codex does: launching in `src/` still gets the repo's
+  folder tinyharness runs in: launching in `src/` still gets the repo's
   rules, and a subfolder's file refines them. Outside a git repository only the working
   directory counts, so a file in a parent folder doesn't apply everywhere.
 
@@ -356,8 +358,8 @@ First release.
   `docs/features.md` and `docs/configuration.md`.
 
 ### Reliability
-From an audit of 157 real sessions across 9 models, the code, and how opencode, pi,
-Codex and deepseek-harness handle the same things. Each item has a regression test.
+From an audit of 157 real sessions across 9 models and the code. Each item has a
+regression test.
 - Every reply has one of a shared set of outcomes (`stop`, `tool_calls`, `length`,
   `filtered`, `refused`, `paused`), normalized from each API's own words. A reply cut off
   at the output limit is continued instead of taken as the answer; a tool call cut off
@@ -371,7 +373,7 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   can cut inside one long task, repeats the request word for word, and sees the tool
   calls, files changed, todo list and any earlier summary in full. Old tool calls' long
   arguments are trimmed like old results.
-- Tool calls written as text (Hermes JSON, Qwen3-Coder XML, Gemma 4's own format) are
+- Tool calls written as text (JSON and XML forms, including model-specific variants) are
   recovered when they name a real tool (Gemma's raw `<|"|>` strings included, multi-line
   commands with quotes and all); a reply ending in a call that can't be used (a made-up
   tool, unreadable arguments, or a call's bare JSON with no tags) is answered with what went wrong instead of ending the turn; malformed arguments are repaired (a code fence, double encoding, two

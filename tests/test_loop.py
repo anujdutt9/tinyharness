@@ -740,7 +740,7 @@ async def test_a_tool_name_in_the_wrong_case_still_runs(tmp_path):
     [
         # Qwen3-Coder, seen in tinyharness's logs as a teammate's "final answer"
         "Let me read it.\n<tool_call>\n<function=Read>\n<parameter=seconds>\n2\n</parameter>\n</function>\n</tool_call>",
-        # Hermes / Qwen2.5
+        # JSON-style tool call
         'Let me read it.\n<tool_call>\n{"name": "Read", "arguments": {"seconds": 2}}\n</tool_call>',
     ],
 )

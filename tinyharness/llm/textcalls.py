@@ -7,7 +7,7 @@ Qwen3-Coder and Qwen3.5 (a teammate's "result" was the XML of the call it meant 
 
 Three formats cover the open models in use:
 
-    <tool_call>{"name": "Read", "arguments": {"path": "a.py"}}</tool_call>      Hermes, Qwen2.5
+    <tool_call>{"name": "Read", "arguments": {"path": "a.py"}}</tool_call>      JSON-style calls
     <tool_call><function=Read><parameter=path>a.py</parameter></function></tool_call>  Qwen3-Coder
     <|tool_call>call:read{path: "a.py"}<tool_call|>                             Gemma 4
 

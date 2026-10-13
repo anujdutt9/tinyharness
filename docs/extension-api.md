@@ -199,10 +199,9 @@ NEEDS = ["network:api.github.com", "write:~/notes"]
   plus the extension's approved needs: its hosts through a proxy of its own, its folders
   writable. It returns a `RunResult` with `.code` (None if it timed out) and `.output`.
 
-An extension's own Python still runs in the harness's process with the harness's rights,
-as in pi, opencode and Claude Code: `NEEDS` governs its tools and the commands it runs
-through `th.run`, not arbitrary code in its module. Only load extensions you trust, as you
-would any package.
+An extension's own Python still runs in the harness's process with the harness's rights:
+`NEEDS` governs its tools and the commands it runs through `th.run`, not arbitrary code in
+its module. Only load extensions you trust, as you would any package.
 
 ## Built-in extensions
 

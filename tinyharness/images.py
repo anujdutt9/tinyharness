@@ -16,7 +16,7 @@ from PIL import UnidentifiedImageError
 
 from tinyharness.agent.history import Image
 
-MAX_SIDE = 2000  # px; under every provider's limit (Claude Code shrinks to the same)
+MAX_SIDE = 2000  # px; under every supported provider's limit
 MAX_BYTES = 5_000_000  # the strictest provider's per-image limit (Anthropic)
 MAX_SOURCE_BYTES = 50_000_000  # bigger files aren't decoded at all
 

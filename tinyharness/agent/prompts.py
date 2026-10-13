@@ -13,16 +13,16 @@ from tinyharness.prompts import load_prompt
 
 # Instruction files in each folder, in the order they're read; later ones take precedence.
 INSTRUCTION_FILES = (
-    "AGENTS.md",  # the name most agents use (Codex, opencode, pi, Cursor, Amp, Gemini CLI)
+    "AGENTS.md",  # shared repository instructions
     "AGENT.md",
-    "CLAUDE.md",  # so repos set up for Claude Code work out of the box
+    "CLAUDE.md",  # supported alternate repository-instruction filename
 )
 
 
 def agent_md_sources(working_dir: Path) -> list[Path]:
     """Instruction files, lowest precedence first: managed, user, then each folder from the
-    repository's root down to the working directory (as Codex does: a subfolder's rules
-    refine the root's, so launching in `src/` still gets the repo's AGENTS.md), then the
+    repository's root down to the working directory (a subfolder's rules refine the root's,
+    so launching in `src/` still gets the repo's AGENTS.md), then the
     private per-project ones. Outside a git repository only the working directory counts,
     so a stray AGENTS.md in a parent folder (your home) doesn't apply to everything."""
     return [

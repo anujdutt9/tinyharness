@@ -153,8 +153,8 @@ MISSING_RESULT = "(no result recorded: it may or may not have run; check its eff
 
 def without_images(messages: list[Message]) -> list[Message]:
     """The messages for a model that takes no images: each image replaced by a note saying so
-    (as opencode does), so the model can tell the user or check another way. Copies; the
-    history keeps its images for a model that can see them."""
+    so the model can tell the user or check another way. Copies; the history keeps its
+    images for a model that can see them."""
     out = []
     for m in messages:
         if not m.images:
