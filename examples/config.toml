@@ -1,6 +1,8 @@
 # tinyharness config. Copy to ~/.tinyharness/config.toml.
 # Every key is optional. API keys never go here: add them with `/key <provider>` (stored in
-# ~/.tinyharness/auth.json, readable only by you) or set them in your shell.
+# ~/.tinyharness/auth.json, readable only by you), set them in your shell, or use a
+# checkout-local .env while developing tinyharness. Resolution order is SDK override,
+# process environment, development .env, then auth.json.
 #
 # Plain keys come first and [tables] last: in TOML, every key after a [table] header
 # belongs to that table.

@@ -10,13 +10,16 @@ Which model runs is decided in this order (first match wins):
 
 A model can be named with its provider, `provider:model` (e.g. `openai:gpt-6-sol`),
 which also switches provider. API keys never go in the config file. Each provider
-reads its key from an environment variable (`ANTHROPIC_API_KEY`, ...), filled in this
-order, first found wins:
-  1. your shell
-  2. ~/.tinyharness/auth.json, one entry per provider: {"anthropic": {"api_key": "..."}}.
+resolves one key per provider in this order, first found wins:
+  1. an explicit SDK override (`SessionOptions(api_key=...)`)
+  2. your process environment
+  3. `.env` files, only in a git checkout of tinyharness (development)
+  4. ~/.tinyharness/auth.json, one entry per provider: {"anthropic": {"api_key": "..."}}.
      It's written for you (first-run setup, /key, or /provider and /model when a key is
      missing), only you can read it, and the agent's tools and sandbox can't.
-  3. `.env` files: the working directory's, in a git checkout of tinyharness (development)
+
+Only the selected value is attached to a provider. Saved keys are never copied into
+`os.environ`, and `.env` keys do not leak into the process environment.
 
 Everything of yours lives in ~/.tinyharness. Earlier versions kept config.toml and a
 .env key file in ~/.config/tinyharness; they're moved on the first run (see
@@ -196,6 +199,8 @@ class Config(BaseModel):
         return v.expanduser().resolve()
 
     def model_post_init(self, context: Any) -> None:
+        if not any(provider.api_key_source for provider in self.providers.values() if provider.needs_key):
+            resolve_credentials(self.providers)
         for role, model in self.models.roles:
             head, sep, _ = (model or "").partition(":")
             if sep and head in self.providers:
@@ -206,13 +211,15 @@ class Config(BaseModel):
         provider, model = self.parse_model(self.model) if self.model else (self.provider, "")
         auto = not provider
         if auto:
-            # A key set for this run (the shell, a .env) says more about what you want now than
-            # one saved in auth.json long ago (seen: a stale saved key beating a fresh one).
+            # A key set for this run says more about what you want now than one saved in
+            # auth.json long ago (seen: a stale saved key beating a fresh one).
             with_key = [n for n in self.providers if self.has_key(n)]
-            fresh = [n for n in with_key if self.providers[n].api_key_env not in KEYS_FROM_AUTH]
+            fresh = [n for n in with_key if self.providers[n].api_key_source in ("environment", ".env")]
             provider = (fresh or with_key or list(self.providers))[0]
         self.provider = provider
         self.select(f"{provider}:{model}")
+        if self.api_key:
+            self.provider_info.set_api_key(self.api_key, "SDK override")
         self.credential_selected = auto
 
     # -- the active provider and model ------------------------------------------------
@@ -257,10 +264,28 @@ class Config(BaseModel):
         return self.pricing.get(f"{provider}:{model}") or self.pricing.get(model)
 
     def resolve_api_key(self) -> str:
-        return self.api_key or self.provider_info.api_key
+        return self.provider_info.api_key
+
+    @property
+    def api_key_source(self) -> str:
+        """Source selected for the active provider's credential."""
+        return self.provider_info.api_key_source
+
+    def set_api_key(self, value: str) -> None:
+        """Attach an explicit SDK credential to the active provider only."""
+        self.api_key = value
+        self.provider_info.set_api_key(value, "SDK override")
+
+    def credential_values(self) -> dict[str, str]:
+        """Return resolved credentials for redaction boundaries."""
+        return {
+            provider.api_key_env: provider.api_key
+            for provider in self.providers.values()
+            if provider.api_key_env and provider.api_key
+        }
 
     def has_key(self, provider: str) -> bool:
-        return self.providers[provider].has_key or (provider == self.provider and bool(self.api_key))
+        return self.providers[provider].has_key
 
     # -- switching ----------------------------------------------------------------------
 
@@ -331,6 +356,15 @@ def load_dotenv_files(*paths: Path, override: bool = False) -> dict[str, str]:
     return merged
 
 
+def dotenv_values(*paths: Path) -> dict[str, str]:
+    """Merge dotenv files without changing the process environment."""
+    merged: dict[str, str] = {}
+    for path in paths:
+        if path.exists():
+            merged.update(parse_dotenv(path))
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # Keys and the last-used model
 # ---------------------------------------------------------------------------
@@ -346,27 +380,43 @@ def read_auth(path: Path | None = None) -> dict[str, str]:
     return keys
 
 
-# Environment variables whose key came from auth.json rather than the shell or a .env.
-KEYS_FROM_AUTH: set[str] = set()
+def resolve_credentials(providers: dict[str, Provider], dotenv: dict[str, str] | None = None) -> None:
+    """Resolve exactly one credential and its source for every provider.
 
-
-def load_auth(providers: dict[str, Provider]) -> None:
-    """Put auth.json's keys where providers read them. A key set in your shell wins."""
-    for name, key in read_auth().items():
-        provider = providers.get(name)
-        if provider is not None and provider.needs_key and provider.api_key_env not in os.environ:
-            os.environ[provider.api_key_env] = key
-            KEYS_FROM_AUTH.add(provider.api_key_env)
+    Parameters
+    ----------
+    providers : dict[str, Provider]
+        Provider catalog to update.
+    dotenv : dict[str, str], optional
+        Development values parsed from the active ``.env`` files.
+    """
+    saved = read_auth()
+    development = dotenv or {}
+    for name, provider in providers.items():
+        if provider.api_key_source == "SDK override":
+            continue
+        if not provider.needs_key:
+            provider.set_api_key("", "")
+            continue
+        variable = provider.api_key_env
+        candidates = (
+            (os.environ.get(variable, "").strip(), "environment"),
+            (development.get(variable, "").strip(), ".env"),
+            (saved.get(name, "").strip(), "auth.json"),
+        )
+        value, source = next(((value, source) for value, source in candidates if value), ("", ""))
+        provider.set_api_key(value, source)
 
 
 def save_key(provider: str, value: str, providers: dict[str, Provider]) -> Path:
-    """Store a provider's key in auth.json (replacing its old one) and use it right away."""
+    """Store a provider key in auth.json and select it when no higher source is active."""
     data = _read_auth_file()
     entry = data.get(provider)
     data[provider] = {**(entry if isinstance(entry, dict) else {}), "api_key": value}
     path = _write_auth_file(data)
-    if providers[provider].needs_key:
-        os.environ[providers[provider].api_key_env] = value
+    info = providers[provider]
+    if info.needs_key and info.api_key_source not in ("SDK override", "environment", ".env"):
+        info.set_api_key(value, "auth.json")
     return path
 
 
@@ -471,8 +521,11 @@ def _remove_if_empty(directory: Path) -> None:
 
 
 def dotenv_paths(working_dir: Path | None = None) -> list[Path]:
-    """`.env` files keys are also read from, lowest priority first (the shell and
-    auth.json beat them): only in a git checkout of tinyharness, for development."""
+    """Return development dotenv files from lowest to highest priority.
+
+    Dotenv files are considered only from a tinyharness source checkout. The process
+    environment beats them; they beat ``auth.json``.
+    """
     if source_checkout() is None:
         return []
     paths = [Path.cwd() / ".env"]
@@ -597,9 +650,13 @@ def load_config(path: Path | None = None, *, use_last_model: bool = False) -> Co
     providers = load_catalog(data.pop("providers", None))
 
     migrate_legacy_keys(providers)
-    load_auth(providers)  # before .env files: the first value found wins
     working_dir = data.get("working_dir") or data.get("sandbox_root")
-    load_dotenv_files(*dotenv_paths(Path(working_dir) if working_dir else None))
+    dotenv = dotenv_values(*dotenv_paths(Path(working_dir) if working_dir else None))
+    key_variables = {provider.api_key_env for provider in providers.values() if provider.needs_key}
+    for name, value in dotenv.items():
+        if name not in key_variables and name not in os.environ:
+            os.environ[name] = value
+    resolve_credentials(providers, dotenv)
 
     unknown = set(data) - set(Config.model_fields) - {"sandbox_root"}
     if unknown:

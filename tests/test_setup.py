@@ -147,6 +147,14 @@ def user_types(monkeypatch, *answers):
     monkeypatch.setattr("tinyharness.cli.setup.ask", ask)
 
 
+def test_whoami_reports_the_resolved_key_source(repl):
+    from tinyharness.cli.commands import whoami
+
+    whoami(repl, "")
+    text = repl.console.export_text()
+    assert "key from" in text and "environment" in text
+
+
 async def test_switching_to_a_provider_without_a_key_asks_for_it(repl, monkeypatch):
     from tinyharness.cli.commands import provider
 
@@ -181,13 +189,16 @@ async def test_a_rejected_key_is_asked_for_again(repl, monkeypatch):
     assert "Anthropic rejected that key: invalid x-api-key" in repl.console.export_text()
 
 
-async def test_key_replaces_the_current_providers_key_and_uses_it(repl, monkeypatch):
+async def test_saved_key_does_not_override_the_process_environment(repl, monkeypatch):
     from tinyharness.cli.commands import key
 
     new = "sk-" + "n" * 40
     user_types(monkeypatch, new)
     providers_answer(monkeypatch, Ping(ok=True, status=200, message="auth ok"))
     await key(repl, "openai")
-    assert os.environ["OPENAI_API_KEY"] == new
-    assert repl.session.llm.api_key == new  # the running client, not just the file
-    assert "OpenAI has a key; a new one replaces it." in repl.console.export_text()
+    assert os.environ["OPENAI_API_KEY"] != new
+    assert read_auth() == {"openai": new}
+    assert repl.session.llm.api_key == os.environ["OPENAI_API_KEY"]
+    text = repl.console.export_text()
+    assert "uses a key from environment" in text
+    assert "Saved OpenAI fallback; still using environment." in text

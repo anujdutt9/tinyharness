@@ -22,6 +22,9 @@ First release.
   result, error or timeout is appended to the trace without changing the completed task.
 
 ### Changed
+- API keys now go through one resolver with visible provenance: SDK override, process
+  environment, development `.env`, then `auth.json`. Saved and dotenv keys are no longer
+  copied into `os.environ`, and `/whoami` reports the selected source.
 - Public SDK and extension examples now use concise numpydoc documentation. Function
   tools read their input descriptions from numpydoc `Parameters` sections while keeping
   the earlier compact form compatible.

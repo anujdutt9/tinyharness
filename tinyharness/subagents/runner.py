@@ -151,7 +151,12 @@ async def run_subagent(
             doing = (phase, tool, detail)
             report("working", detail, phase, tool)
 
-    with Transcript(ctx.workspace.root, f"{spec.name}-{run_id}", kind="sidechains") as transcript:
+    with Transcript(
+        ctx.workspace.root,
+        f"{spec.name}-{run_id}",
+        kind="sidechains",
+        secrets=ctx.config.credential_values(),
+    ) as transcript:
         log = str(transcript.path)
         # Which session and agent this is (set by the caller), so a sidechain can be matched to the
         # session that started it: with several sessions running at once, times overlap.

@@ -4,10 +4,15 @@ tinyharness needs an API key for at least one provider. The first run asks for o
 (with a link to where to get it), checks it with the provider and keeps it in
 `~/.tinyharness/auth.json`, one entry per provider, readable only by you and never by
 the agent's tools. Switching to a provider with no key (`/provider`, `/model`) asks
-for its key the same way, and `/key` adds or replaces one any time. A key set in your
-shell (`export ANTHROPIC_API_KEY=...`) takes priority. After that, everything is
+for its key the same way, and `/key` adds or replaces a saved key. After that, everything is
 optional: `/model` switches models (and remembers your choice), and one file,
 `~/.tinyharness/config.toml`, holds any defaults you want.
+
+One key is resolved per provider. The precedence is an SDK `SessionOptions(api_key=...)`
+override, the process environment, a development `.env`, then `auth.json`. `.env` is read
+only from a tinyharness source checkout; installed CLI and SDK users do not pick up project
+dotenv files. Saved and dotenv keys are not copied into `os.environ`. `/whoami` shows the
+selected source without exposing the key.
 
 Everything tinyharness keeps for you is in one folder, `~/.tinyharness/`:
 `config.toml`, `auth.json`, your `skills/`, `agents/`, `plugins/` and `hooks.toml`, and

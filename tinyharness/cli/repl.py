@@ -815,7 +815,7 @@ class Repl:
 
     async def _safe_to_send(self, line: str) -> bool:
         """Catch an API key pasted into the chat before it reaches the model."""
-        if (key := find_api_key(line)) is None:
+        if (key := find_api_key(line, self.session.config.credential_values())) is None:
             return True
         self.console.print(
             f"\n  [warn]⚠ Your message contains what looks like an API key[/] [muted]({key})[/]\n"

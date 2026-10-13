@@ -379,7 +379,7 @@ async def _ask_for_key(repl: Repl, info: Provider) -> bool:
     return True
 
 
-@command("/key", "add or replace a provider's API key", group="Model", usage="[provider]")
+@command("/key", "add or replace a provider key saved in auth.json", group="Model", usage="[provider]")
 async def key(repl: Repl, arg: str) -> None:
     session = repl.session
     session.reload_keys()
@@ -392,7 +392,13 @@ async def key(repl: Repl, arg: str) -> None:
         return
     info = cfg.providers[name]
     if cfg.has_key(name):
-        repl.console.print(f"  [muted]{info.label} has a key; a new one replaces it.[/]")
+        if info.api_key_source in ("environment", ".env"):
+            repl.console.print(
+                f"  [muted]{info.label} uses a key from {info.api_key_source}; auth.json can "
+                "store a fallback but cannot override it.[/]"
+            )
+        else:
+            repl.console.print(f"  [muted]{info.label} has a saved key; a new one replaces it.[/]")
     check = await add_key(repl.console, info, cfg.providers)
     if check is None:
         repl.console.print("  [muted]No change.[/]")
@@ -400,7 +406,9 @@ async def key(repl: Repl, arg: str) -> None:
     session.reload_keys()
     if name == cfg.provider:  # the running client has the old key: reconnect (conversation kept)
         session.set_model(f"{cfg.provider}:{cfg.model}")
-    if check.ok:
+    if info.api_key_source != "auth.json":
+        _ok(repl, f"Saved {info.label} fallback; still using {info.api_key_source}.")
+    elif check.ok:
         _ok(repl, f"{info.label} is ready.")
     else:
         repl.console.print(f"  [warn]Saved, but couldn't confirm it works ({escape(check.message)}).[/]")
@@ -410,6 +418,12 @@ async def key(repl: Repl, arg: str) -> None:
 def whoami(repl: Repl, arg: str) -> None:
     session, cfg = repl.session, repl.session.config
     table = _grid()
+    key_source = {
+        "environment": f"environment (${cfg.api_key_env})",
+        ".env": "development .env",
+        "auth.json": "~/.tinyharness/auth.json",
+        "SDK override": "SessionOptions(api_key=...)",
+    }.get(cfg.api_key_source, cfg.api_key_source)
     for label, value in [
         ("provider", f"{cfg.provider_info.label} ({cfg.provider})"),
         ("api", f"{cfg.provider_info.api} · {session.llm.endpoint}"),
@@ -418,11 +432,7 @@ def whoami(repl: Repl, arg: str) -> None:
         ("effort", cfg.effort or "model default"),
         (
             "key from",
-            "api_key (config)"
-            if cfg.api_key
-            else f"${cfg.api_key_env}"
-            if cfg.api_key_env
-            else "(none needed)",
+            key_source or ("(none needed)" if not cfg.api_key_env else "(not set)"),
         ),
         ("key", redact(cfg.resolve_api_key())),
     ]:

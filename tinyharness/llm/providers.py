@@ -19,12 +19,11 @@ a built-in one with a `[providers.<name>]` table:
 
 from __future__ import annotations
 
-import os
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from tinyharness.llm.types import ModelInfo
 
@@ -35,6 +34,9 @@ Api = Literal["chat", "responses", "anthropic", "gemini"]
 
 
 class Provider(BaseModel):
+    _api_key: str = PrivateAttr(default="")
+    _api_key_source: str = PrivateAttr(default="")
+
     name: str
     label: str = ""
     api: Api = "chat"  # wire format; see tinyharness/llm/adapters
@@ -86,7 +88,17 @@ class Provider(BaseModel):
 
     @property
     def api_key(self) -> str:
-        return os.environ.get(self.api_key_env, "") if self.api_key_env else ""
+        return self._api_key
+
+    @property
+    def api_key_source(self) -> str:
+        """Describe where the resolved key came from without exposing its value."""
+        return self._api_key_source
+
+    def set_api_key(self, value: str, source: str) -> None:
+        """Set the single resolved credential used for this provider."""
+        self._api_key = value
+        self._api_key_source = source if value else ""
 
     @property
     def needs_key(self) -> bool:

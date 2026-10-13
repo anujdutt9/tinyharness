@@ -126,9 +126,9 @@ def redact_secrets(text: str, extra: dict[str, str] | None = None) -> str:
     return API_KEY_PATTERN.sub("[REDACTED API KEY]", mask_secrets(text, extra))
 
 
-def find_api_key(text: str) -> str | None:
-    """A redacted preview of the first API key in `text`, or None."""
-    for value in known_secrets().values():
+def find_api_key(text: str, extra: dict[str, str] | None = None) -> str | None:
+    """Return a redacted preview of the first API key in ``text``, if present."""
+    for value in known_secrets(extra).values():
         if value in text:
             return redact(value)
     match = API_KEY_PATTERN.search(text)

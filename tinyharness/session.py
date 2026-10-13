@@ -41,8 +41,8 @@ from tinyharness.agent.sessionlog import (
     SessionStore,
     replay,
 )
-from tinyharness.agent.transcript import trace_id
-from tinyharness.config import Config, dotenv_paths, load_auth, load_config, load_dotenv_files
+from tinyharness.agent.transcript import Transcript, trace_id
+from tinyharness.config import Config, dotenv_paths, dotenv_values, load_config, resolve_credentials
 from tinyharness.events import Compacted, Done, Event, SkillLoaded, ToolResult, ToolUse
 from tinyharness.ext import Command as ExtCommand
 from tinyharness.ext import Extension, LoadError, NeedsConsent, RunResult, load_extensions
@@ -225,7 +225,7 @@ class SessionOptions:
         if self.effort is not None:
             cfg.effort = self.effort
         if self.api_key:
-            cfg.api_key = self.api_key
+            cfg.set_api_key(self.api_key)
         if self.todo_list is not None:
             cfg.todo_list = self.todo_list
         if self.expose_skill_tool is not None:
@@ -266,6 +266,8 @@ class Session:
         self.workspace = Workspace(root)
         self.scratch = Scratch(root, self.id, max_age_hours=self.config.scratch_max_age_hours)
         self.transcript = self.store.writer(self.id)
+        if isinstance(self.transcript, Transcript):
+            self.transcript.set_secrets(self.config.credential_values())
         self.log = SessionLog(self.transcript)
         self.history = History()
         self.ctx = ToolContext(
@@ -549,9 +551,11 @@ class Session:
     # ------------------------------------------------------------------ settings
 
     def reload_keys(self) -> None:
-        """Re-read auth.json (and .env files), in case a key was added while the session ran."""
-        load_auth(self.config.providers)
-        load_dotenv_files(*dotenv_paths(self.config.working_dir))
+        """Resolve credentials again after a source changes."""
+        dotenv = dotenv_values(*dotenv_paths(self.config.working_dir))
+        resolve_credentials(self.config.providers, dotenv)
+        if isinstance(self.transcript, Transcript):
+            self.transcript.set_secrets(self.config.credential_values())
 
     async def check_model(self, spec: str) -> Ping:
         """Send a tiny test request to a model before switching to it ("provider:" = its default).
@@ -794,6 +798,8 @@ class Session:
             self.transcript.close()
             self.id = _new_id()
             self.transcript = self.store.writer(self.id)
+            if isinstance(self.transcript, Transcript):
+                self.transcript.set_secrets(self.config.credential_values())
             self.log = SessionLog(self.transcript)
             self.transcript.write(
                 "session_start",

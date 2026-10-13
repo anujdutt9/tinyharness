@@ -63,10 +63,19 @@ def test_real_env_wins_over_dotenv(tmp_path, monkeypatch):
 def test_dotenv_selects_provider(tmp_path, monkeypatch):
     (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-fromdotenv\n")
     cfg = load_config(write_config(tmp_path))
-    assert os.environ["OPENAI_API_KEY"] == "sk-fromdotenv"
+    assert "OPENAI_API_KEY" not in os.environ
     assert cfg.provider == "openai"
     assert cfg.resolve_api_key() == "sk-fromdotenv"
-    monkeypatch.delenv("OPENAI_API_KEY")
+    assert cfg.api_key_source == ".env"
+
+
+def test_dotenv_beats_auth_json_for_development(no_keys, tmp_path):
+    (tmp_path / ".env").write_text("GROQ_API_KEY=from-dotenv\n")
+    write_auth({"groq": {"api_key": "from-auth"}})
+    cfg = load_config(write_config(tmp_path, 'provider = "groq"\n'))
+    assert cfg.resolve_api_key() == "from-dotenv"
+    assert cfg.api_key_source == ".env"
+    assert "GROQ_API_KEY" not in os.environ
 
 
 # ---- config file ----
@@ -78,6 +87,17 @@ def test_config_file_values(tmp_path):
     assert cfg.permission_mode is PermissionMode.PLAN
     assert cfg.working_dir == (tmp_path / "work").resolve()
     assert cfg.working_dir.is_dir()
+
+
+def test_sdk_key_belongs_only_to_the_selected_provider():
+    cfg = Config(provider="openai", api_key="sdk-key")
+    assert cfg.resolve_api_key() == "sdk-key"
+    assert cfg.api_key_source == "SDK override"
+    cfg.use_provider("anthropic")
+    assert cfg.resolve_api_key() == ""
+    assert not cfg.has_key("anthropic")
+    cfg.use_provider("openai")
+    assert cfg.resolve_api_key() == "sdk-key"
 
 
 def test_background_model_roles_are_separate_and_keep_legacy_fallbacks(tmp_path):
@@ -265,7 +285,9 @@ def test_saved_keys_go_to_auth_json_by_provider(no_keys):
     assert path == auth_path()
     assert json.loads(path.read_text()) == {"anthropic": {"api_key": "sk-ant-2"}, "groq": {"api_key": "gk-1"}}
     assert path.stat().st_mode & 0o777 == 0o600
-    assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-2"  # usable right away
+    assert providers["anthropic"].api_key == "sk-ant-2"  # usable right away
+    assert providers["anthropic"].api_key_source == "auth.json"
+    assert "ANTHROPIC_API_KEY" not in os.environ
     assert [p.name for p in path.parent.glob(".auth.json.*")] == []  # no temporary file left
 
 
@@ -273,12 +295,15 @@ def test_keys_in_auth_json_are_found(no_keys, tmp_path):
     write_auth({"groq": {"api_key": "gk"}})
     cfg = load_config(write_config(tmp_path))
     assert cfg.provider == "groq" and cfg.resolve_api_key() == "gk"
+    assert cfg.api_key_source == "auth.json"
 
 
 def test_a_key_in_your_shell_beats_auth_json(no_keys, tmp_path, monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "from-shell")
     write_auth({"groq": {"api_key": "from-file"}})
-    assert load_config(write_config(tmp_path)).resolve_api_key() == "from-shell"
+    cfg = load_config(write_config(tmp_path))
+    assert cfg.resolve_api_key() == "from-shell"
+    assert cfg.api_key_source == "environment"
 
 
 def test_a_broken_auth_json_is_ignored_not_fatal(no_keys, tmp_path, caplog):
@@ -358,9 +383,6 @@ def test_a_providers_tables_merge_with_the_built_in_ones():
 def test_a_key_set_for_this_run_beats_one_only_saved(no_keys, tmp_path, monkeypatch):
     """Seen live: with OPENROUTER_API_KEY in the run's .env and a stale Anthropic key in
     auth.json, Anthropic (first in the provider list) was picked and failed with a 401."""
-    from tinyharness import config
-
-    monkeypatch.setattr(config, "KEYS_FROM_AUTH", set())
     write_auth({"anthropic": {"api_key": "sk-ant-stale"}})
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-fresh")
     assert load_config(write_config(tmp_path)).provider == "openrouter"

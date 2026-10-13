@@ -105,6 +105,11 @@ def test_find_api_key_catches_a_configured_key_without_a_prefix(monkeypatch):
     assert find_api_key("here: Zm9vYmFyYmF6cXV4MTIzNDU2") is not None
 
 
+def test_find_api_key_catches_a_resolved_key_outside_the_environment():
+    key = "resolved-key-without-a-known-prefix"
+    assert find_api_key(f"here: {key}", {"MISTRAL_API_KEY": key}) is not None
+
+
 @pytest.mark.parametrize("name", [".env.example", ".env.sample", "app/.env.template", ".env.dist"])
 def test_env_templates_are_not_secrets(name):
     assert not is_secret_path(name)
@@ -128,12 +133,17 @@ def test_session_logs_mask_credentials_but_keep_reasoning_intact(tmp_path, monke
     monkeypatch.setenv("OPENAI_API_KEY", "sk-configured0123456789abcdef")
     pasted = "sk-or-v1-" + "a1b2c3d4" * 4
     blob = "gAAA_sk-" + "x" * 30  # a signed reasoning blob that happens to look key-shaped
-    with Transcript(tmp_path, "s1") as log:
+    saved = "resolved-key-without-a-known-prefix"
+    with Transcript(tmp_path, "s1", secrets={"MISTRAL_API_KEY": saved}) as log:
         log.write("user", text=f"use {pasted} please")
-        log.write("tool_use", tool="Bash", args={"command": "echo sk-configured0123456789abcdef"})
+        log.write(
+            "tool_use",
+            tool="Bash",
+            args={"command": f"echo sk-configured0123456789abcdef {saved}"},
+        )
         log.write("msg", message={"content": "hi", "state": {"owner": "o", "data": {"sig": blob}}})
     text = log.path.read_text()
-    assert pasted not in text and "sk-configured0123456789abcdef" not in text
+    assert pasted not in text and "sk-configured0123456789abcdef" not in text and saved not in text
     assert "[REDACTED API KEY]" in text and "[REDACTED OPENAI_API_KEY]" in text
     last = json.loads(text.splitlines()[-1])
     assert last["schema"] == 1 and last["session"] == "s1"

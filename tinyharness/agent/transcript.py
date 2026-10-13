@@ -48,12 +48,19 @@ class Transcript:
     shaped like an API key (a key pasted into the chat, one in a URL or command).
     """
 
-    def __init__(self, working_dir: Path, session_id: str, kind: str = "sessions") -> None:
+    def __init__(
+        self,
+        working_dir: Path,
+        session_id: str,
+        kind: str = "sessions",
+        secrets: dict[str, str] | None = None,
+    ) -> None:
         directory = state_dir(working_dir) / kind
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         _chmod(directory, 0o700)  # made before logs were private: close it now
         self.path = directory / f"{session_id}.jsonl"
         self.session_id = session_id
+        self.secrets = dict(secrets or {})
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         self._file = os.fdopen(fd, "a", encoding="utf-8")
         _chmod(self.path, 0o600)
@@ -76,8 +83,12 @@ class Transcript:
             **context,
             **payload,
         }
-        self._file.write(json.dumps(_redact(record), default=str) + "\n")
+        self._file.write(json.dumps(_redact(record, extra=self.secrets), default=str) + "\n")
         self._file.flush()
+
+    def set_secrets(self, secrets: dict[str, str]) -> None:
+        """Replace the exact credential values masked from future records."""
+        self.secrets = dict(secrets)
 
     def close(self) -> None:
         if not self._file.closed:
@@ -92,18 +103,21 @@ class Transcript:
         self.close()
 
 
-def _redact(value: Any, *, patterns: bool = True) -> Any:
+def _redact(value: Any, *, patterns: bool = True, extra: dict[str, str] | None = None) -> Any:
     """Mask credentials in every string of a log record. Provider reasoning (`state`) and
     images get only exact-value masking: signed and encrypted blobs, and base64 image
     data, are long random text that a key-shaped pattern could match by chance, and
     altering one would break the conversation (or the picture) when it's resumed."""
     if isinstance(value, str):
-        return redact_secrets(value) if patterns else mask_secrets(value)
+        return redact_secrets(value, extra) if patterns else mask_secrets(value, extra)
     if isinstance(value, dict):
         # Provider reasoning and image data: exact values only (see the docstring).
-        return {k: _redact(v, patterns=patterns and k not in ("state", "images")) for k, v in value.items()}
+        return {
+            k: _redact(v, patterns=patterns and k not in ("state", "images"), extra=extra)
+            for k, v in value.items()
+        }
     if isinstance(value, list | tuple):
-        return [_redact(v, patterns=patterns) for v in value]
+        return [_redact(v, patterns=patterns, extra=extra) for v in value]
     return value
 
 

@@ -1024,9 +1024,8 @@ async def _fire_hook(deps: LoopDeps, event: str, payload: dict[str, Any]) -> dic
 
 
 def _config_key(deps: LoopDeps) -> dict[str, str]:
-    """A key passed directly to the SDK isn't in the environment; mask it too."""
-    key = deps.ctx.config.api_key
-    return {"api_key": key} if key else {}
+    """Resolved keys that are not necessarily present in the environment."""
+    return deps.ctx.config.credential_values()
 
 
 def _shrink_images(history: History) -> int:

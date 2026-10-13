@@ -130,7 +130,7 @@ class MemoryTool(Tool[MemoryInput]):
         path = memory_path(args.scope, self.working_dir)
         # Read the file now, not the session's snapshot: another session or the user may
         # have changed it since this one started.
-        change = self._apply(args, read_notes(path))
+        change = self._apply(args, read_notes(path), ctx.config.credential_values())
         limit = LIMITS[args.scope]
         if size(change.notes) > limit:
             raise ToolError(
@@ -145,13 +145,13 @@ class MemoryTool(Tool[MemoryInput]):
             "characters). Sessions started from now on will see it."
         )
 
-    def _apply(self, args: MemoryInput, notes: list[str]) -> _Change:
+    def _apply(self, args: MemoryInput, notes: list[str], secrets: dict[str, str] | None = None) -> _Change:
         title = TITLES[args.scope]
         note = " ".join(args.note.split())  # one line: the file has one note per line
         if args.action != "remove":
             if not note:
                 raise ToolError(f"Give the note's text in `note` to {args.action} it.")
-            if (key := find_api_key(note)) is not None:
+            if (key := find_api_key(note, secrets)) is not None:
                 raise ToolError(
                     f"The note contains what looks like an API key ({key}). Memory is plain text "
                     "loaded into every later session: never save credentials. Save where the key "
