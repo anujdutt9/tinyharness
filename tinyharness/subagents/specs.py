@@ -27,12 +27,27 @@ from tinyharness.prompts import AGENTS_DIR
 
 @dataclass
 class AgentSpec:
-    """A subagent. From the SDK: `SessionOptions(agents=[AgentSpec(...)])`.
+    """Define a subagent available to a session.
 
-    `description` is what the model reads to decide when to use it, so say what it's
-    for. `tools` limits what it can do; None means every tool the session has (subagents
-    never get Agent or Team). `model` is chosen here, by whoever defines the agent, not
-    by the model at run time: see Session.llm_for for the accepted forms."""
+    Parameters
+    ----------
+    name : str
+        Unique agent name.
+    description : str
+        Guidance the lead model uses when deciding whether to delegate.
+    system_prompt : str, optional
+        Instructions for the subagent.
+    tools : list[str], optional
+        Allowed tools. ``None`` uses every eligible session tool.
+    permission_mode : PermissionMode, optional
+        Upper bound on permissions for this agent.
+    model : str, optional
+        Model selection accepted by :meth:`Session.llm_for`.
+    max_steps : int, optional
+        Maximum model calls before the subagent must finish.
+    source : pathlib.Path, optional
+        Markdown definition that produced this specification.
+    """
 
     name: str
     description: str

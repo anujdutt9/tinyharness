@@ -40,8 +40,15 @@ LARGE_CHANGE = 20  # lines; removing more than this counts as destructive (auto 
 
 @dataclass
 class ToolOutput:
-    """A tool's result with pictures for the model to look at (Read returns one for an
-    image file). Plain results are just a `str`."""
+    """Return text and optional images from a tool.
+
+    Attributes
+    ----------
+    text : str
+        Text returned to the model.
+    images : list[Image]
+        Images returned to the model.
+    """
 
     text: str
     images: list[Image] = field(default_factory=list)
@@ -52,6 +59,8 @@ class ToolError(Exception):
 
 
 class ToolInput(BaseModel):
+    """Validate the common behavior of tool input models."""
+
     # Lenient where intent is clear: a number given for a text field is that text (models
     # send `"content": 233`).
     model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
@@ -78,7 +87,7 @@ InputT = TypeVar("InputT", bound=ToolInput)
 
 @dataclass
 class ToolContext:
-    """Per-session state shared by all tool calls."""
+    """Hold per-session state shared by tool calls."""
 
     workspace: Workspace
     config: Config
@@ -132,6 +141,12 @@ def mark_seen(ctx: ToolContext, path: Path) -> None:
 
 
 class Tool(ABC, Generic[InputT]):
+    """Define the interface implemented by every tool.
+
+    Subclasses provide an input model and implement :meth:`run`. The remaining methods
+    describe permissions, concurrency, and presentation to the harness.
+    """
+
     name: ClassVar[str]
     description: str
     Input: type[InputT]
@@ -143,7 +158,22 @@ class Tool(ABC, Generic[InputT]):
     persists: ClassVar[bool] = False
 
     @abstractmethod
-    async def run(self, args: InputT, ctx: ToolContext) -> str | ToolOutput: ...
+    async def run(self, args: InputT, ctx: ToolContext) -> str | ToolOutput:
+        """Execute the tool.
+
+        Parameters
+        ----------
+        args : InputT
+            Validated tool arguments.
+        ctx : ToolContext
+            State shared by tools in the session.
+
+        Returns
+        -------
+        str or ToolOutput
+            Content returned to the model.
+        """
+        ...
 
     def describe(self, args: InputT) -> str:
         """One-line label shown to the user, e.g. `Read(src/main.py)`."""
@@ -213,9 +243,22 @@ class Tool(ABC, Generic[InputT]):
         return self.is_read_only(args)
 
     def parse(self, raw: dict[str, Any]) -> InputT:
+        """Validate raw tool arguments.
+
+        Parameters
+        ----------
+        raw : dict[str, Any]
+            Provider-decoded tool arguments.
+
+        Returns
+        -------
+        InputT
+            Validated input model.
+        """
         return self.Input.model_validate(raw)
 
     def input_schema(self) -> dict[str, Any]:
+        """Return the provider-ready JSON schema for this tool's input."""
         schema = self.Input.model_json_schema()
         defs = schema.pop("$defs", {})
         return _strip_titles(_inline_refs(schema, defs))

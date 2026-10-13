@@ -52,6 +52,8 @@ Each was a real failure; each has tests. A change that weakens one needs a reaso
 - Every user-visible change gets a line in `CHANGELOG.md`, written for users.
 - Comments say why, in plain words, matching the surrounding density. No new
   dependencies without asking.
+- Public classes and functions use concise numpydoc docstrings. Keep obvious private
+  helpers to a one-line summary; add sections only when they convey useful information.
 - Check established implementations and relevant standards before inventing a new
   approach; record the rationale that matters to tinyharness.
 - Verify with a real model before calling an agent-behavior change done: the test suite

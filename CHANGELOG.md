@@ -22,6 +22,9 @@ First release.
   result, error or timeout is appended to the trace without changing the completed task.
 
 ### Changed
+- Public SDK and extension examples now use concise numpydoc documentation. Function
+  tools read their input descriptions from numpydoc `Parameters` sections while keeping
+  the earlier compact form compatible.
 - Code comments and documentation now explain tinyharness behavior directly, without
   relying on comparisons to other agent products or their implementations.
 - Credential-based provider fallback is now named `credential_selected` internally;

@@ -111,6 +111,8 @@ class ExtensionSettings(BaseModel):
 
 
 class Config(BaseModel):
+    """Hold validated harness configuration."""
+
     model_config = ConfigDict(validate_assignment=True, extra="ignore")
 
     # --- model ---
@@ -574,8 +576,20 @@ def _read_toml(path: Path) -> dict[str, Any]:
 
 
 def load_config(path: Path | None = None, *, use_last_model: bool = False) -> Config:
-    """Read the config file and .env files. SDK code gets the same result every time;
-    the CLI also passes `use_last_model` to resume with the model picked last."""
+    """Load configuration and environment-based credentials.
+
+    Parameters
+    ----------
+    path : pathlib.Path, optional
+        Configuration file. Defaults to the user configuration path.
+    use_last_model : bool, default=False
+        Restore the model most recently selected by the CLI when no model is configured.
+
+    Returns
+    -------
+    Config
+        Validated configuration with its working directory prepared.
+    """
     if path is None:
         migrate_legacy_config()  # before reading it: it may be about to move here
     path = path or default_config_path()

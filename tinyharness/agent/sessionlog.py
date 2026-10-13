@@ -43,6 +43,20 @@ class LogWriter(Protocol):
 
 @dataclass
 class SessionInfo:
+    """Summarize a saved session.
+
+    Attributes
+    ----------
+    id : str
+        Session identifier.
+    updated : datetime.datetime
+        Time of the latest record.
+    title : str
+        First user prompt.
+    messages : int
+        Number of saved messages.
+    """
+
     id: str
     updated: datetime
     title: str  # the first prompt
@@ -50,7 +64,7 @@ class SessionInfo:
 
 
 class SessionStore(Protocol):
-    """Where session logs live."""
+    """Define storage for resumable session logs."""
 
     def writer(self, session_id: str) -> LogWriter:
         """Append to a session's log (creating it if needed)."""
@@ -66,7 +80,13 @@ class SessionStore(Protocol):
 
 
 class FileSessionStore:
-    """One JSONL file per session in ~/.tinyharness/projects/<project>/sessions/."""
+    """Store each session in one project-scoped JSONL file.
+
+    Parameters
+    ----------
+    working_dir : pathlib.Path
+        Project directory used to derive the state location.
+    """
 
     def __init__(self, working_dir: Path) -> None:
         self.working_dir = Path(working_dir)

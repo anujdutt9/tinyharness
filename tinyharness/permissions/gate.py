@@ -55,6 +55,8 @@ class PermissionRequest:
 
 @dataclass
 class Decision:
+    """Describe the permission gate's decision for one tool call."""
+
     allow: bool
     reason: str = ""
     source: str = ""  # tool | path | hook | rule | mode | classifier | prompt | policy ...

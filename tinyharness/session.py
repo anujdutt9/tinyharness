@@ -131,7 +131,25 @@ class SandboxRequiredError(RuntimeError):
 
 @dataclass(frozen=True)
 class EvaluationContext:
-    """Read-only snapshot passed to a post-turn evaluator."""
+    """Provide a read-only snapshot to a post-turn evaluator.
+
+    Attributes
+    ----------
+    session_id : str
+        Identifier of the session being evaluated.
+    turn_id : str
+        Correlation identifier for the completed turn.
+    prompt : str
+        User prompt that started the turn.
+    reason : str
+        Normalized reason the turn ended.
+    working_dir : pathlib.Path
+        Session working directory.
+    messages : tuple[Message, ...]
+        Copy of the normalized conversation history.
+    duration_ms : float
+        Turn duration in milliseconds.
+    """
 
     session_id: str
     turn_id: str
@@ -155,7 +173,10 @@ async def _invoke_evaluator(evaluator: Evaluator, context: EvaluationContext) ->
 
 @dataclass
 class SessionOptions:
-    """Per-session overrides on top of the loaded Config. `None` means "use the config"."""
+    """Configure one session.
+
+    Values set to ``None`` inherit from the loaded :class:`Config` where applicable.
+    """
 
     config_path: Path | None = None
     working_dir: Path | None = None
@@ -213,6 +234,23 @@ class SessionOptions:
 
 
 class Session:
+    """Coordinate models, tools, permissions, and conversation state.
+
+    Parameters
+    ----------
+    options : SessionOptions, optional
+        Per-session configuration and integrations.
+    config : Config, optional
+        Preloaded configuration. When omitted, the session resolves it from ``options``.
+
+    Raises
+    ------
+    ValueError
+        If evaluator timeout or other session settings are invalid.
+    SandboxRequiredError
+        If containment is required but unavailable.
+    """
+
     def __init__(self, options: SessionOptions | None = None, config: Config | None = None) -> None:
         self.options = options or SessionOptions()
         if self.options.evaluator_timeout <= 0:
@@ -771,13 +809,25 @@ class Session:
     # ------------------------------------------------------------------ running
 
     async def run(self, prompt: str, images: Sequence[Image] = ()) -> AsyncGenerator[Event, None]:
-        """Send a message and stream what happens. `images` are pictures for the model to
-        look at with it (screenshots, say): see `tinyharness.tools.read.load_image`.
+        """Send a message and stream session events.
 
         A message with an installed skill's `/name` anywhere in it loads that skill with it,
         unless it's already in the conversation: asked for that way, it shouldn't depend on
         the model choosing to read the SKILL.md. A bare name doesn't count ("don't use the
-        claude-design-skill" names it too); the model sees those in the skills list."""
+        some-skill" names it too); the model sees those in the skills list.
+
+        Parameters
+        ----------
+        prompt : str
+            Message to send to the agent.
+        images : Sequence[Image], optional
+            Images supplied with the message.
+
+        Yields
+        ------
+        Event
+            Model text, tool activity, usage, and the final turn outcome.
+        """
         named = self.skills_named(prompt)
         if named:
             prompt = "\n\n".join([*(build_skill_prompt(s) for s in named), f"User message: {prompt}"])
@@ -940,8 +990,14 @@ class Session:
                 )
 
     def steer(self, text: str) -> None:
-        """Say something to the agent while a turn is running: it arrives as a user message
-        before the agent's next step. If the turn ends first, `take_steering()` returns it."""
+        """Queue a user message for a running turn.
+
+        Parameters
+        ----------
+        text : str
+            Message delivered before the agent's next step. It remains pending if the turn
+            ends before delivery.
+        """
         self._steering.append(text)
 
     def record_suggestion(self, action: str, *, chars: int = 0) -> None:
@@ -963,8 +1019,23 @@ class Session:
     # ------------------------------------------------------------------ side calls
 
     async def aside(self, question: str) -> str:
-        """Answer a side question about the conversation (the CLI's /btw) without adding it
-        to the conversation: one model call, no tools, fine while a turn is running."""
+        """Answer a side question without changing the conversation.
+
+        Parameters
+        ----------
+        question : str
+            Question about the current conversation.
+
+        Returns
+        -------
+        str
+            The model's answer, or a short explanation when a tool is required.
+
+        Raises
+        ------
+        ValueError
+            If ``question`` is empty.
+        """
         question = question.strip()
         if not question:
             raise ValueError("ask a question, e.g. /btw why this approach?")
@@ -1014,6 +1085,25 @@ class Session:
         return answer.strip(), called or bool(calls)
 
     async def run_skill(self, name: str, args: str = "") -> AsyncGenerator[Event, None]:
+        """Run an installed skill as a turn.
+
+        Parameters
+        ----------
+        name : str
+            Installed skill name.
+        args : str, optional
+            Additional instructions passed to the skill.
+
+        Yields
+        ------
+        Event
+            Skill loading, model, tool, and completion events.
+
+        Raises
+        ------
+        ValueError
+            If ``name`` is not installed.
+        """
         skill = self.skills.get(name)
         if skill is None:
             available = ", ".join(s.name for s in self.skills.list()) or "(none)"
@@ -1024,6 +1114,7 @@ class Session:
             yield event
 
     def close(self) -> None:
+        """Release proxies, logs, and temporary session data."""
         for proxy in [self.proxy, *self._extension_proxies.values()]:
             if proxy is not None:
                 proxy.close()
@@ -1045,7 +1136,20 @@ class Session:
 
 
 def list_sessions(options: SessionOptions | None = None, limit: int = 20) -> list[SessionInfo]:
-    """Saved conversations that can be resumed (`SessionOptions(resume=info.id)`), newest first."""
+    """List resumable conversations from newest to oldest.
+
+    Parameters
+    ----------
+    options : SessionOptions, optional
+        Selects the session store and working directory.
+    limit : int, default=20
+        Maximum number of conversations to return.
+
+    Returns
+    -------
+    list[SessionInfo]
+        Saved conversation summaries.
+    """
     options = options or SessionOptions()
     if options.store is not None:
         return options.store.sessions(limit)
@@ -1054,7 +1158,20 @@ def list_sessions(options: SessionOptions | None = None, limit: int = 20) -> lis
 
 
 async def query(prompt: str, options: SessionOptions | None = None) -> AsyncGenerator[Event, None]:
-    """Run a single prompt in a fresh session."""
+    """Run one prompt in a fresh session.
+
+    Parameters
+    ----------
+    prompt : str
+        Message to send to the agent.
+    options : SessionOptions, optional
+        Configuration for the temporary session.
+
+    Yields
+    ------
+    Event
+        Events emitted during the turn.
+    """
     session = Session(options)
     try:
         async for event in session.run(prompt):
@@ -1066,7 +1183,22 @@ async def query(prompt: str, options: SessionOptions | None = None) -> AsyncGene
 async def invoke_skill(
     name: str, args: str = "", options: SessionOptions | None = None
 ) -> AsyncGenerator[Event, None]:
-    """Run a single skill in a fresh session."""
+    """Run one skill in a fresh session.
+
+    Parameters
+    ----------
+    name : str
+        Installed skill name.
+    args : str, optional
+        Additional instructions passed to the skill.
+    options : SessionOptions, optional
+        Configuration for the temporary session.
+
+    Yields
+    ------
+    Event
+        Events emitted during the skill turn.
+    """
     session = Session(options)
     try:
         async for event in session.run_skill(name, args):

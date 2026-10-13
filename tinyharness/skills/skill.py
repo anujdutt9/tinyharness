@@ -16,6 +16,8 @@ from tinyharness.paths import search_dirs
 
 @dataclass
 class Skill:
+    """Contain one installed skill and its metadata."""
+
     name: str
     description: str
     body: str

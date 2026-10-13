@@ -23,7 +23,10 @@ def setup(th: Extension) -> None:
     async def hello(name: str, excited: bool = False) -> str:
         """Greet someone by name.
 
-        name: who to greet
+        Parameters
+        ----------
+        name : str
+            Person to greet.
         """
         return f"Hello, {name}{'!' if excited else '.'}"
 
@@ -66,16 +69,35 @@ async def test_a_function_becomes_a_tool_with_a_schema_from_its_signature(tmp_pa
     async def lookup(city: str, days: int = 3, ctx=None) -> str:
         """Look up the weather.
 
-        city: the city's name
+        Parameters
+        ----------
+        city : str
+            The city's name.
+        days : int, default=3
+            Number of forecast days.
         """
         return f"{city} for {days} days, {ctx is not None}"
 
     tool = function_tool(lookup, read_only=True)
     schema = tool.input_schema()
     assert tool.name == "lookup" and tool.description == "Look up the weather." and tool.read_only
-    assert schema["required"] == ["city"] and schema["properties"]["city"]["description"] == "the city's name"
+    assert schema["required"] == ["city"]
+    assert schema["properties"]["city"]["description"] == "The city's name."
+    assert schema["properties"]["days"]["description"] == "Number of forecast days."
     assert schema["properties"]["days"]["default"] == 3 and "ctx" not in schema["properties"]
     assert await tool.run(tool.parse({"city": "Oslo"}), make_ctx(tmp_path)) == "Oslo for 3 days, True"
+
+
+def test_function_tool_keeps_compact_parameter_docs_compatible():
+    async def lookup(city: str) -> str:
+        """Look up a city.
+
+        city: City name.
+        """
+        return city
+
+    schema = function_tool(lookup).input_schema()
+    assert schema["properties"]["city"]["description"] == "City name."
 
 
 def test_a_tool_must_be_async():

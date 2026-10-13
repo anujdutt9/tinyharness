@@ -25,7 +25,10 @@ def setup(th: Extension) -> None:
     async def hello(name: str) -> str:
         """Greet someone by name.
 
-        name: who to greet
+        Parameters
+        ----------
+        name : str
+            Person to greet.
         """
         return f"{th.config.get('greeting', 'Hello')}, {name}."
 
@@ -88,8 +91,8 @@ th.remove_tool("Glob")  # take a core tool away
 
 - The decorator builds a tool from an async function: its name (or `name=`), the first
   paragraph of its docstring as the description, its type hints and defaults as the
-  schema, and `arg: description` lines in the docstring as the field descriptions. A
-  parameter named `ctx` receives the `ToolContext` (workspace, scratch folder, usage).
+  schema, and its numpydoc `Parameters` section as the field descriptions. A parameter
+  named `ctx` receives the `ToolContext` (workspace, scratch folder, usage).
 - `read_only=True`: no side effects. It never asks, may run alongside other read-only
   calls, and is offered in plan mode.
 - `network=True`: it reaches other machines, and the permission gate treats it like

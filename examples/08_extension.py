@@ -23,7 +23,10 @@ def notes(th: Extension) -> None:
     async def find_notes(topic: str) -> str:
         """Find the project's notes about a topic.
 
-        topic: a word to look for, e.g. "deploy"
+        Parameters
+        ----------
+        topic : str
+            Word to find, such as ``"deploy"``.
         """
         store = Path(th.session.workspace.root if th.session else ".") / "notes.json"
         found = [n for n in json.loads(store.read_text()) if topic.lower() in n.lower()]
