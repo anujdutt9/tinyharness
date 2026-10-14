@@ -1,3 +1,5 @@
+from pathlib import PureWindowsPath
+
 import pytest
 
 from conftest import call, make_ctx
@@ -118,6 +120,19 @@ def test_env_templates_are_not_secrets(name):
 @pytest.mark.parametrize("name", [".env", ".env.local", "app/.env.production", ".env.example.bak"])
 def test_real_env_files_are_secrets(name):
     assert is_secret_path(name)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        PureWindowsPath(r"C:\Users\example\project\.env"),
+        PureWindowsPath(r"C:\Users\example\.tinyharness\AUTH.JSON"),
+        PureWindowsPath(r"C:\Users\example\.SSH\ID_ED25519"),
+    ],
+)
+def test_windows_paths_are_normalized_before_secret_matching(path):
+    """Seen live: native Windows separators and casing bypassed credential protection."""
+    assert is_secret_path(path)
 
 
 # ---- session logs ----

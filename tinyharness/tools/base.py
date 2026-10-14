@@ -244,6 +244,10 @@ class Tool(ABC, Generic[InputT]):
         network), so modes that allow project edits may allow it without asking."""
         return False
 
+    def can_send_out(self, args: dict[str, Any]) -> bool:
+        """Whether this call can contact another machine with conversation data."""
+        return self.network
+
     def escapes(self, args: dict[str, Any]) -> str | None:
         """Why this call crosses a hard boundary, or None. Such calls ask even in bypass
         mode: suppressing routine prompts never changes containment."""

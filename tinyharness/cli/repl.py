@@ -64,9 +64,18 @@ from tinyharness.cli.theme import (
     tool_style,
 )
 from tinyharness.cli.widgets import pick
-from tinyharness.events import Event, SubagentUpdate
+from tinyharness.events import (
+    AssistantText,
+    Event,
+    Reasoning,
+    SubagentUpdate,
+    TokenUsage,
+    ToolInputStreaming,
+    ToolUse,
+)
 from tinyharness.ext import CommandContext
 from tinyharness.llm.client import LLMError, ProviderConnectionError
+from tinyharness.llm.usage import Usage
 from tinyharness.paths import auth_path, home_dir, pretty_path
 from tinyharness.permissions import PermissionMode
 from tinyharness.security import find_api_key
@@ -229,7 +238,8 @@ class Repl:
         self.console = console
         self.renderer = renderer
         self.running = True
-        self.context_used = 0.0  # fraction of the context window, refreshed after each turn
+        self.context_used = 0.0  # fraction of the window, refreshed after model calls and turns
+        self._context_approximate = False
         self._exit_armed_until = 0.0  # a second Ctrl-C before this time exits
         self._draft = ""  # pre-filled into the next prompt (a message that wasn't sent)
         self.expanded = False  # ctrl+o: the last output / running subagents, above the input box
@@ -246,6 +256,10 @@ class Repl:
         self._suggesting: asyncio.Task[None] | None = None
         self.aside: Aside | None = None  # the /btw answer shown above the input box (Esc closes it)
         self._answering: asyncio.Task[None] | None = None
+        self._live_input_tokens = 0  # estimated current call, until its TokenUsage arrives
+        self._live_output_chars = 0
+        self._live_tool_chars = 0
+        self._last_usage_refresh = 0.0
 
     # -- input ----------------------------------------------------------------
 
@@ -288,12 +302,19 @@ class Repl:
             if self.context_used >= 0.5
             else "toolbar.dim"
         )
-        parts.append((6, [(f"class:{level}", f"{percent(self.context_used)} context")]))
+        live = bool(self._live_input_tokens or self._live_output_chars)
+        context_approx = "~" if self._context_approximate or live else ""
+        live_approx = "~" if live else ""
+        parts.append((6, [(f"class:{level}", f"{context_approx}{percent(self.context_used)} context")]))
         meter = session.ctx.usage
-        if meter.total.output:  # what the model wrote; /cost has the full breakdown
-            parts.append((1, [("class:toolbar.dim", f"{tokens(meter.total.output)} out")]))
-        if meter.cost is not None:
-            parts.append((5, [("class:toolbar", dollars(meter.cost))]))
+        live_output = self._live_output_tokens
+        if meter.total.output or live_output:  # what the model wrote; /cost has the full breakdown
+            parts.append(
+                (1, [("class:toolbar.dim", f"{live_approx}{tokens(meter.total.output + live_output)} out")])
+            )
+        cost = self._live_cost
+        if cost is not None:
+            parts.append((5, [("class:toolbar", f"{live_approx}{dollars(cost)}")]))
         while parts and _cells(_join(parts)) > room:
             parts.remove(min(parts, key=lambda p: p[0]))
         return _join(parts)
@@ -907,7 +928,7 @@ class Repl:
     async def _turn_in_background(self, events: AsyncGenerator[Event, None]) -> None:
         finished = False
         try:
-            await self.renderer.render(events)
+            await self.renderer.render(self._status_events(events))
             finished = True
         except asyncio.CancelledError:
             if self._sending_now:  # Esc: the waiting messages go to the agent right away
@@ -928,7 +949,7 @@ class Repl:
 
     async def run_turn(self, events: AsyncGenerator[Event, None]) -> None:
         """Render one agent turn. Ctrl-C cancels the turn but keeps the REPL alive."""
-        task = asyncio.create_task(self.renderer.render(events))
+        task = asyncio.create_task(self.renderer.render(self._status_events(events)))
         loop = asyncio.get_running_loop()
         with contextlib.suppress(NotImplementedError):  # not available on Windows
             loop.add_signal_handler(signal.SIGINT, task.cancel)
@@ -943,10 +964,81 @@ class Repl:
                 loop.remove_signal_handler(signal.SIGINT)
             self._measure_context()
 
+    async def _status_events(self, events: AsyncGenerator[Event, None]) -> AsyncGenerator[Event, None]:
+        """Keep the toolbar moving during a model call, then replace estimates with usage."""
+        self._clear_live_usage()
+        async for event in events:
+            if isinstance(event, TokenUsage):
+                if self.session.context_window:
+                    self.context_used = (event.input + event.cached) / self.session.context_window
+                    self._context_approximate = False
+                self._clear_live_usage()
+                self._refresh_status(force=True)
+            elif isinstance(event, AssistantText | Reasoning):
+                self._start_live_usage()
+                self._live_output_chars += len(event.text)
+                self._refresh_live_context()
+                self._refresh_status()
+            elif isinstance(event, ToolInputStreaming):
+                self._start_live_usage()
+                # `chars` is cumulative for the current tool call, so only add its growth.
+                self._live_output_chars += max(event.chars - self._live_tool_chars, 0)
+                self._live_tool_chars = event.chars
+                self._refresh_live_context()
+                self._refresh_status()
+            elif isinstance(event, ToolUse):
+                self._live_tool_chars = 0
+            yield event
+
+    @property
+    def _live_output_tokens(self) -> int:
+        return self._live_output_chars // 4
+
+    @property
+    def _live_cost(self) -> float | None:
+        base = self.session.ctx.usage.cost
+        if not (self._live_input_tokens or self._live_output_chars):
+            return base
+        cfg = self.session.config
+        info = self.session.llm.model_info(cfg.model)
+        price = cfg.price(cfg.provider, cfg.model) or (info.price if info else None)
+        if price is None:
+            return base
+        estimated = price.cost(Usage(input=self._live_input_tokens, output=self._live_output_tokens))
+        return (base or 0.0) + estimated
+
+    def _start_live_usage(self) -> None:
+        if self._live_input_tokens:
+            return
+        with contextlib.suppress(Exception):
+            self._live_input_tokens = self.session.compactor.used(self.session.history)
+
+    def _refresh_live_context(self) -> None:
+        if self.session.context_window:
+            self.context_used = (
+                self._live_input_tokens + self._live_output_tokens
+            ) / self.session.context_window
+            self._context_approximate = True
+
+    def _clear_live_usage(self) -> None:
+        self._live_input_tokens = 0
+        self._live_output_chars = 0
+        self._live_tool_chars = 0
+
+    def _refresh_status(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_usage_refresh < 0.1:
+            return
+        self._last_usage_refresh = now
+        if self._prompt is not None and self._prompt.app.is_running:
+            self._prompt.app.invalidate()
+
     def _measure_context(self) -> None:
+        self._clear_live_usage()
         with contextlib.suppress(Exception):  # the toolbar is a nicety; never fail a turn over it
             used = self.session.compactor.used(self.session.history)
             self.context_used = used / self.session.context_window
+            self._context_approximate = True
         self.git = git_status(self.session.workspace.root)
 
 

@@ -115,7 +115,7 @@ hooks, skills, subagents on different models, and an extension.
 | **Tools** | Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash` `Open`. Built-in extensions you turn on: `web` (WebSearch, WebFetch), `pdf`, `todo`, `agents` (Agent, Team) |
 | **Extensions** | One Python file with `setup(th)` adds tools, prompt sections, slash commands and event handlers ([docs/extension-api.md](docs/extension-api.md)); `/extensions on|off` |
 | **Permissions** | Routine work in the project and the sandbox doesn't ask; anything beyond it asks, with a diff for edits. Modes `default`, `auto` (an LLM classifier for unclear cases), `plan`, `ask` (every edit and command) and `bypassPermissions`; persistent allow/deny rules |
-| **Sandbox** | Native Seatbelt on macOS; optional Sandbox Runtime on Linux, Windows and as a fallback. Commands have narrow writes, blocked credential reads and allowlisted network access; `/sandbox` shows it |
+| **Sandbox** | Native Seatbelt on macOS; optional Sandbox Runtime on Linux, Windows and as a fallback. Commands have narrow writes, blocked credential reads (SRT covers the home and project neighborhoods) and allowlisted network access; `/sandbox` shows it |
 | **Context** | Cap oversized messages, stub old tool output, then summarize, without rebuilding the prompt cache every turn |
 | **Subagents and teams** | Isolated contexts on any model; `Team` runs a dependency graph of tasks; the model picks the team's size, up to 20 subagents at once (`max_parallel_agents`) |
 | **Skills, hooks, plugins** | Portable `SKILL.md` skills, shell or Python hooks on 5 events, and plugins that bundle them |

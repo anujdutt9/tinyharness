@@ -5,6 +5,43 @@ All notable changes to tinyharness. The format follows
 [semantic versioning](https://semver.org/): while on 0.x, minor versions may break
 the SDK, and every break is listed here.
 
+## Unreleased
+
+### Fixed
+- Windows in-process file reads and writes now reject reparse-point swaps after approval;
+  directory handles keep every checked parent from being replaced until the operation ends.
+- Software-acquisition approval now covers shell conditionals, wrapper options such as
+  `env -u`, and versioned `pip` commands. Absolute Python package installers are rebound
+  to the writable environment named by the approval instead of silently ignoring it.
+- After outside content enters a conversation, sandboxed Bash asks before running whenever
+  its network policy has an outbound destination; an allowlist limits destinations but is
+  not treated as consent to transmit project data.
+- Windows-style paths now receive the same case-insensitive credential-file protection as
+  POSIX paths. Replies stopped at their output limit cannot execute any tool call, even when
+  one call looks complete. Software-acquisition approval now recognizes newline-separated
+  commands, common Python/package-manager options, and dependency scripts after `cd`.
+- Context, output tokens and cost now update with lightweight estimates while a model is
+  streaming, then reconcile to the provider's exact usage when each response completes.
+  The locally tokenized next-request context remains visibly approximate while exact output
+  and cost totals retain their provider-reported values.
+- Sandboxed test suites can read credential-shaped fixtures created beneath the session's
+  private temporary directory without exposing real credentials. Commands that need a local
+  test, preview or development server can request the scoped `localhost` capability while
+  remaining sandboxed, and a denied loopback bind now explains that recovery path.
+- Git diff previews color additions green and removals red, including `--stat` graphs,
+  without accepting terminal control sequences from command output.
+- Sequential tool rows now measure execution time rather than time spent queued behind
+  another tool, and source output containing timeout-related text no longer creates a
+  false timeout.
+- Software-acquisition approvals are bound to the complete shell command, including every
+  chained install. Combined shell flags such as `bash -lc` and `uv run --with` dependencies
+  can no longer bypass the approval boundary.
+- Sandbox Runtime now augments its existing home-directory protections by translating the
+  shared credential policy across the project and sibling repositories. Real Linux SRT tests
+  cover write confinement, project and sibling credentials, and blocked network access.
+- Publishing waits for the same lint, type, platform-matrix, minimum-dependency, package,
+  and real Linux Sandbox Runtime checks as ordinary CI.
+
 ## 0.1.0 (2026-10-13)
 
 First release.

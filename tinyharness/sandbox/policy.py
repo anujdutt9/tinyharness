@@ -64,6 +64,7 @@ class SandboxPolicy:
             cache_dir.mkdir(parents=True, exist_ok=True)
             roots.append(cache_dir)
             env = _cache_env(cache_dir)
+        private_tmp: Path | None = None
         if scratch is not None:
             private_tmp = scratch / "tmp"
             private_tmp.mkdir(parents=True, exist_ok=True)
@@ -73,7 +74,7 @@ class SandboxPolicy:
             project_roots=tuple(projects),
             protected=tuple(p / rel for p in projects for rel in PROTECTED_IN_PROJECT),
             deny_read=secret_path_regexes(),
-            allow_read=(*public_path_regexes(), *_test_fixtures()),
+            allow_read=(*public_path_regexes(), *_test_fixtures(private_tmp)),
             allow_localhost=allow_localhost,
             allowed_hosts=tuple(dict.fromkeys(h.lower().rstrip(".") for h in allowed_hosts)),
             cache_dir=cache_dir,
@@ -97,11 +98,12 @@ def _temp_dirs() -> list[Path]:
     return list(dict.fromkeys(dirs))
 
 
-def _test_fixtures() -> tuple[str, ...]:
+def _test_fixtures(private_tmp: Path | None = None) -> tuple[str, ...]:
     """pytest's temp root, where tests make their own fake auth.json and .env files: the
     project's tests have to read them back. Real secrets don't live there, and none can
     be copied there, since reading the original is still denied."""
-    return tuple(f"^{re.escape(str(d))}/pytest-of-[^/]+/" for d in _temp_dirs())
+    roots = [*_temp_dirs(), *([private_tmp] if private_tmp is not None else [])]
+    return tuple(f"^{re.escape(str(d))}/pytest-of-[^/]+/" for d in dict.fromkeys(roots))
 
 
 def _cache_env(cache: Path) -> dict[str, str]:

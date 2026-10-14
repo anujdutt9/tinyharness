@@ -680,8 +680,7 @@ def _call(i, name, arguments, finish=None):
 
 
 async def test_a_tool_call_cut_off_by_the_output_limit_is_not_run(tmp_path):
-    """Seen live: a big Write cut off mid-arguments got "invalid JSON", and the model sent
-    the same oversized call again until the repeat guard stopped it."""
+    """Seen live: a complete Write in an output-limited reply executed before its batch ended."""
     ran = []
 
     class Recorder(Tool[SleepInput]):
@@ -698,9 +697,9 @@ async def test_a_tool_call_cut_off_by_the_output_limit_is_not_run(tmp_path):
     ]
     _, history = await run(tmp_path, ScriptedLLM([cut, "done"]), [Recorder()])
     results = {m.tool_call_id: m.content for m in history.messages if m.role == "tool"}
-    assert ran == [0]  # the complete call ran; the cut-off one didn't
-    assert "hit the output token limit" in results["cut_1"] and "Write the first part" in results["cut_1"]
-    assert results["cut_0"] == "ok"
+    assert ran == []
+    assert set(results) == {"cut_0", "cut_1"}  # every call still gets exactly one result
+    assert all("hit the output token limit" in result for result in results.values())
 
 
 async def test_a_filtered_empty_reply_is_reported_not_retried(tmp_path):

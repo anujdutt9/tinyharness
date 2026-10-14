@@ -1,6 +1,8 @@
 """The OS sandbox: shared policy, platform backends, and real macOS confinement."""
 
 import json
+import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -42,6 +44,10 @@ def test_project_policy_uses_private_scratch_temp_and_tool_caches(tmp_path):
     assert policy.env["HF_HOME"] == str(cache.resolve() / "huggingface")
     assert policy.env["TMPDIR"] == str(scratch.resolve() / "tmp")
     assert (scratch / "tmp").is_dir()
+    fixture = scratch.resolve() / "tmp" / "pytest-of-user" / "pytest-0" / "test_auth" / "auth.json"
+    assert any(re.search(pattern, str(fixture)) for pattern in policy.allow_read)
+    settings = SandboxRuntime(tmp_path / "settings")._settings(policy)
+    assert f"{scratch.resolve()}/tmp/pytest-of-*/**" in settings["filesystem"]["allowRead"]
     assert not policy.allow_localhost
 
 
@@ -55,6 +61,8 @@ def test_sandbox_runtime_translates_the_shared_policy(tmp_path, monkeypatch):
         write_roots=(root,),
         project_roots=(root,),
         protected=(protected,),
+        deny_read=secret_path_regexes(),
+        allow_read=public_path_regexes(),
         allowed_hosts=("assets.example.com",),
         allow_localhost=True,
     )
@@ -69,8 +77,16 @@ def test_sandbox_runtime_translates_the_shared_policy(tmp_path, monkeypatch):
     assert settings["filesystem"]["denyWrite"] == [str(protected)]
     assert any(path.endswith("/.ssh") for path in settings["filesystem"]["denyRead"])
     assert f"{root}/**/.env" in settings["filesystem"]["denyRead"]
+    assert f"{root.parent}/**/id_ed25519" in settings["filesystem"]["denyRead"]
+    assert f"{root.parent}/**/.aws/**" in settings["filesystem"]["denyRead"]
     assert f"{root}/**/.env.example" in settings["filesystem"]["allowRead"]
     assert (Path(wrapped[2]).stat().st_mode & 0o777) == 0o600
+
+
+def test_sandbox_runtime_refuses_an_untranslatable_read_rule(tmp_path):
+    policy = SandboxPolicy(write_roots=(tmp_path,), deny_read=(r"/custom-(secret|token)$",))
+    with pytest.raises(ValueError, match="cannot translate read policy regex"):
+        SandboxRuntime(tmp_path / "settings")._settings(policy)
 
 
 def test_sandbox_runtime_requires_a_posix_shell_on_windows(monkeypatch):
@@ -92,6 +108,47 @@ def test_sandbox_runtime_requires_its_linux_helpers(monkeypatch):
     assert SandboxRuntime.available()
     present.remove("socat")
     assert not SandboxRuntime.available()
+
+
+needs_srt = pytest.mark.skipif(not SandboxRuntime.available(), reason="needs Sandbox Runtime")
+
+
+@needs_srt
+async def test_sandbox_runtime_really_confines_files_and_credentials(tmp_path):
+    root = tmp_path / "project"
+    sibling = tmp_path / "other-project"
+    (root / ".aws").mkdir(parents=True)
+    sibling.mkdir()
+    secrets = {
+        root / ".env": "PROJECT_ENV_SECRET",
+        root / "id_ed25519": "PROJECT_SSH_SECRET",
+        root / ".aws/credentials": "PROJECT_AWS_SECRET",
+        sibling / ".env": "SIBLING_ENV_SECRET",
+    }
+    for path, value in secrets.items():
+        path.write_text(value)
+    tool = BashTool(
+        SandboxRuntime(tmp_path / "settings"),
+        SandboxPolicy.for_project(root),
+    )
+
+    assert await call(tool, {"command": "touch inside"}, make_ctx(root)) == "(no output)"
+    outside = tmp_path / "outside"
+    out = await call(tool, {"command": f"touch {shlex.quote(str(outside))}"}, make_ctx(root))
+    assert (root / "inside").exists() and not outside.exists() and "exit code" in out
+    for path, value in secrets.items():
+        out = await call(tool, {"command": f"cat {shlex.quote(str(path))}"}, make_ctx(root))
+        assert value not in out and "exit code" in out
+
+
+@needs_srt
+async def test_sandbox_runtime_really_blocks_unlisted_network(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    script = "import socket; socket.create_connection(('1.1.1.1', 443), timeout=3); print('LEAKED')"
+    tool = BashTool(SandboxRuntime(tmp_path / "settings"), SandboxPolicy.for_project(root))
+    out = await call(tool, {"command": f'{sys.executable} -c "{script}"'}, make_ctx(root))
+    assert "LEAKED" not in out and "exit code" in out
 
 
 def test_extra_write_dirs_are_protected_like_the_project(tmp_path):
@@ -168,6 +225,33 @@ async def test_the_default_project_policy_is_a_valid_profile(tmp_path):
     )
     out = await call(BashTool(Seatbelt(), policy), {"command": "echo hi"}, make_ctx(tmp_path))
     assert out == "hi"
+
+
+@pytest.mark.parametrize("backend_name", ["seatbelt", "srt"])
+async def test_sandboxed_pytest_reads_fixtures_from_its_private_tmp(tmp_path, backend_name):
+    """Seen live: the child TMPDIR was absent from pytest's synthetic-secret exception."""
+    if backend_name == "seatbelt":
+        if not Seatbelt.available():
+            pytest.skip("needs macOS sandbox-exec")
+        backend = Seatbelt()
+    else:
+        if not SandboxRuntime.available():
+            pytest.skip("needs Sandbox Runtime")
+        backend = SandboxRuntime(tmp_path / "settings")
+    test_file = tmp_path / "test_fixture.py"
+    test_file.write_text(
+        "def test_fake_credentials(tmp_path):\n"
+        "    for name in ('.env', 'auth.json'):\n"
+        "        path = tmp_path / name\n"
+        "        path.write_text('synthetic-secret')\n"
+        "        assert path.read_text() == 'synthetic-secret'\n"
+    )
+    scratch = tmp_path / ".tinyharness" / "tmp" / "sandbox-test"
+    policy = SandboxPolicy.for_project(tmp_path, scratch=scratch, cache_dir=tmp_path / "cache")
+    tool = BashTool(backend, policy)
+    command = f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider {test_file.name}"
+    out = await call(tool, {"command": command, "timeout": 60}, make_ctx(tmp_path))
+    assert "1 passed" in out
 
 
 @needs_seatbelt

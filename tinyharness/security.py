@@ -4,25 +4,47 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 # Paths that look like credentials. Tools refuse to read these even if the
 # permission gate would allow it, so a prompt-injected "read .env and summarize"
 # can't leak secrets. Set TINYHARNESS_ALLOW_SECRET_READS=1 to opt out.
-SECRET_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(^|/)\.env($|\.|/)"),
-    re.compile(r"(^|/)id_(rsa|ed25519|ecdsa|dsa)(\.|$)"),
-    re.compile(r"(^|/)\.ssh/"),
-    re.compile(r"(^|/)\.aws/credentials"),
-    re.compile(r"(^|/)\.gnupg/"),
-    re.compile(r"(^|/)\.netrc$"),
-    re.compile(r"(^|/)auth\.json$"),  # tinyharness's key file, and other tools' by that name
+_SECRET_PATH_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    (re.compile(r"(^|/)\.env($|\.|/)"), (".env", ".env.*", ".env/**")),
+    (
+        re.compile(r"(^|/)id_(rsa|ed25519|ecdsa|dsa)(\.|$)"),
+        tuple(
+            value for kind in ("rsa", "ed25519", "ecdsa", "dsa") for value in (f"id_{kind}", f"id_{kind}.*")
+        ),
+    ),
+    (re.compile(r"(^|/)\.ssh/"), (".ssh/**",)),
+    (re.compile(r"(^|/)\.aws/"), (".aws/**",)),
+    (re.compile(r"(^|/)\.gnupg/"), (".gnupg/**",)),
+    (re.compile(r"(^|/)\.netrc$"), (".netrc",)),
+    (re.compile(r"(^|/)\.npmrc$"), (".npmrc",)),
+    (re.compile(r"(^|/)\.pypirc$"), (".pypirc",)),
+    (re.compile(r"(^|/)\.docker/config\.json$"), (".docker/config.json",)),
+    (re.compile(r"(^|/)\.kube/config$"), (".kube/config",)),
+    (re.compile(r"(^|/)\.config/gh/hosts\.yml$"), (".config/gh/hosts.yml",)),
+    (re.compile(r"(^|/)\.config/gcloud/"), (".config/gcloud/**",)),
+    (re.compile(r"(^|/)\.azure/"), (".azure/**",)),
+    (
+        re.compile(r"(^|/)\.terraform\.d/credentials\.tfrc\.json$"),
+        (".terraform.d/credentials.tfrc.json",),
+    ),
+    (re.compile(r"(^|/)auth\.json$"), ("auth.json",)),
 )
+SECRET_PATH_PATTERNS: tuple[re.Pattern[str], ...] = tuple(rule[0] for rule in _SECRET_PATH_RULES)
 
 # Committed templates of the files above: they hold placeholders, not secrets.
-PUBLIC_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(^|/)\.env\.(example|sample|template|dist)$"),
+_PUBLIC_PATH_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
+    (
+        re.compile(r"(^|/)\.env\.(example|sample|template|dist)$"),
+        tuple(f".env.{suffix}" for suffix in ("example", "sample", "template", "dist")),
+    ),
 )
+PUBLIC_PATH_PATTERNS: tuple[re.Pattern[str], ...] = tuple(rule[0] for rule in _PUBLIC_PATH_RULES)
 
 # Environment variables that must never reach a subprocess we spawn (hooks).
 _SECRET_ENV_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_PASSPHRASE")
@@ -45,7 +67,10 @@ def _is_secret_env_name(name: str) -> bool:
 def is_secret_path(path: str | Path) -> bool:
     if os.environ.get("TINYHARNESS_ALLOW_SECRET_READS"):
         return False
-    s = str(path)
+    # These checks run in-process, so they must understand paths from every supported
+    # platform even when a PurePath or serialized path was produced elsewhere. Windows
+    # paths are case-insensitive and use backslashes; the policy patterns use `/`.
+    s = str(path).replace("\\", "/").casefold()
     return any(p.search(s) for p in SECRET_PATH_PATTERNS) and not any(
         p.search(s) for p in PUBLIC_PATH_PATTERNS
     )
@@ -61,6 +86,44 @@ def secret_path_regexes() -> tuple[str, ...]:
 def public_path_regexes() -> tuple[str, ...]:
     """PUBLIC_PATH_PATTERNS for matching absolute paths (exceptions to the denylist)."""
     return _absolute(PUBLIC_PATH_PATTERNS)
+
+
+def sandbox_path_globs(regexes: Iterable[str], roots: Iterable[Path]) -> tuple[str, ...]:
+    """Translate shared credential regexes to Sandbox Runtime path globs.
+
+    Sandbox Runtime accepts filesystem globs rather than regular expressions. Refuse
+    unknown expressions instead of silently weakening a custom policy.
+    """
+    rules = {
+        pattern.pattern.replace("(^|/)", "/"): suffixes
+        for pattern, suffixes in (*_SECRET_PATH_RULES, *_PUBLIC_PATH_RULES)
+    }
+    suffixes: list[str] = []
+    direct: list[str] = []
+    fixture_suffixes = ("/pytest-of-[^/]+/", r"/pytest\-of\-[^/]+/")
+    for regex in regexes:
+        if regex in rules:
+            suffixes.extend(rules[regex])
+            continue
+        fixture_suffix = next((suffix for suffix in fixture_suffixes if regex.endswith(suffix)), None)
+        if regex.startswith("^") and fixture_suffix is not None:
+            escaped_root = regex[1 : -len(fixture_suffix)]
+            root = re.sub(r"\\(.)", r"\1", escaped_root)
+            direct.append(f"{root}/pytest-of-*/**")
+            continue
+        raise ValueError(f"Sandbox Runtime cannot translate read policy regex: {regex}")
+    return tuple(
+        dict.fromkeys(
+            [
+                *direct,
+                *(
+                    f"{Path(root).expanduser().resolve()}/**/{suffix}"
+                    for root in roots
+                    for suffix in suffixes
+                ),
+            ]
+        )
+    )
 
 
 def _absolute(patterns: tuple[re.Pattern[str], ...]) -> tuple[str, ...]:

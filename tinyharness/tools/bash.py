@@ -85,8 +85,14 @@ _DESTRUCTIVE_COMMANDS = (
     ),
 )
 
-_SHELL_OPERATORS = frozenset(";&|()")
+_SHELL_OPERATORS = frozenset(";&|()\n")
 _WRAPPERS = {"command", "env", "nohup", "sudo", "time"}
+_SHELL_PREFIXES = {"!", "if", "then", "elif", "else", "while", "until", "do"}
+_WRAPPER_OPTIONS_WITH_VALUES = {
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+    "sudo": {"-C", "-D", "-g", "-h", "-p", "-R", "-T", "-u"},
+    "time": {"-f", "--format", "-o", "--output"},
+}
 _DOWNLOAD_AND_EXECUTE = re.compile(
     r"\b(?:curl|wget)\b[^\n]*(?:\||&&|;)\s*(?:sudo\s+)?"
     r"(?:bash|sh|zsh|python\d*(?:\.\d+)*|node|chmod\s+\+x|\./)\b"
@@ -101,60 +107,120 @@ class _SoftwareAcquisition:
     scope: str
     kind: str
     needs_python_environment: bool = False
+    python_launchers: tuple[str, ...] = ()
 
 
-def _software_acquisition(command: str) -> _SoftwareAcquisition | None:
-    """Return a stable scope and label for an explicit software acquisition command."""
+def _software_acquisition(command: str, cwd: Path | None = None) -> _SoftwareAcquisition | None:
+    """Return one boundary covering every acquisition in the complete command."""
+    found: list[_SoftwareAcquisition] = []
     if _DOWNLOAD_AND_EXECUTE.search(command):
-        digest = hashlib.sha256(command.encode()).hexdigest()[:16]
-        return _SoftwareAcquisition(f"software:bootstrap:{digest}", "downloaded executable")
+        found.append(_SoftwareAcquisition("software:bootstrap", "downloaded executable"))
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()\n")
+        lexer.whitespace = " \t\r"  # an unquoted newline is a command boundary, not a space
         lexer.whitespace_split = True
         tokens = list(lexer)
     except ValueError:
-        return None
+        tokens = []
 
     segment: list[str] = []
+    segment_cwd = cwd
     for token in [*tokens, ";"]:
         if token and set(token) <= _SHELL_OPERATORS:
-            if found := _acquisition_in_segment(segment):
-                return found
+            if acquisition := _acquisition_in_segment(segment, segment_cwd):
+                found.append(acquisition)
+            segment_cwd = _directory_after(segment, segment_cwd)
             segment = []
         else:
             segment.append(token)
-    return None
+    if not found:
+        return None
+
+    # A remembered decision must authorize exactly the command the user saw, not only
+    # its first install segment. Include nested/script scopes so changing a PEP 723
+    # dependency also invalidates the earlier approval.
+    material = command + "\0" + "\0".join(item.scope for item in found)
+    digest = hashlib.sha256(material.encode()).hexdigest()[:16]
+    kinds = tuple(dict.fromkeys(item.kind for item in found))
+    kind = kinds[0] if len(kinds) == 1 else "software"
+    return _SoftwareAcquisition(
+        f"software:command:{digest}",
+        kind,
+        any(item.needs_python_environment for item in found),
+        tuple(launcher for item in found for launcher in item.python_launchers),
+    )
 
 
-def _acquisition_in_segment(tokens: list[str]) -> _SoftwareAcquisition | None:
+def _directory_after(tokens: list[str], cwd: Path | None) -> Path | None:
+    """Track a simple shell `cd`; an expression we cannot resolve makes later paths uncertain."""
+    if not tokens or Path(tokens[0]).name.lower() != "cd":
+        return cwd
+    values = [value for value in tokens[1:] if value != "--"]
+    if len(values) != 1 or any(char in values[0] for char in "$`*"):
+        return None
+    path = Path(values[0]).expanduser()
+    if not path.is_absolute():
+        if cwd is None:
+            return None
+        path = cwd / path
+    return path.resolve()
+
+
+def _acquisition_in_segment(tokens: list[str], cwd: Path | None = None) -> _SoftwareAcquisition | None:
     if not tokens:
         return None
     index = 0
     while index < len(tokens):
         name = Path(tokens[index]).name.lower().removesuffix(".exe").removesuffix(".cmd")
+        if name in _SHELL_PREFIXES:
+            index += 1
+            continue
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index]):
             index += 1
             continue
         if name in _WRAPPERS:
             index += 1
-            while index < len(tokens) and (
-                tokens[index].startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index])
-            ):
-                index += 1
+            options_with_values = _WRAPPER_OPTIONS_WITH_VALUES.get(name, set())
+            while index < len(tokens):
+                value = tokens[index]
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", value):
+                    index += 1
+                elif value.partition("=")[0] in options_with_values:
+                    index += 1 if "=" in value else 2
+                elif value.startswith("-"):
+                    index += 1
+                else:
+                    break
             continue
         break
     if index >= len(tokens):
         return None
 
-    executable = Path(tokens[index]).name.lower().removesuffix(".exe").removesuffix(".cmd")
+    executable_token = tokens[index]
+    executable = Path(executable_token).name.lower().removesuffix(".exe").removesuffix(".cmd")
     args = tokens[index + 1 :]
-    if executable in {"bash", "sh", "zsh"} and "-c" in args:
-        nested = args[args.index("-c") + 1 :]
-        return _software_acquisition(" ".join(nested)) if nested else None
-    if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", executable) and len(args) >= 3 and args[0] == "-m":
-        executable, args = args[1].lower(), args[2:]
+    if executable in {"bash", "sh", "zsh"}:
+        command_index = next(
+            (
+                index
+                for index, arg in enumerate(args)
+                if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:])
+            ),
+            None,
+        )
+        if command_index is not None and command_index + 1 < len(args):
+            return _software_acquisition(args[command_index + 1], cwd)
+    python_invocation = bool(re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", executable))
+    if python_invocation:
+        try:
+            module = args.index("-m")
+        except ValueError:
+            module = -1
+        if module >= 0 and module + 1 < len(args):
+            executable, args = args[module + 1].lower(), args[module + 2 :]
 
-    positional = [arg.lower() for arg in args if not arg.startswith("-")]
+    pip_executable = bool(re.fullmatch(r"pip(?:\d+(?:\.\d+)*)?", executable))
+    positional = _positional_args("pip" if pip_executable else executable, args)
     operation = positional[0] if positional else ""
     subcommand = positional[1] if len(positional) > 1 else ""
     explicit_python_destination = any(
@@ -172,8 +238,17 @@ def _acquisition_in_segment(tokens: list[str]) -> _SoftwareAcquisition | None:
     )
     kind = ""
     python_environment = False
-    uv_script_scope = _uv_script_dependency_scope(args) if executable == "uv" else None
-    if executable in {"pip", "pip3"} and operation in {"install", "download", "wheel"}:
+    uv_script_scope = _uv_script_dependency_scope(args, cwd) if executable == "uv" else None
+    uv_inline_dependencies = (
+        executable == "uv"
+        and operation == "run"
+        and any(
+            arg in {"--with", "--with-editable", "--with-requirements"}
+            or arg.startswith(("--with=", "--with-editable=", "--with-requirements="))
+            for arg in args
+        )
+    )
+    if pip_executable and operation in {"install", "download", "wheel"}:
         kind = "Python package"
         python_environment = operation == "install" and not explicit_python_destination
     elif executable == "uv" and (
@@ -181,6 +256,7 @@ def _acquisition_in_segment(tokens: list[str]) -> _SoftwareAcquisition | None:
         or (operation == "pip" and subcommand in {"install", "sync"})
         or (operation == "tool" and subcommand in {"install", "upgrade"})
         or uv_script_scope is not None
+        or uv_inline_dependencies
     ):
         kind = "Python package" if operation != "tool" else "Python tool"
         python_environment = operation not in {"tool", "run"} and not explicit_python_destination
@@ -224,18 +300,76 @@ def _acquisition_in_segment(tokens: list[str]) -> _SoftwareAcquisition | None:
 
     normalized = " ".join(tokens)
     scope = uv_script_scope or f"software:{executable}:{hashlib.sha256(normalized.encode()).hexdigest()[:16]}"
-    return _SoftwareAcquisition(scope, kind, python_environment)
+    launcher = (
+        (executable_token,)
+        if python_environment and python_invocation and Path(executable_token).is_absolute()
+        else ()
+    )
+    return _SoftwareAcquisition(scope, kind, python_environment, launcher)
 
 
-def _uv_script_dependency_scope(args: list[str]) -> str | None:
+_OPTIONS_WITH_VALUES = {
+    "pip": {"--cache-dir", "--cert", "--client-cert", "--proxy", "--python", "--retries", "--timeout"},
+    "uv": {"--cache-dir", "--color", "--config-file", "--directory", "--project", "--python"},
+    "npm": {"--cache", "--prefix", "--registry", "--userconfig", "--workspace"},
+    "pnpm": {"--config-dir", "--dir", "--global-dir", "--store-dir", "--workspace-dir"},
+    "yarn": {"--cwd"},
+    "bun": {"--cwd"},
+}
+
+
+def _positional_args(executable: str, args: list[str]) -> list[str]:
+    """Command words after global options, without mistaking an option value for an operation."""
+    out: list[str] = []
+    values = _OPTIONS_WITH_VALUES.get(executable, set())
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            out.extend(value.lower() for value in args[index + 1 :])
+            break
+        name = arg.partition("=")[0]
+        if name in values:
+            index += 1 if "=" in arg else 2
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        out.append(arg.lower())
+        index += 1
+    return out
+
+
+def _uv_script_dependency_scope(args: list[str], cwd: Path | None = None) -> str | None:
     """Stable approval scope when `uv run` may resolve a script's declared packages."""
     if "run" not in args or {"--offline", "--no-sync"} & set(args):
         return None
-    for value in args[args.index("run") + 1 :]:
+    run = args.index("run")
+    script_cwd = cwd
+    for index, arg in enumerate(args[:run]):
+        directory = arg.partition("=")[2] if arg.startswith("--directory=") else None
+        if arg == "--directory" and index + 1 < run:
+            directory = args[index + 1]
+        if directory is None:
+            continue
+        if any(char in directory for char in "$`*"):
+            script_cwd = None
+            break
+        selected = Path(directory).expanduser()
+        if not selected.is_absolute():
+            if script_cwd is None:
+                break
+            selected = script_cwd / selected
+        script_cwd = selected.resolve()
+    for value in args[run + 1 :]:
         if not value.lower().endswith(".py"):
             continue
         try:
             path = Path(value).expanduser()
+            if not path.is_absolute():
+                if script_cwd is None:
+                    raise OSError("the script's working directory is unknown")
+                path = script_cwd / path
             header = path.read_text(errors="replace")[:65_536]
         except OSError:
             # The child shell may resolve a variable or change directory before running
@@ -259,7 +393,8 @@ def _python_install_environment(
     command: str, policy: SandboxPolicy
 ) -> tuple[str, dict[str, str], Path | None]:
     """Prepare an approved Python install for a writable environment, creating one if needed."""
-    acquisition = _software_acquisition(command)
+    project = (policy.project_roots or policy.write_roots)[0].resolve()
+    acquisition = _software_acquisition(command, project)
     if acquisition is None or not acquisition.needs_python_environment:
         return command, {}, None
     roots = tuple(path.resolve() for path in policy.write_roots)
@@ -292,6 +427,7 @@ def _python_install_environment(
     python = _environment_python(environment)
     create = python is None
     scripts = environment / ("Scripts" if sys.platform == "win32" else "bin")
+    selected_python = python or scripts / ("python.exe" if sys.platform == "win32" else "python")
     env = {
         "VIRTUAL_ENV": str(environment),
         "PATH": str(scripts) + os.pathsep + os.environ.get("PATH", ""),
@@ -299,6 +435,18 @@ def _python_install_environment(
     if create:
         launcher = "python" if sys.platform == "win32" else shlex.quote(sys.executable)
         command = f"{launcher} -m venv {shlex.quote(str(environment))} && {command}"
+    for launcher in acquisition.python_launchers:
+        if Path(launcher).resolve() == selected_python.resolve():
+            continue
+        # The approval promises the selected writable environment. An absolute Python
+        # ignores PATH, so bind that invocation to the environment's interpreter too.
+        word = re.compile(rf"(?<!\S)(?P<quote>['\"]?){re.escape(launcher)}(?P=quote)(?=\s|$)")
+        command, changed = word.subn(shlex.quote(str(selected_python)), command, count=1)
+        if not changed:
+            raise RuntimeError(
+                f"cannot safely redirect the explicit Python interpreter {launcher!r} "
+                f"to the approved environment at {environment}"
+            )
     return command, env, environment
 
 
@@ -321,8 +469,9 @@ class BashInput(ToolInput):
     description: str = Field(default="", description="What the command does, in 5-10 words")
     network_host: str = Field(
         default="",
-        description="One exact hostname this sandboxed command needs. Use only after the "
-        "sandbox reports that destination as blocked; approval never removes containment.",
+        description="One exact hostname this sandboxed command needs. Use 'localhost' when a "
+        "test, preview, or development server needs loopback; use other hosts after the sandbox "
+        "reports that destination as blocked. Approval never removes containment.",
     )
 
     @field_validator("network_host")
@@ -408,7 +557,8 @@ class BashTool(Tool[BashInput]):
         return args.network_host or None
 
     def approval_boundary(self, args: BashInput) -> ApprovalBoundary | None:
-        acquisition = _software_acquisition(args.command)
+        project = (self.policy.project_roots or self.policy.write_roots)[0].resolve()
+        acquisition = _software_acquisition(args.command, project)
         if acquisition is None:
             return None
         if acquisition.needs_python_environment:
@@ -431,6 +581,12 @@ class BashTool(Tool[BashInput]):
     def contained(self, args: dict[str, Any]) -> bool:
         return self.sandbox is not None
 
+    def can_send_out(self, args: dict[str, Any]) -> bool:
+        """The sandbox's allowlist is still an outbound channel for readable project data."""
+        return self.sandbox is None or bool(
+            self.policy.allowed_hosts or self.session_hosts or self._network_host(args)
+        )
+
     def escapes(self, args: dict[str, Any]) -> str | None:
         if self.sandbox is None:
             return (
@@ -449,6 +605,8 @@ class BashTool(Tool[BashInput]):
         return bool(self.sandbox is not None and host and not self._host_is_allowed(host))
 
     def _host_is_allowed(self, host: str) -> bool:
+        if host == "localhost":
+            return self.policy.allow_localhost or host in self.session_hosts
         return host_allowed(host, (*self.policy.allowed_hosts, *self.session_hosts))
 
     def _network_host(self, args: BashInput | dict[str, Any]) -> str:
@@ -482,13 +640,20 @@ class BashTool(Tool[BashInput]):
         temporary_proxy = False
         added_hosts = (*sorted(self.session_hosts), *((args.network_host,) if args.network_host else ()))
         if sandboxed and added_hosts:
+            localhost = "localhost" in added_hosts
+            remote_hosts = tuple(host for host in added_hosts if host != "localhost")
             policy = replace(
                 policy,
-                allowed_hosts=tuple(dict.fromkeys((*policy.allowed_hosts, *added_hosts))),
+                allow_localhost=policy.allow_localhost or localhost,
+                allowed_hosts=tuple(dict.fromkeys((*policy.allowed_hosts, *remote_hosts))),
             )
-            if not getattr(self.sandbox, "manages_network", False) and (
-                active_proxy is None
-                or any(not host_allowed(host, active_proxy.allowed) for host in added_hosts)
+            if (
+                remote_hosts
+                and not getattr(self.sandbox, "manages_network", False)
+                and (
+                    active_proxy is None
+                    or any(not host_allowed(host, active_proxy.allowed) for host in remote_hosts)
+                )
             ):
                 active_proxy = AllowlistProxy(policy.allowed_hosts)
                 temporary_proxy = True
@@ -570,6 +735,12 @@ class BashTool(Tool[BashInput]):
                 "\n[tinyharness:host_application_blocked] This command stayed sandboxed. "
                 "Use a structured host-application tool if the user needs to see the result."
             )
+        elif sandboxed and denied and _looks_like_localhost_denial(text):
+            text += (
+                "\n[tinyharness:localhost_denied] This command stayed sandboxed. If it needs a "
+                "local test, preview, or development server, retry with network_host='localhost'; "
+                "do not change the command's containment."
+            )
         elif sandboxed and denied:
             text += (
                 "\n[tinyharness:filesystem_or_process_denied] This command stayed sandboxed. "
@@ -583,6 +754,11 @@ class BashTool(Tool[BashInput]):
         elif code:
             text += f"\n(exit code {code})"
         return text
+
+
+def _looks_like_localhost_denial(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in ("127.0.0.1", "localhost", "bind on address"))
 
 
 def only_reads(command: str) -> bool:

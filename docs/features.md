@@ -62,6 +62,13 @@ again", an extension's approved needs) stay allowed, sandboxed commands stay con
 Exact hosts approved for the session accumulate in later command policies. This lets a client
 cross several service or redirect hosts without losing earlier grants, while one-command approvals
 remain one-command and model-supplied wildcards remain invalid.
+An allowlisted host is still an outbound channel: after outside content enters the conversation,
+network-capable Bash calls ask before running even when their destination is already allowed.
+
+Tests, previews and development servers can request `network_host="localhost"`. The scoped
+approval enables loopback while the command remains sandboxed; it does not open external network
+access. Credential-shaped pytest fixtures are readable only beneath the session's private temporary
+directory, while real credential locations remain blocked.
 
 ## Security
 

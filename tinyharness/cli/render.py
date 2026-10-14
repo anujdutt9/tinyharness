@@ -93,6 +93,7 @@ _COMPACTION_MESSAGES = {
 _EDIT_STATS = re.compile(r", -(\d+)/\+(\d+) lines$")
 _WRITE_STATS = re.compile(r", (\d+) lines$")
 _EXIT_CODE = re.compile(r"\(exit code (\d+)\)\s*$")
+_TIMEOUT = re.compile(r"\(timed out after \d+s; the command was killed\)\s*$")
 _MATCH_HEADER = re.compile(r"^\d+ (total )?match\(es\)|^\d+ files?\b")
 # Commands that run a test suite, so the turn's footer can say whether the tests passed.
 _TEST_COMMAND = re.compile(
@@ -125,6 +126,23 @@ def summarize_output(tool: str, output: str) -> str:
         return "no matches" if text.startswith("(") else lines[0].rstrip(":")
     first = lines[0]
     return first if len(first) <= 100 else first[:99] + "…"
+
+
+def _preview_line(tool: _RunningTool, line: str, failed: bool) -> Text:
+    """Color Git additions and removals without trusting command-produced ANSI escapes."""
+    if failed or tool.name != "Bash" or "git diff" not in str(tool.args.get("command", "")):
+        return Text(line, style="err" if failed else "muted")
+    if line.startswith("+") and not line.startswith("+++"):
+        return Text(line, style="diff.add")
+    if line.startswith("-") and not line.startswith("---"):
+        return Text(line, style="diff.del")
+    out = Text(line, style="muted")
+    if "|" in line:  # --stat: color only the compact +++--- graph, not the path.
+        start = line.index("|") + 1
+        for match in re.finditer(r"\+|−|-", line[start:]):
+            style = "diff.add" if match.group() == "+" else "diff.del"
+            out.stylize(style, start + match.start(), start + match.end())
+    return out
 
 
 def format_todos(todos: list[dict[str, str]]) -> Text:
@@ -204,6 +222,7 @@ class Renderer:
         self._activity_detail = ""  # e.g. how much of a file has been written so far
         self._streaming = ""  # the Markdown block still being written
         self._running: list[_RunningTool] = []
+        self._tools_parallel = True
         self._turn = _Turn()
         self._agents: dict[str, SubagentUpdate] = {}  # running subagents, by run id
         self._agent_since: dict[str, float] = {}  # when each running subagent started (monotonic)
@@ -438,6 +457,10 @@ class Renderer:
             tool = _RunningTool(result.name)
         else:
             self._running.remove(tool)
+        if not self._tools_parallel and (
+            waiting := next((item for item in self._running if not item.started), None)
+        ):
+            waiting.started = time.monotonic()
         glyph, right, under = self._outcome(tool, self._relative(result.output), result.is_error)
         children = self._children(tool) if tool.name in ("Agent", "Team") else []
         if children:  # finished agents fold into their call's row: what they used, not a line each
@@ -481,11 +504,10 @@ class Renderer:
             lines.pop()
         if not lines or lines == ["(no output)"]:
             return []
-        failed = is_error or bool(_EXIT_CODE.search(output)) or "(timed out after" in output
+        failed = is_error or bool(_EXIT_CODE.search(output)) or bool(_TIMEOUT.search(output))
         shown = lines[-PREVIEW_LINES:] if failed else lines[:PREVIEW_LINES]
         room = max(self.console.width - 6, 20)
-        style = "err" if failed else "muted"
-        out = [Text(_cut(line.expandtabs(4), room), style=style) for line in shown]
+        out = [_preview_line(tool, _cut(line.expandtabs(4), room), failed) for line in shown]
         if (more := len(lines) - len(shown)) > 0:
             where = "above" if failed else "more"
             out.insert(
@@ -545,7 +567,7 @@ class Renderer:
         lines = [line for line in text.splitlines() if line.strip() and not line.startswith("(")]
         last = lines[-1].strip() if lines else ""
         is_test = bool(_TEST_COMMAND.search(str(tool.args.get("command", ""))))
-        if "(timed out after" in text:
+        if _TIMEOUT.search(text):
             if is_test:
                 self._turn.tests_passed = False
             return Text(FAILED, style="err"), Text("timed out", style="warn"), None
@@ -643,9 +665,10 @@ class Renderer:
                 pass  # denials are shown with their result
             case ToolsDispatched(names=names, parallel=parallel):
                 now = time.monotonic()
-                for tool in self._running:
-                    if tool.name in names and not tool.started:
-                        tool.started = now
+                waiting = [tool for tool in self._running if tool.name in names and not tool.started]
+                for tool in waiting if parallel else waiting[:1]:
+                    tool.started = now
+                self._tools_parallel = parallel
                 self.wait(f"Running {len(names)} tools" if parallel else f"Running {names[0]}")
             case ToolResult(name="TodoWrite", is_error=False):
                 self._running = [t for t in self._running if t.name != "TodoWrite"]

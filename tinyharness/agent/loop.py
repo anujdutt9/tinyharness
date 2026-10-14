@@ -100,12 +100,11 @@ CUT_OFF_NOTE = (
     "[tinyharness] Your last reply was cut off at the output token limit. Continue exactly "
     "where it stopped; don't repeat what you already wrote."
 )
-# The result for a tool call whose arguments were cut off by the output limit. It isn't
-# run: what it would write is incomplete. Without this the model only hears "invalid JSON"
-# and sends the same oversized call again.
+# The result for every tool call in a reply cut off by the output limit. None are run:
+# even valid-looking calls belong to an incomplete assistant decision.
 CUT_OFF_CALL = (
-    "error: not run: your reply hit the output token limit while writing this call, so its "
-    "arguments are incomplete. Make it smaller: write a large file in parts (Write the first "
+    "error: not run: your reply hit the output token limit, so this tool-call batch may be "
+    "incomplete. Make it smaller: write a large file in parts (Write the first "
     "part, then add the rest with Edit), or change only what's needed with Edit."
 )
 # Sent when the step limit is reached, for one last reply without tools.
@@ -846,8 +845,8 @@ async def _prepare_call(
 ) -> AsyncGenerator[Event, None]:
     """Parse, validate and permission-check one call. Rejections are answered
     immediately (the model must get a result for every call); approvals are
-    added to `batch`. `cut_off`: the reply hit the output limit, so arguments that don't
-    parse are incomplete rather than malformed."""
+    added to `batch`. `cut_off`: the reply hit the output limit, so no call from it is safe
+    to execute, even when its arguments look complete."""
 
     def reject(message: str) -> ToolResult:
         if failures is not None and message.startswith("error:"):  # not a denial: a bad call
@@ -863,6 +862,10 @@ async def _prepare_call(
         history.add_tool_result(call.id, message)
         return ToolResult(call.name, message, is_error=True, id=call.id)
 
+    if cut_off:
+        yield reject(CUT_OFF_CALL)
+        return
+
     tool = _find_tool(available, call.name)
     if tool is None:
         yield reject(
@@ -871,13 +874,9 @@ async def _prepare_call(
         return
     call.name = tool.name  # "read" -> "Read", so the history names the tool that ran
 
-    raw = _arguments(call, repair=not cut_off)
+    raw = _arguments(call, repair=True)
     if isinstance(raw, json.JSONDecodeError):
-        yield reject(
-            CUT_OFF_CALL
-            if cut_off
-            else f"error: invalid arguments for {tool.name}: {_explain_invalid(tool, raw)}"
-        )
+        yield reject(f"error: invalid arguments for {tool.name}: {_explain_invalid(tool, raw)}")
         return
     try:
         args = tool.parse(raw)

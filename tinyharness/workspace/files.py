@@ -17,6 +17,7 @@ than one hard link gets a new inode, so its other names keep the old content.)
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import errno
 import os
 import secrets
@@ -37,8 +38,12 @@ def read_bytes(path: Path, limit: int = -1) -> bytes:
     """The contents of `path` (at most `limit` bytes), which must not have become a symlink
     (see the module docstring)."""
     if not _SUPPORTED:
-        with path.open("rb") as f:
-            return f.read(limit)
+        with _fallback_directory(path.parent):
+            if os.name == "nt":
+                return _windows_read(path, limit)
+            _refuse_link(path)
+            with path.open("rb") as f:
+                return f.read(limit)
     with _directory(path.parent) as dfd:
         try:
             fd = os.open(path.name, os.O_RDONLY | _NOFOLLOW, dir_fd=dfd)
@@ -59,15 +64,16 @@ def read_text(path: Path, errors: str = "strict") -> str:
 def write_text(path: Path, text: str, *, make_parents: bool = False) -> None:
     """Write `text` to `path` atomically, keeping an existing file's permissions."""
     data = text.encode("utf-8")
-    if not _SUPPORTED:  # Windows: no directory handles; still atomic
-        if make_parents:
-            path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    if not _SUPPORTED:  # Windows: lock every directory against rename while using the path.
+        fallback_created: list[Path] = []
         try:
-            tmp.write_bytes(data)
-            os.replace(tmp, path)
-        finally:
-            tmp.unlink(missing_ok=True)
+            with _fallback_directory(path.parent, create=fallback_created if make_parents else None):
+                _replace_path(path, data)
+        except BaseException:
+            for directory in reversed(fallback_created):
+                with contextlib.suppress(OSError):
+                    directory.rmdir()
+            raise
         return
     created: list[tuple[int, str]] = []  # (parent dir fd, name) of directories made for this write
     try:
@@ -106,6 +112,187 @@ def _replace(dfd: int, name: str, data: bytes) -> None:
         with contextlib.suppress(OSError):
             os.unlink(tmp, dir_fd=dfd)
         raise
+
+
+def _replace_path(path: Path, data: bytes) -> None:
+    """The fallback atomic replace, used while its parent hierarchy is guarded."""
+    try:
+        existing = path.lstat()
+        mode = stat.S_IMODE(existing.st_mode) if stat.S_ISREG(existing.st_mode) else None
+    except FileNotFoundError:
+        mode = None
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    fd = os.open(tmp, flags, 0o666)
+    try:
+        try:
+            with os.fdopen(fd, "wb", closefd=False) as f:
+                f.write(data)
+                f.flush()
+                os.fsync(fd)
+            if mode is not None:
+                os.chmod(tmp, mode)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def _refuse_link(path: Path) -> None:
+    """Reject symlinks and Windows reparse points without following them."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & reparse:
+        raise PathChanged(errno.ELOOP, f"{path} is now a symlink: it changed after the path was checked")
+
+
+@contextlib.contextmanager
+def _fallback_directory(path: Path, create: list[Path] | None = None) -> Iterator[None]:
+    """Guard a path on platforms without dir-fd operations.
+
+    Windows directory handles omit delete sharing, so none of the checked directories
+    can be renamed or replaced until the operation completes. The lstat checks also make
+    the behavior testable on POSIX when the fallback is forced.
+    """
+    if not path.is_absolute():
+        raise ValueError(f"not an absolute path: {path}")
+    handles: list[int] = []
+    current = Path(path.anchor)
+    try:
+        if os.name == "nt":
+            handles.append(_windows_handle(current, directory=True))
+        for part in path.parts[1:]:
+            current /= part
+            try:
+                _refuse_link(current)
+                exists = current.exists()
+            except PathChanged as error:
+                raise PathChanged(
+                    error.errno,
+                    f"{part} in {path} is now a symlink or not a directory: "
+                    "it changed after the path was checked",
+                ) from None
+            if not exists:
+                if create is None:
+                    raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(current))
+                current.mkdir()
+                create.append(current)
+            try:
+                _refuse_link(current)
+            except PathChanged as error:
+                raise PathChanged(
+                    error.errno,
+                    f"{part} in {path} is now a symlink or not a directory: "
+                    "it changed after the path was checked",
+                ) from None
+            if not current.is_dir():
+                raise PathChanged(
+                    errno.ENOTDIR,
+                    f"{part} in {path} is now a symlink or not a directory: "
+                    "it changed after the path was checked",
+                )
+            if os.name == "nt":
+                handles.append(_windows_handle(current, directory=True))
+        yield
+    finally:
+        for handle in reversed(handles):
+            _windows_close(handle)
+
+
+def _windows_handle(path: Path, *, directory: bool) -> int:
+    """Open one Windows object without following a reparse point or allowing replacement."""
+    from ctypes import wintypes
+
+    create_file = ctypes.windll.kernel32.CreateFileW  # type: ignore[attr-defined]
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    generic_read = 0x80000000
+    share_read_write = 0x00000001 | 0x00000002  # deliberately omit FILE_SHARE_DELETE
+    open_existing = 3
+    backup_semantics = 0x02000000 if directory else 0
+    open_reparse_point = 0x00200000
+    handle = create_file(
+        str(path),
+        0 if directory else generic_read,
+        share_read_write,
+        None,
+        open_existing,
+        backup_semantics | open_reparse_point,
+        None,
+    )
+    invalid = ctypes.c_void_p(-1).value
+    if handle in (None, invalid):
+        raise ctypes.WinError()  # type: ignore[attr-defined]
+    value = int(handle)
+    if _windows_reparse(value):
+        _windows_close(value)
+        raise PathChanged(errno.ELOOP, f"{path} is now a reparse point: it changed after approval")
+    return value
+
+
+def _windows_reparse(handle: int) -> bool:
+    from ctypes import wintypes
+
+    class FileInformation(ctypes.Structure):
+        _fields_ = [
+            ("attributes", wintypes.DWORD),
+            ("creation", wintypes.FILETIME),
+            ("access", wintypes.FILETIME),
+            ("write", wintypes.FILETIME),
+            ("volume", wintypes.DWORD),
+            ("size_high", wintypes.DWORD),
+            ("size_low", wintypes.DWORD),
+            ("links", wintypes.DWORD),
+            ("index_high", wintypes.DWORD),
+            ("index_low", wintypes.DWORD),
+        ]
+
+    info = FileInformation()
+    get_info = ctypes.windll.kernel32.GetFileInformationByHandle  # type: ignore[attr-defined]
+    get_info.argtypes = (wintypes.HANDLE, ctypes.POINTER(FileInformation))
+    get_info.restype = wintypes.BOOL
+    if not get_info(wintypes.HANDLE(handle), ctypes.byref(info)):
+        raise ctypes.WinError()  # type: ignore[attr-defined]
+    return bool(info.attributes & 0x400)
+
+
+def _windows_close(handle: int) -> None:
+    from ctypes import wintypes
+
+    close = ctypes.windll.kernel32.CloseHandle  # type: ignore[attr-defined]
+    close.argtypes = (wintypes.HANDLE,)
+    close.restype = wintypes.BOOL
+    close(wintypes.HANDLE(handle))
+
+
+def _windows_read(path: Path, limit: int) -> bytes:
+    """Read the already-approved Windows file by its no-follow handle."""
+    import msvcrt
+
+    handle = _windows_handle(path, directory=False)
+    try:
+        fd = msvcrt.open_osfhandle(  # type: ignore[attr-defined]
+            handle, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        )
+    except BaseException:
+        _windows_close(handle)
+        raise
+    with os.fdopen(fd, "rb") as f:  # the fd owns and closes the Windows handle
+        return f.read(limit)
 
 
 @contextlib.contextmanager

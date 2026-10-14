@@ -18,6 +18,7 @@ from pathlib import Path
 from tinyharness.paths import home_dir
 from tinyharness.sandbox.base import Sandbox
 from tinyharness.sandbox.policy import SandboxPolicy
+from tinyharness.security import sandbox_path_globs
 
 
 class SandboxRuntime(Sandbox):
@@ -100,6 +101,20 @@ class SandboxRuntime(Sandbox):
             allow_read.extend(
                 f"{prefix}/**/.env.{suffix}" for suffix in ("example", "sample", "template", "dist")
             )
+        # SRT accepts globs rather than Seatbelt's regular expressions. Translate the
+        # shared policy for the project and its sibling repositories in addition to the
+        # longstanding home-directory protections above. Unknown custom regexes fail
+        # closed in the translator instead of being silently omitted.
+        read_roots = tuple(
+            dict.fromkeys(
+                [
+                    *(root.resolve().parent for root in policy.project_roots),
+                    *(root.resolve() for root in policy.project_roots),
+                ]
+            )
+        )
+        deny_read.extend(sandbox_path_globs(policy.deny_read, read_roots))
+        allow_read.extend(sandbox_path_globs(policy.allow_read, read_roots))
         return {
             "network": {
                 "allowedDomains": list(policy.allowed_hosts),

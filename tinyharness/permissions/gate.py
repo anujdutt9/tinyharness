@@ -268,7 +268,7 @@ class PermissionGate:
             path=str(path) if path else None,
             remember_label="" if case_by_case else self._remember_label(tool, path, trusted, target_host),
             reason=risk or "",
-            warning=self._outside_warning().removeprefix("; ") if tool.network else "",
+            warning=self._outside_warning().removeprefix("; ") if tool.can_send_out(args) else "",
         )
         decision = await self._ask(request)
         if decision.allow and decision.remember and request.remember_label:
@@ -315,6 +315,11 @@ class PermissionGate:
     async def _check_mode(
         self, tool: Tool[Any], args: dict[str, Any], path: Path | None, trusted: bool, history_tail: str
     ) -> Decision | None:
+        # A sandbox limits destinations, not what an allowed destination receives. Once
+        # outside text can steer the model, a person decides before any outbound-capable
+        # call, including Bash and bypass mode.
+        if self.outside() and tool.can_send_out(args):
+            return None
         if self.mode == PermissionMode.BYPASS:
             return Decision(True, "bypassPermissions mode", "mode")
         if self.mode == PermissionMode.PLAN and not tool.read_only:
@@ -328,9 +333,6 @@ class PermissionGate:
             return Decision(True, "default: inside the working directory", "mode")
         if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO) and tool.contained(args):
             return Decision(True, f"{self.mode.value}: runs in the sandbox", "mode")
-        # Reading a public page is routine; a URL with a query string could carry data out.
-        if tool.network and self.outside():
-            return None  # outside content could be steering this: a person decides (see check)
         if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO) and _public_read(tool, args):
             return Decision(True, f"{self.mode.value}: reading a public web page", "mode")
         if self.mode == PermissionMode.AUTO:
