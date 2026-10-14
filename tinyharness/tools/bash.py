@@ -107,7 +107,9 @@ class _SoftwareAcquisition:
     scope: str
     kind: str
     needs_python_environment: bool = False
-    python_launchers: tuple[str, ...] = ()
+    # Token-index paths to absolute Python launchers. A nested path starts with the
+    # outer shell/env argument token, then identifies the executable inside it.
+    python_launchers: tuple[tuple[int, ...], ...] = ()
 
 
 def _software_acquisition(command: str, cwd: Path | None = None) -> _SoftwareAcquisition | None:
@@ -124,13 +126,15 @@ def _software_acquisition(command: str, cwd: Path | None = None) -> _SoftwareAcq
         tokens = []
 
     segment: list[str] = []
+    segment_start = 0
     segment_cwd = cwd
-    for token in [*tokens, ";"]:
+    for token_index, token in enumerate([*tokens, ";"]):
         if token and set(token) <= _SHELL_OPERATORS:
-            if acquisition := _acquisition_in_segment(segment, segment_cwd):
+            if acquisition := _acquisition_in_segment(segment, segment_cwd, segment_start):
                 found.append(acquisition)
             segment_cwd = _directory_after(segment, segment_cwd)
             segment = []
+            segment_start = token_index + 1
         else:
             segment.append(token)
     if not found:
@@ -166,7 +170,9 @@ def _directory_after(tokens: list[str], cwd: Path | None) -> Path | None:
     return path.resolve()
 
 
-def _acquisition_in_segment(tokens: list[str], cwd: Path | None = None) -> _SoftwareAcquisition | None:
+def _acquisition_in_segment(
+    tokens: list[str], cwd: Path | None = None, token_offset: int = 0
+) -> _SoftwareAcquisition | None:
     if not tokens:
         return None
     index = 0
@@ -183,6 +189,26 @@ def _acquisition_in_segment(tokens: list[str], cwd: Path | None = None) -> _Soft
             options_with_values = _WRAPPER_OPTIONS_WITH_VALUES.get(name, set())
             while index < len(tokens):
                 value = tokens[index]
+                option, equals, inline = value.partition("=")
+                if name == "env" and option in {"-S", "--split-string"}:
+                    if equals:
+                        nested, argument_index = inline, index
+                    elif index + 1 < len(tokens):
+                        nested, argument_index = tokens[index + 1], index + 1
+                    else:
+                        return None
+                    acquisition = _software_acquisition(nested, cwd)
+                    if acquisition is None:
+                        return None
+                    launchers = (
+                        tuple((token_offset + argument_index, *path) for path in acquisition.python_launchers)
+                        if not equals
+                        else tuple(
+                            (-(token_offset + argument_index + 1), *path)
+                            for path in acquisition.python_launchers
+                        )
+                    )
+                    return replace(acquisition, python_launchers=launchers)
                 if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", value):
                     index += 1
                 elif value.partition("=")[0] in options_with_values:
@@ -209,7 +235,14 @@ def _acquisition_in_segment(tokens: list[str], cwd: Path | None = None) -> _Soft
             None,
         )
         if command_index is not None and command_index + 1 < len(args):
-            return _software_acquisition(args[command_index + 1], cwd)
+            acquisition = _software_acquisition(args[command_index + 1], cwd)
+            if acquisition is None:
+                return None
+            argument_index = token_offset + index + command_index + 2
+            return replace(
+                acquisition,
+                python_launchers=tuple((argument_index, *path) for path in acquisition.python_launchers),
+            )
     python_invocation = bool(re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", executable))
     if python_invocation:
         try:
@@ -301,7 +334,7 @@ def _acquisition_in_segment(tokens: list[str], cwd: Path | None = None) -> _Soft
     normalized = " ".join(tokens)
     scope = uv_script_scope or f"software:{executable}:{hashlib.sha256(normalized.encode()).hexdigest()[:16]}"
     launcher = (
-        (executable_token,)
+        ((token_offset + index,),)
         if python_environment and python_invocation and Path(executable_token).is_absolute()
         else ()
     )
@@ -389,6 +422,83 @@ def _uv_script_dependency_scope(args: list[str], cwd: Path | None = None) -> str
     return None
 
 
+def _shell_token_spans(command: str) -> list[tuple[str, int, int]]:
+    """Shell words and operators with their source spans, matching the detector's lexer."""
+    out: list[tuple[str, int, int]] = []
+    index = 0
+    while index < len(command):
+        if command[index] in " \t\r":
+            index += 1
+            continue
+        if command[index] == "#":
+            newline = command.find("\n", index)
+            index = len(command) if newline < 0 else newline
+            continue
+        start = index
+        if command[index] in _SHELL_OPERATORS:
+            while index < len(command) and command[index] in _SHELL_OPERATORS:
+                index += 1
+            out.append((command[start:index], start, index))
+            continue
+        quote = ""
+        while index < len(command):
+            char = command[index]
+            if quote:
+                if char == quote:
+                    quote = ""
+                elif char == "\\" and quote == '"' and index + 1 < len(command):
+                    index += 1
+                index += 1
+                continue
+            if char in "'\"":
+                quote = char
+                index += 1
+            elif char == "\\" and index + 1 < len(command):
+                index += 2
+            elif char in " \t\r" or char in _SHELL_OPERATORS:
+                break
+            else:
+                index += 1
+        raw = command[start:index]
+        parsed = shlex.split(raw, comments=False, posix=True)
+        if quote or len(parsed) != 1:
+            raise ValueError("cannot safely locate the parsed shell token")
+        out.append((parsed[0], start, index))
+    return out
+
+
+def _rewrite_python_launchers(command: str, locations: tuple[tuple[int, ...], ...], replacement: Path) -> str:
+    """Replace only parsed installer executable tokens, recursively through shell arguments."""
+    if not locations:
+        return command
+    spans = _shell_token_spans(command)
+    by_token: dict[int, list[tuple[int, ...]]] = {}
+    for location in locations:
+        by_token.setdefault(location[0], []).append(location[1:])
+    changes: list[tuple[int, int, str]] = []
+    for located_index, tails in by_token.items():
+        inline_env = located_index < 0
+        token_index = -located_index - 1 if inline_env else located_index
+        if token_index >= len(spans):
+            raise RuntimeError("cannot safely locate the approved Python installation invocation")
+        value, start, end = spans[token_index]
+        if inline_env:
+            option, equals, nested = value.partition("=")
+            if not equals:
+                raise RuntimeError("cannot safely locate env's split-string command")
+            changed = f"{option}={_rewrite_python_launchers(nested, tuple(tails), replacement)}"
+        elif all(not tail for tail in tails):
+            changed = str(replacement)
+        elif any(not tail for tail in tails):
+            raise RuntimeError("ambiguous Python installation invocation")
+        else:
+            changed = _rewrite_python_launchers(value, tuple(tails), replacement)
+        changes.append((start, end, shlex.quote(changed)))
+    for start, end, changed in reversed(changes):
+        command = command[:start] + changed + command[end:]
+    return command
+
+
 def _python_install_environment(
     command: str, policy: SandboxPolicy
 ) -> tuple[str, dict[str, str], Path | None]:
@@ -432,21 +542,10 @@ def _python_install_environment(
         "VIRTUAL_ENV": str(environment),
         "PATH": str(scripts) + os.pathsep + os.environ.get("PATH", ""),
     }
+    command = _rewrite_python_launchers(command, acquisition.python_launchers, selected_python)
     if create:
         launcher = "python" if sys.platform == "win32" else shlex.quote(sys.executable)
         command = f"{launcher} -m venv {shlex.quote(str(environment))} && {command}"
-    for launcher in acquisition.python_launchers:
-        if Path(launcher).resolve() == selected_python.resolve():
-            continue
-        # The approval promises the selected writable environment. An absolute Python
-        # ignores PATH, so bind that invocation to the environment's interpreter too.
-        word = re.compile(rf"(?<!\S)(?P<quote>['\"]?){re.escape(launcher)}(?P=quote)(?=\s|$)")
-        command, changed = word.subn(shlex.quote(str(selected_python)), command, count=1)
-        if not changed:
-            raise RuntimeError(
-                f"cannot safely redirect the explicit Python interpreter {launcher!r} "
-                f"to the approved environment at {environment}"
-            )
     return command, env, environment
 
 

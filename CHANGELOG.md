@@ -11,8 +11,9 @@ the SDK, and every break is listed here.
 - Windows in-process file reads and writes now reject reparse-point swaps after approval;
   directory handles keep every checked parent from being replaced until the operation ends.
 - Software-acquisition approval now covers shell conditionals, wrapper options such as
-  `env -u`, and versioned `pip` commands. Absolute Python package installers are rebound
-  to the writable environment named by the approval instead of silently ignoring it.
+  `env -u` and `env -S`, and versioned `pip` commands. Absolute Python package installers
+  are rebound at their parsed invocation—not an earlier textual match—to the writable
+  environment named by the approval, while fresh-environment bootstrapping stays separate.
 - After outside content enters a conversation, sandboxed Bash asks before running whenever
   its network policy has an outbound destination; an allowlist limits destinations but is
   not treated as consent to transmit project data.

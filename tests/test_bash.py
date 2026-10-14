@@ -24,6 +24,10 @@ from tinyharness.workspace import Workspace
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="needs a POSIX shell")
 
 
+def environment_python(environment):
+    return environment / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+
+
 class FakeSandbox(Sandbox):
     """Stands in for a real backend where only the gate's view matters."""
 
@@ -285,7 +289,7 @@ def test_python_install_creates_a_project_environment_when_none_is_active(tmp_pa
     assert environment == tmp_path / ".venv"
     assert "-m venv" in command and command.endswith("&& pip install requests")
     assert env["VIRTUAL_ENV"] == str(environment)
-    assert env["PATH"].split(os.pathsep)[0] == str(environment / "bin")
+    assert env["PATH"].split(os.pathsep)[0] == str(environment_python(environment).parent)
     boundary = sandboxed_bash(tmp_path).approval_boundary(BashTool.Input(command="pip install requests"))
     assert boundary is not None and str(environment) in boundary.warning
 
@@ -295,7 +299,7 @@ def test_python_install_reuses_a_writable_active_environment(tmp_path, monkeypat
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     monkeypatch.delenv("CONDA_PREFIX", raising=False)
     environment = tmp_path / "active"
-    python = environment / "bin/python"
+    python = environment_python(environment)
     python.parent.mkdir(parents=True)
     python.touch()
     monkeypatch.setenv(variable, str(environment))
@@ -308,7 +312,7 @@ def test_python_install_reuses_a_writable_active_environment(tmp_path, monkeypat
 
 def test_python_install_does_not_modify_an_external_launcher_environment(tmp_path, monkeypatch):
     external = tmp_path.parent / "tinyharness-runtime"
-    python = external / "bin/python"
+    python = environment_python(external)
     python.parent.mkdir(parents=True)
     python.touch()
     monkeypatch.setenv("VIRTUAL_ENV", str(external))
@@ -322,11 +326,11 @@ def test_absolute_python_install_uses_the_approved_project_environment(tmp_path,
     """Seen live: an absolute interpreter ignored PATH and targeted the launcher environment."""
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     monkeypatch.delenv("CONDA_PREFIX", raising=False)
-    external = tmp_path.parent / "launcher" / "bin" / "python"
+    external = environment_python(tmp_path.parent / "launcher")
     command, env, selected = _python_install_environment(
         f"{external} -m pip install requests", SandboxPolicy.for_project(tmp_path)
     )
-    project_python = tmp_path / ".venv" / "bin" / "python"
+    project_python = environment_python(tmp_path / ".venv")
     assert selected == tmp_path / ".venv" and env["VIRTUAL_ENV"] == str(selected)
     assert f"{project_python} -m pip install requests" in command
     assert f"{external} -m pip install requests" not in command
@@ -347,7 +351,7 @@ async def test_python_install_command_bootstraps_the_project_environment(tmp_pat
     monkeypatch.delenv("CONDA_PREFIX", raising=False)
     tool = BashTool(FakeSandbox(), SandboxPolicy.for_project(tmp_path))
     out = await run(tool, "pip install --no-index package-that-does-not-exist", tmp_path)
-    assert (tmp_path / ".venv/bin/python").is_file()
+    assert environment_python(tmp_path / ".venv").is_file()
     assert "No matching distribution" in out and "exit code" in out
 
 
