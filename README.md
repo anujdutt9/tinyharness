@@ -6,7 +6,7 @@
   <a href="https://pypi.org/project/tinyharness/"><img src="https://img.shields.io/pypi/v/tinyharness?color=1f5f99" alt="PyPI"></a>
   <a href="https://pypi.org/project/tinyharness/"><img src="https://img.shields.io/pypi/pyversions/tinyharness?color=1f5f99" alt="Python versions"></a>
   <a href="https://github.com/anujdutt9/tinyharness/actions/workflows/ci.yml"><img src="https://github.com/anujdutt9/tinyharness/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/anujdutt9/tinyharness/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-1f5f99" alt="MIT license"></a>
+  <a href="https://github.com/anujdutt9/tinyharness/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-1f5f99" alt="Apache 2.0 license"></a>
 </p>
 
 **tinyharness** is the loop that turns an LLM into an agent: it reads, searches and edits
@@ -185,4 +185,4 @@ The release workflow tests, builds and publishes to PyPI.
 
 ## License
 
-MIT.
+[Apache License 2.0](LICENSE).
