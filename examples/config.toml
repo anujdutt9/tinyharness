@@ -87,7 +87,8 @@
 #                "*.github.com", "*.githubusercontent.com"]  # [] = no network
 
 # --- Extensions ---------------------------------------------------------------
-# Built-in: web (WebSearch, WebFetch), pdf, open, todo, agents (Agent, Team). Your own go
+# Built-in: web (WebSearch, WebFetch), pdf, todo, agents (Agent, Team). Open is a core
+# tool and needs no extension. Your own extensions go
 # in ~/.tinyharness/extensions/<name>.py (docs/extension-api.md). Off unless listed;
 # /extensions shows what each adds to every request, /extensions on <name> for a session.
 # [extensions]

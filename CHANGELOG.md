@@ -92,6 +92,7 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
   same resolution; provider `small_model` and `compaction_model` remain compatibility fallbacks.
 - SDK sessions accept post-turn `evaluators`; each gets a deep-copied trajectory and its
   result, error or timeout is appended to the trace without changing the completed task.
+  `examples/09_evaluator.py` shows the complete observer flow.
 
 ### Changed
 - Resuming no longer requires remembering an opaque session id: `-r` opens a title-based

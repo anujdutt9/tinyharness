@@ -105,7 +105,7 @@ resumed from code (`SessionOptions(resume="latest")`). Post-turn evaluators can 
 with `SessionOptions(evaluators=[...], evaluator_timeout=30.0)`; their bounded results are
 appended to the versioned trace without changing the completed conversation. See [`examples/`](https://github.com/anujdutt9/tinyharness/tree/main/examples) for a
 one-shot query, a multi-turn session, resuming, a custom tool, a permission policy with
-hooks, skills, subagents on different models, and an extension.
+hooks, skills, subagents on different models, an extension, and a post-turn evaluator.
 
 ## What's inside
 
