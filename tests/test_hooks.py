@@ -69,7 +69,10 @@ async def test_a_hook_that_times_out_is_stopped_with_its_children(tmp_path, monk
     monkeypatch.setattr(process, "KILL_GRACE", 0.5)
     pidfile = tmp_path / "child.pid"
     script = tmp_path / "hook.sh"
-    script.write_text(f"sh -c 'trap \"\" TERM; sleep 30' & echo $! > {pidfile}; sleep 30\n")
+    # MSYS sh accepts forward-slash Windows paths. Backslashes in the native path
+    # are shell escapes, so an unquoted redirection can silently miss the pid file.
+    pid_target = shlex.quote(pidfile.as_posix())
+    script.write_text(f"sh -c 'trap \"\" TERM; sleep 30' & echo $! > {pid_target}; sleep 30\n")
     timeout = 1.5 if os.name == "nt" else 0.5
     runner = HookRunner(
         [Hook(event="Stop", command=f"sh {shlex.quote(str(script))}")], cwd=tmp_path, timeout=timeout
