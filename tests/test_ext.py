@@ -241,7 +241,6 @@ async def test_run_agent_names_the_agents_it_knows(tmp_path, monkeypatch):
     [
         ("web", ["WebSearch", "WebFetch"], "# Web"),
         ("pdf", ["Pdf"], None),
-        ("open", ["Open"], "# Showing things"),
         ("todo", ["TodoWrite"], "# Planning"),
     ],
 )

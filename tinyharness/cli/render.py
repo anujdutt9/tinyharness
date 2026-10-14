@@ -58,6 +58,7 @@ from tinyharness.cli.theme import (
     tool_style,
 )
 from tinyharness.events import (
+    ArtifactPresented,
     AssistantText,
     Compacted,
     Done,
@@ -138,8 +139,14 @@ def format_todos(todos: list[dict[str, str]]) -> Text:
                 out.append(f"{prefix}✔ ", style="ok").append(todo["content"], style="muted strike")
             case "in_progress":
                 out.append(f"{prefix}◼ ", style="brand").append(todo["activeForm"], style="bold")
+            case "blocked":
+                out.append(f"{prefix}! ", style="warn").append(todo["content"], style="bold")
+            case "cancelled":
+                out.append(f"{prefix}× ", style="muted").append(todo["content"], style="muted strike")
             case _:
                 out.append(f"{prefix}◻ ", style="muted").append(todo["content"])
+        if todo.get("result"):
+            out.append(f" — {todo['result']}", style="subtle")
         out.append("\n")
     out.rstrip()
     return out
@@ -661,6 +668,20 @@ class Renderer:
                         tool_line("Todos", "ok"),
                         Text("  ").append(f"{ELBOW} ", style="subtle").append(format_todos(todos)),
                     )
+                )
+                self.wait(WAITING)
+            case ArtifactPresented(target=target, media_type=media_type, title=title):
+                label = title or target
+                style = (
+                    Style(link=target) if target.startswith(("http://", "https://")) else file_link(target)
+                )
+                suffix = f" · {media_type}" if media_type else ""
+                self._block(
+                    Text("  ↗ ", style="ok")
+                    .append("Artifact  ", style="bold")
+                    .append(label, style=style)
+                    .append(" · click to open", style="subtle")
+                    .append(suffix, style="subtle")
                 )
                 self.wait(WAITING)
             case SubagentUpdate(id=run_id, status="started" | "working"):

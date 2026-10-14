@@ -14,6 +14,14 @@ Release validation is summarized in
 intentionally excluded because they can contain prompts, filesystem paths and project context.
 
 ### Added
+- The core Open tool now presents files and URLs as typed, clickable artifacts
+  inside tinyharness by default. Launching a browser or host application remains a separate,
+  explicit mode that always crosses the permission boundary.
+- Todo tasks now have stable IDs across updates and resumed sessions, plus blocked and
+  cancelled states and a short result field for completion evidence or blockers.
+- Memory changes now have a private append-only audit ledger with stable IDs, timestamps,
+  source session/turn, outside-content provenance, and `/memory history`. The small Markdown
+  snapshot remains the only memory content loaded into model context.
 - `/sessions` opens a searchable conversation switcher inside the running CLI. The same
   searchable picker is used for models, providers and skills; choosing a skill prepares its
   slash command so arguments can be added before it runs. Session logs use an OS-held lock,
@@ -22,6 +30,8 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
   scripts, browser runtimes, model downloaders and container clients now asks before downloading
   or executing new code, even inside the sandbox or `bypassPermissions`. The exact acquisition can be
   allowed for the session; using an already-installed executable does not ask again.
+  `uv run` also asks when its target is a PEP 723 script that declares dependencies; ordinary
+  installed commands such as `uv run pytest`, `--offline`, and `--no-sync` stay quiet.
   Network-host approval stays separate, while plan mode continues to block acquisition.
 - Approved bare Python installs reuse an active writable virtualenv or Conda environment.
   When the launcher environment is outside the sandbox or none exists, tinyharness creates
@@ -71,6 +81,25 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
   feature documentation and `agent/compaction.py` rationale.
 
 ### Fixed
+- PEP 723 scripts launched after a shell directory change can no longer bypass the
+  software-acquisition approval when their path cannot be inspected before execution.
+- Resuming a conversation now restores the optional extensions required by skills already
+  loaded into its context, and migrates older saved todo lists to stable task IDs.
+- Memory audit entries after `/clear` now carry the new conversation's session ID rather than
+  the cleared conversation's ID.
+- Exact network destinations approved for a session now accumulate in the sandbox policy,
+  not only in the permission prompt state. Multi-host clients such as market-data libraries
+  can continue across redirects and service hosts without disabling containment or losing
+  earlier approvals; one-command approvals remain limited to that command. An invoked skill
+  can declare a finite `requires-network` set, letting the user review and approve all of its
+  exact destinations once for the session instead of discovering them through repeated failures.
+- Invoked skills can declare `requires-extensions` in their frontmatter. tinyharness turns
+  those capabilities on for the session before the first model call, so a multi-agent skill
+  receives `Agent`/`Team` instead of silently collapsing isolated roles into the main context.
+- Indirect PEP 723 launches such as `uv run $SKILL_DIR/scripts/tool.py` no longer bypass the
+  software-acquisition prompt merely because the harness cannot resolve the shell variable.
+- Reading an artifact is no longer described to the model as showing it to the user. Requests
+  to show or open a result use the Open capability when available, or get an honest fallback.
 - Memory writes now require an explicit `user` or `project` scope, and the tool and
   `/memory` explain when a durable fact belongs in memory versus a user `AGENTS.md` or
   shared project `AGENTS.md`.
@@ -354,8 +383,8 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
   `user_prompt`, `tool_call`, `tool_result` and `turn_end` (the same bus as `hooks.toml`).
   Turned on in `[extensions] enabled = [...]` or with `/extensions on|off`, which lists
   each one's tokens per request. See docs/extension-api.md.
-- The core is six tools: Read, Write, Edit, Glob, Grep, Bash. Web, Pdf, Open and TodoWrite
-  are built-in extensions (`web`, `pdf`, `open`, `todo`), off until turned on, so a session
+- The core is seven tools: Read, Write, Edit, Glob, Grep, Bash and Open. Web, Pdf and TodoWrite
+  are built-in extensions (`web`, `pdf`, `todo`), off until turned on, so a session
   that doesn't use them doesn't send their schemas with every request.
 - Memory across sessions, the `memory` extension (off until turned on): the agent keeps
   short notes about you (`~/.tinyharness/memory.md`, every project) and about the project

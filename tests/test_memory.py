@@ -12,7 +12,15 @@ from tinyharness.permissions import Decision, PermissionGate, PermissionMode
 from tinyharness.subagents.runner import MAIN_AGENT_ONLY
 from tinyharness.testing import scripted_session
 from tinyharness.tools.base import ToolError
-from tinyharness.tools.memory import LIMITS, MemoryInput, MemoryTool, memory_path, read_notes
+from tinyharness.tools.memory import (
+    LIMITS,
+    MemoryInput,
+    MemoryTool,
+    memory_history_path,
+    memory_path,
+    read_history,
+    read_notes,
+)
 from tinyharness.workspace import Workspace
 
 
@@ -36,6 +44,37 @@ async def test_notes_are_added_replaced_and_removed_in_a_file_per_scope(tmp_path
     assert read_notes(memory_path("project", tmp_path)) == ["Deploys freeze on 2026-10-20"]
     assert read_notes(memory_path("user", tmp_path)) == ["Prefers short answers"]
     assert memory_path("project", tmp_path).read_text() == "- Deploys freeze on 2026-10-20\n"
+
+
+async def test_memory_changes_have_stable_ids_and_harness_owned_provenance(tmp_path):
+    ctx = make_ctx(tmp_path)
+    ctx.session_id, ctx.turn_id = "session-1", "turn-1"
+    ctx.outside.append("WebFetch docs.example")
+    tool = MemoryTool(tmp_path)
+    await call(tool, {"action": "add", "scope": "project", "note": "Use the staging API"}, ctx)
+    await call(
+        tool,
+        {
+            "action": "replace",
+            "scope": "project",
+            "old": "staging",
+            "note": "Use the read-only staging API",
+        },
+        ctx,
+    )
+    records = read_history(memory_history_path("project", tmp_path))
+    assert len(records) == 2
+    assert records[0]["memory_id"] == records[1]["memory_id"]
+    assert records[1]["previous"] == "Use the staging API"
+    assert records[1]["session"] == "session-1" and records[1]["turn"] == "turn-1"
+    assert records[1]["outside_sources"] == ["WebFetch docs.example"]
+    assert records[1]["policy_version"] == 1
+
+
+def test_memory_history_ignores_an_interrupted_record(tmp_path):
+    path = tmp_path / "memory-history.jsonl"
+    path.write_text('{"memory_id":"mem-1","note":"one"}\n{"memory_id":')
+    assert read_history(path) == [{"memory_id": "mem-1", "note": "one"}]
 
 
 async def test_a_subfolder_of_a_repository_shares_the_repositorys_memory(tmp_path):

@@ -125,6 +125,13 @@ def test_pages_are_written_the_usual_way(tmp_path):
     assert "network_host" in prompt and "playwright" not in prompt.lower()
 
 
+def test_reading_a_file_is_not_described_as_showing_it_to_the_user():
+    """Seen live: the model read a 372-line report, then falsely said it was shown above."""
+    prompt = load_prompt("system", **{v: f"<{v}>" for v in PROMPT_VARIABLES["system"]})
+    assert "never claim" in prompt and "merely because you used Read" in prompt
+    assert "Open is always available" in prompt
+
+
 def test_the_system_prompt_carries_no_one_demos_instructions():
     """A business-database Team example, "delegate without being asked", "re-run a
     subagent's query" and "never do mental math" were in every session's prompt, from

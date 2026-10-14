@@ -8,6 +8,7 @@ from tinyharness.tools.base import Tool
 from tinyharness.tools.edit import EditTool
 from tinyharness.tools.glob import GlobTool
 from tinyharness.tools.grep import GrepTool
+from tinyharness.tools.open import OpenTool
 from tinyharness.tools.read import ReadTool
 from tinyharness.tools.write import WriteTool
 
@@ -48,9 +49,11 @@ class ToolRegistry:
 
 
 def default_tools() -> list[AnyTool]:
-    """The core file tools; Bash is added by the session (it needs the sandbox). Everything
-    else (web, pdf, open, todo, agents) is an extension: tinyharness/extensions/."""
-    return [ReadTool(), WriteTool(), EditTool(), GlobTool(), GrepTool()]
+    """The core tools that do not need session-owned dependencies.
+
+    Bash is added by the session because it needs the active sandbox.
+    """
+    return [ReadTool(), WriteTool(), EditTool(), GlobTool(), GrepTool(), OpenTool()]
 
 
 def default_registry() -> ToolRegistry:

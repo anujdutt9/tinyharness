@@ -3,17 +3,20 @@
 import os
 import sys
 import time
+from typing import ClassVar
 
 import pytest
 from pydantic import ValidationError
 
 from conftest import call, make_ctx
 from tinyharness import process
+from tinyharness.events import ArtifactPresented
 from tinyharness.hooks import Hook, HookRunner
 from tinyharness.permissions import Decision, PermissionGate, PermissionMode, PermissionRules
 from tinyharness.sandbox import Sandbox, SandboxPolicy
+from tinyharness.testing import scripted_session
 from tinyharness.tools import bash
-from tinyharness.tools.base import ToolError
+from tinyharness.tools.base import ToolError, ToolOutput
 from tinyharness.tools.bash import BashTool, _python_install_environment
 from tinyharness.tools.open import OpenTool
 from tinyharness.workspace import Workspace
@@ -174,6 +177,46 @@ def test_explicit_software_acquisition_has_an_approval_boundary(tmp_path, comman
 )
 def test_using_existing_tools_has_no_acquisition_prompt(tmp_path, command):
     assert sandboxed_bash(tmp_path).approval_boundary(BashTool.Input(command=command)) is None
+
+
+async def test_uv_inline_script_dependencies_require_acquisition_approval(tmp_path):
+    """A PEP 723 script can install packages through `uv run` without saying install."""
+    script = tmp_path / "data_tool.py"
+    script.write_text('# /// script\n# requires-python = ">=3.11"\n# dependencies = ["requests"]\n# ///\n')
+    boundary = sandboxed_bash(tmp_path).approval_boundary(
+        BashTool.Input(command=f"uv run {script} identity SPY")
+    )
+    assert boundary is not None
+    assert "Python package" in boundary.warning
+    assert "private tinyharness cache" in boundary.warning
+
+
+def test_indirect_uv_script_path_still_requires_acquisition_approval(tmp_path):
+    """Seen live: `uv run $S/scripts/memory_log.py` installed 23 packages without asking."""
+    boundary = sandboxed_bash(tmp_path).approval_boundary(
+        BashTool.Input(command="S=/installed/skill && uv run $S/scripts/memory_log.py init")
+    )
+    assert boundary is not None
+    assert boundary.key.startswith("software:uv-script:")
+
+
+def test_uv_script_after_cd_still_requires_acquisition_approval(tmp_path, monkeypatch):
+    """Seen live: shell cwd changes made a dependency-bearing script invisible to the gate."""
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "tool.py").write_text('# /// script\n# dependencies = ["requests"]\n# ///\n')
+    monkeypatch.chdir(tmp_path)
+    boundary = sandboxed_bash(tmp_path).approval_boundary(BashTool.Input(command="cd sub && uv run tool.py"))
+    assert boundary is not None
+    assert boundary.key.startswith("software:uv-script:")
+
+
+def test_uv_inline_script_offline_or_no_sync_does_not_request_acquisition(tmp_path):
+    script = tmp_path / "data_tool.py"
+    script.write_text('# /// script\n# dependencies = ["requests"]\n# ///\n')
+    tool = sandboxed_bash(tmp_path)
+    for flag in ("--offline", "--no-sync"):
+        assert tool.approval_boundary(BashTool.Input(command=f"uv run {flag} {script}")) is None
 
 
 def test_python_install_creates_a_project_environment_when_none_is_active(tmp_path, monkeypatch):
@@ -411,6 +454,151 @@ async def test_new_network_host_asks_once_and_can_be_remembered(tmp_path):
     assert "receive any non-secret project data" in asked[0].warning
 
 
+async def test_session_network_approvals_accumulate_in_later_sandboxes(tmp_path, monkeypatch):
+    """Seen live: yfinance needed fc.yahoo.com, query1.finance.yahoo.com, then
+    query2.finance.yahoo.com; prompt approvals were remembered but earlier hosts vanished
+    from each new command's sandbox policy."""
+
+    class RecordingSandbox(FakeSandbox):
+        def __init__(self):
+            self.policies = []
+
+        def wrap(self, argv, policy):
+            self.policies.append(policy)
+            return argv
+
+    class RecordingProxy:
+        instances: ClassVar[list] = []
+
+        def __init__(self, allowed):
+            self.allowed = tuple(allowed)
+            self.denied = []
+            self.reached = []
+            self.closed = False
+            self.instances.append(self)
+
+        async def start(self):
+            return 43123
+
+        def env(self):
+            return {}
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(bash, "AllowlistProxy", RecordingProxy)
+    session_hosts: set[str] = set()
+    sandbox = RecordingSandbox()
+    policy = SandboxPolicy(write_roots=(tmp_path,))
+    tool = BashTool(sandbox, policy, session_hosts=session_hosts)
+
+    async def remember(_request):
+        return Decision(True, "ok", "user", remember=True)
+
+    gate = PermissionGate(
+        workspace=Workspace(tmp_path),
+        mode=PermissionMode.DEFAULT,
+        callback=remember,
+        session_network_hosts=session_hosts,
+    )
+    for host in ("fc.yahoo.com", "query1.finance.yahoo.com"):
+        args = tool.parse({"command": "true", "network_host": host})
+        assert (await gate.check(tool, args.model_dump(), None, target_host=host)).allow
+        await tool.execute(args, make_ctx(tmp_path))
+
+    assert sandbox.policies[0].allowed_hosts == ("fc.yahoo.com",)
+    assert sandbox.policies[1].allowed_hosts == (
+        "fc.yahoo.com",
+        "query1.finance.yahoo.com",
+    )
+    assert [proxy.allowed for proxy in RecordingProxy.instances] == [
+        ("fc.yahoo.com",),
+        ("fc.yahoo.com", "query1.finance.yahoo.com"),
+    ]
+    assert all(proxy.closed for proxy in RecordingProxy.instances)
+    assert policy.allowed_hosts == ()
+
+
+async def test_skill_network_set_needs_one_reviewed_session_approval(tmp_path, monkeypatch):
+    """Seen live: a market-data skill asked separately for six exact destinations."""
+
+    class RecordingSandbox(FakeSandbox):
+        def __init__(self):
+            self.policies = []
+
+        def wrap(self, argv, policy):
+            self.policies.append(policy)
+            return argv
+
+    class RecordingProxy:
+        def __init__(self, allowed):
+            self.allowed = tuple(allowed)
+            self.denied = []
+            self.reached = []
+
+        async def start(self):
+            return 43123
+
+        def env(self):
+            return {}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(bash, "AllowlistProxy", RecordingProxy)
+    session_hosts: set[str] = set()
+    sandbox = RecordingSandbox()
+    tool = BashTool(
+        sandbox,
+        SandboxPolicy(write_roots=(tmp_path,)),
+        session_hosts=session_hosts,
+    )
+    asked = []
+
+    async def remember(request):
+        asked.append(request)
+        return Decision(True, "ok", "user", remember=True)
+
+    gate = PermissionGate(
+        workspace=Workspace(tmp_path),
+        mode=PermissionMode.DEFAULT,
+        callback=remember,
+        session_network_hosts=session_hosts,
+    )
+    hosts = ("query1.finance.yahoo.com", "query2.finance.yahoo.com", "finance.yahoo.com")
+    gate.add_network_bundle("trading-agents", hosts)
+    first = tool.parse({"command": "true", "network_host": hosts[0]})
+    assert (await gate.check(tool, first.model_dump(), None, target_host=hosts[0])).allow
+    await tool.execute(first, make_ctx(tmp_path))
+    assert len(asked) == 1
+    assert asked[0].remember_label == ("allow 3 exact destinations declared by /trading-agents this session")
+    assert "/trading-agents declares this exact destination set" in asked[0].warning
+    assert session_hosts == set(hosts)
+    assert sandbox.policies[0].allowed_hosts == tuple(sorted(hosts))
+
+    second = tool.parse({"command": "true", "network_host": hosts[1]})
+    assert (await gate.check(tool, second.model_dump(), None, target_host=hosts[1])).source == "rule"
+    assert len(asked) == 1
+
+
+async def test_allow_once_network_host_does_not_expand_later_sandboxes(tmp_path):
+    session_hosts: set[str] = set()
+    tool = BashTool(
+        FakeSandbox(),
+        SandboxPolicy(write_roots=(tmp_path,)),
+        session_hosts=session_hosts,
+    )
+    gate = PermissionGate(
+        workspace=Workspace(tmp_path),
+        mode=PermissionMode.DEFAULT,
+        callback=User(),
+        session_network_hosts=session_hosts,
+    )
+    args = tool.parse({"command": "true", "network_host": "once.example"})
+    assert (await gate.check(tool, args.model_dump(), None, target_host=tool.target_host(args))).allow
+    assert session_hosts == set()
+
+
 async def test_new_network_host_approval_never_removes_the_sandbox(tmp_path):
     tool = sandboxed_bash(tmp_path)
     args = tool.parse({"command": 'echo "${SANDBOXED:-no}"', "network_host": "charts.example"})
@@ -548,9 +736,38 @@ async def test_without_a_sandbox_every_command_crosses_a_hard_boundary(tmp_path)
 
 
 @pytest.mark.parametrize("mode", [PermissionMode.DEFAULT, PermissionMode.AUTO])
-async def test_open_always_asks_even_for_project_files(tmp_path, mode):
-    _, asked = await check(tmp_path, OpenTool(), mode, {"target": "report.html"})
+async def test_open_external_always_asks_even_for_project_files(tmp_path, mode):
+    _, asked = await check(tmp_path, OpenTool(), mode, {"target": "report.html", "mode": "external"})
     assert len(asked) == 1
+
+
+@pytest.mark.parametrize("mode", [PermissionMode.DEFAULT, PermissionMode.AUTO])
+async def test_open_preview_is_a_read_only_artifact_without_an_approval(tmp_path, mode):
+    """Seen live: an HTML report existed, but the agent said it could not show it because
+    launching a browser crossed the sandbox boundary."""
+    (tmp_path / "report.html").write_text("<h1>report</h1>")
+    _, asked = await check(tmp_path, OpenTool(), mode, {"target": "report.html", "mode": "preview"})
+    assert asked == []
+    out = await OpenTool().run(
+        OpenTool().parse({"target": "report.html", "mode": "preview"}), make_ctx(tmp_path)
+    )
+    assert isinstance(out, ToolOutput)
+    assert out.artifacts[0].target == str((tmp_path / "report.html").resolve())
+    assert out.artifacts[0].media_type == "text/html"
+
+
+async def test_open_preview_streams_a_typed_artifact_event(tmp_path):
+    (tmp_path / "report.html").write_text("<h1>report</h1>")
+    session = scripted_session(
+        tmp_path,
+        [[("Open", '{"target":"report.html","mode":"preview"}')], "Linked."],
+    )
+    try:
+        events = [event async for event in session.run("show the report")]
+    finally:
+        session.close()
+    shown = [event for event in events if isinstance(event, ArtifactPresented)]
+    assert len(shown) == 1 and shown[0].target == str((tmp_path / "report.html").resolve())
 
 
 async def gate_check(tmp_path, mode, target, *, allow=(), deny=(), remember=True):
@@ -564,10 +781,9 @@ async def gate_check(tmp_path, mode, target, *, allow=(), deny=(), remember=True
     rules = PermissionRules.parse(list(allow), list(deny), tmp_path)
     gate = PermissionGate(workspace=Workspace(tmp_path), mode=mode, callback=user, rules=rules)
     tool = OpenTool()
-    args = tool.parse({"target": target})
-    decision = await gate.check(
-        tool, {"target": target}, tool.target_path(args), target_host=tool.target_host(args)
-    )
+    raw = {"target": target, "mode": "external"}
+    args = tool.parse(raw)
+    decision = await gate.check(tool, raw, tool.target_path(args), target_host=tool.target_host(args))
     return decision, asked, gate
 
 
@@ -602,19 +818,19 @@ async def test_bypass_mode_still_asks_before_opening_a_host_app(tmp_path):
 async def test_open_refuses_anything_that_could_run(tmp_path, name):
     (tmp_path / name).write_text("#!/bin/sh\n")
     with pytest.raises(ToolError, match="only documents"):
-        await call(OpenTool(), {"target": name}, make_ctx(tmp_path))
+        await call(OpenTool(), {"target": name, "mode": "preview"}, make_ctx(tmp_path))
 
 
 @pytest.mark.parametrize("target", ["file:///etc/passwd", "javascript:alert(1)", "ssh://host"])
 async def test_open_takes_only_web_urls(tmp_path, target):
     with pytest.raises(ToolError, match="only http"):
-        await call(OpenTool(), {"target": target}, make_ctx(tmp_path))
+        await call(OpenTool(), {"target": target, "mode": "preview"}, make_ctx(tmp_path))
 
 
 async def test_open_refuses_secrets(tmp_path):
     (tmp_path / ".env.json").write_text("{}")
     with pytest.raises(ToolError, match="secret"):
-        await call(OpenTool(), {"target": ".env.json"}, make_ctx(tmp_path))
+        await call(OpenTool(), {"target": ".env.json", "mode": "preview"}, make_ctx(tmp_path))
 
 
 async def test_open_hands_documents_to_the_system_opener(tmp_path, monkeypatch):
@@ -624,7 +840,7 @@ async def test_open_hands_documents_to_the_system_opener(tmp_path, monkeypatch):
     opener.write_text(f'#!/bin/sh\necho "$1" > {seen}\n')
     opener.chmod(0o755)
     monkeypatch.setattr("tinyharness.tools.open._opener", lambda: str(opener))
-    out = await call(OpenTool(), {"target": "report.html"}, make_ctx(tmp_path))
+    out = await call(OpenTool(), {"target": "report.html", "mode": "external"}, make_ctx(tmp_path))
     assert out == f"opened {tmp_path.resolve() / 'report.html'}"
     assert seen.read_text().strip() == str(tmp_path.resolve() / "report.html")
 

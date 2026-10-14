@@ -221,6 +221,11 @@ def test_no_todo_list_by_default(session):
     assert "TodoWrite" not in session._system_prompt()
 
 
+def test_open_is_a_core_capability(session):
+    assert "Open" in session.tools.names()
+    assert "Open is always available" in session._system_prompt()
+
+
 @pytest.mark.parametrize("how", ["option", "env"])
 def test_the_todo_list_can_be_turned_on(tmp_path, monkeypatch, how):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")

@@ -13,6 +13,8 @@ from tinyharness.agent.transcript import SessionBusyError, Transcript
 from tinyharness.agent.world import STALE_MARK, UNFINISHED
 from tinyharness.paths import move_legacy_state, project_dir, state_dir
 from tinyharness.session import list_sessions
+from tinyharness.tools.memory import MemoryTool, memory_history_path, read_history
+from tinyharness.tools.todo import format_todos
 
 
 @pytest.fixture
@@ -416,6 +418,13 @@ async def test_clear_keeps_the_old_conversation_resumable(work):
     old_id, before = first.id, contents(first)
     first.clear()
     assert first.id != old_id and contents(first) == []
+    assert first.ctx.session_id == first.id and first.ctx.turn_id == ""
+    memory = MemoryTool(work)
+    await memory.run(
+        memory.parse({"action": "add", "scope": "project", "note": "Audit the new conversation"}),
+        first.ctx,
+    )
+    assert read_history(memory_history_path("project", work))[-1]["session"] == first.id
     await turn(first, "something else", "Sure.")
     first.close()
 
@@ -459,6 +468,22 @@ def test_clearing_an_empty_conversation_makes_no_new_one(work):
         assert session.id == before
     finally:
         session.close()
+
+
+async def test_resume_migrates_todos_saved_before_stable_ids(work):
+    """Seen live: formatting an old resumed todo list raised KeyError for its missing id."""
+    first = Session(options(work, todo_list=True))
+    await turn(first, "make a plan", "Planned.")
+    first.ctx.todos = [dict(TODO)]
+    first._sync()
+    first.close()
+
+    resumed = Session(options(work, resume="latest", todo_list=True))
+    try:
+        assert resumed.ctx.todos[0]["id"].startswith("task-")
+        assert "Checking" in format_todos(resumed.ctx.todos)
+    finally:
+        resumed.close()
 
 
 async def test_after_resume_a_file_changed_by_the_user_must_be_read_again(work):

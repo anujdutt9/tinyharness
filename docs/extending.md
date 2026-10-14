@@ -2,7 +2,7 @@
 
 The main way to add anything is an **extension**: one Python file with a `setup(th)`
 function that adds tools, prompt sections, slash commands and event handlers. The
-built-in features (web, pdf, open, todo, agents) are extensions too. The full contract is
+built-in features (web, pdf, todo, agents) are extensions too. The full contract is
 in [extension-api.md](extension-api.md); this page shows the common cases.
 
 Besides extensions there are hooks, subagents, plugins and skills (see

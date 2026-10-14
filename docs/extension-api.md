@@ -2,7 +2,7 @@
 
 An extension is one Python file with a `setup(th)` function. It can add tools, sections
 of the system prompt, slash commands and handlers for agent events. The built-in features
-(web, pdf, open, todo, agents) are extensions written against this same API, in
+(web, pdf, todo, agents) are extensions written against this same API, in
 [`tinyharness/extensions/`](../tinyharness/extensions); the API itself is
 [`tinyharness/ext.py`](../tinyharness/ext.py).
 
@@ -212,11 +212,10 @@ its module. Only load extensions you trust, as you would any package.
 |---|---|---|
 | `web` | WebSearch, WebFetch, and when to cite pages | no web access beyond the sandbox's allowlist |
 | `pdf` | Pdf: pages, text and images of a PDF | the model reads PDFs with Bash (`pdftotext`, pypdf) |
-| `open` | Open: shows you a file or URL in its app | the model tells you the path |
 | `todo` | TodoWrite: a live checklist for multi-step work | `todo_list = true` turns it on too |
 | `agents` | Agent and Team, and how to brief a subagent | no subagents |
 
-None is on by default. Hooks (`hooks.toml`), plugins, skills and `SessionOptions(tools=...)`
+These specialist extensions are off by default. Hooks (`hooks.toml`), plugins, skills and `SessionOptions(tools=...)`
 work as before, alongside extensions.
 
 ## Skills

@@ -172,6 +172,7 @@ def _acquisition_in_segment(tokens: list[str]) -> _SoftwareAcquisition | None:
     )
     kind = ""
     python_environment = False
+    uv_script_scope = _uv_script_dependency_scope(args) if executable == "uv" else None
     if executable in {"pip", "pip3"} and operation in {"install", "download", "wheel"}:
         kind = "Python package"
         python_environment = operation == "install" and not explicit_python_destination
@@ -179,9 +180,10 @@ def _acquisition_in_segment(tokens: list[str]) -> _SoftwareAcquisition | None:
         operation in {"add", "sync"}
         or (operation == "pip" and subcommand in {"install", "sync"})
         or (operation == "tool" and subcommand in {"install", "upgrade"})
+        or uv_script_scope is not None
     ):
         kind = "Python package" if operation != "tool" else "Python tool"
-        python_environment = operation != "tool" and not explicit_python_destination
+        python_environment = operation not in {"tool", "run"} and not explicit_python_destination
     elif executable == "uvx" and "--offline" not in args:
         kind = "Python tool"
     elif javascript_acquisition:
@@ -221,8 +223,36 @@ def _acquisition_in_segment(tokens: list[str]) -> _SoftwareAcquisition | None:
         return None
 
     normalized = " ".join(tokens)
-    scope = f"software:{executable}:{hashlib.sha256(normalized.encode()).hexdigest()[:16]}"
+    scope = uv_script_scope or f"software:{executable}:{hashlib.sha256(normalized.encode()).hexdigest()[:16]}"
     return _SoftwareAcquisition(scope, kind, python_environment)
+
+
+def _uv_script_dependency_scope(args: list[str]) -> str | None:
+    """Stable approval scope when `uv run` may resolve a script's declared packages."""
+    if "run" not in args or {"--offline", "--no-sync"} & set(args):
+        return None
+    for value in args[args.index("run") + 1 :]:
+        if not value.lower().endswith(".py"):
+            continue
+        try:
+            path = Path(value).expanduser()
+            header = path.read_text(errors="replace")[:65_536]
+        except OSError:
+            # The child shell may resolve a variable or change directory before running
+            # uv. If the harness cannot inspect a Python script, fail closed: otherwise
+            # `cd sub && uv run tool.py` can install PEP 723 dependencies without the
+            # software-acquisition approval. The scope stays stable for this expression.
+            digest = hashlib.sha256(value.encode()).hexdigest()[:16]
+            return f"software:uv-script:{digest}"
+        if not (
+            re.search(r"(?m)^#\s*///\s*script\s*$", header)
+            and re.search(r"(?m)^#\s*dependencies\s*=", header)
+        ):
+            return None
+        fingerprint = f"{path.resolve()}\0{header}"
+        digest = hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
+        return f"software:uv-script:{digest}"
+    return None
 
 
 def _python_install_environment(
@@ -335,11 +365,13 @@ class BashTool(Tool[BashInput]):
         policy: SandboxPolicy,
         shell: str | None = None,
         proxy: AllowlistProxy | None = None,
+        session_hosts: set[str] | None = None,
     ) -> None:
         self.sandbox = sandbox
         self.policy = policy
         self.shell = shell or default_shell()
         self.proxy = proxy if sandbox is not None else None
+        self.session_hosts = session_hosts if session_hosts is not None else set()
         network = (
             "network only to package registries (PyPI, npm), GitHub and common CDNs, through a "
             "proxy (/sandbox lists them)"
@@ -405,7 +437,7 @@ class BashTool(Tool[BashInput]):
                 "no sandbox backend is active: this command can use the network and change any of your files"
             )
         host = self._network_host(args)
-        if host and not host_allowed(host, self.policy.allowed_hosts):
+        if host and not self._host_is_allowed(host):
             return (
                 f"this keeps the command sandboxed but lets it connect to {host}; "
                 "that destination can receive any non-secret project data the command can read"
@@ -414,7 +446,10 @@ class BashTool(Tool[BashInput]):
 
     def rememberable_escape(self, args: dict[str, Any]) -> bool:
         host = self._network_host(args)
-        return bool(self.sandbox is not None and host and not host_allowed(host, self.policy.allowed_hosts))
+        return bool(self.sandbox is not None and host and not self._host_is_allowed(host))
+
+    def _host_is_allowed(self, host: str) -> bool:
+        return host_allowed(host, (*self.policy.allowed_hosts, *self.session_hosts))
 
     def _network_host(self, args: BashInput | dict[str, Any]) -> str:
         if isinstance(args, dict):
@@ -445,13 +480,15 @@ class BashTool(Tool[BashInput]):
         policy, denied_before, reached_before = self.policy, 0, 0
         active_proxy = self.proxy
         temporary_proxy = False
-        if sandboxed and args.network_host:
+        added_hosts = (*sorted(self.session_hosts), *((args.network_host,) if args.network_host else ()))
+        if sandboxed and added_hosts:
             policy = replace(
                 policy,
-                allowed_hosts=tuple(dict.fromkeys((*policy.allowed_hosts, args.network_host))),
+                allowed_hosts=tuple(dict.fromkeys((*policy.allowed_hosts, *added_hosts))),
             )
             if not getattr(self.sandbox, "manages_network", False) and (
-                active_proxy is None or not host_allowed(args.network_host, active_proxy.allowed)
+                active_proxy is None
+                or any(not host_allowed(host, active_proxy.allowed) for host in added_hosts)
             ):
                 active_proxy = AllowlistProxy(policy.allowed_hosts)
                 temporary_proxy = True

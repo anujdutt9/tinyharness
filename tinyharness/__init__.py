@@ -4,6 +4,7 @@ from tinyharness.agent.sessionlog import FileSessionStore, SessionInfo, SessionS
 from tinyharness.agent.world import ResumeReport
 from tinyharness.config import Config, load_config
 from tinyharness.events import (
+    ArtifactPresented,
     AssistantText,
     Compacted,
     Done,
@@ -35,11 +36,13 @@ from tinyharness.session import (
 )
 from tinyharness.skills import Skill, import_skills, load_skills
 from tinyharness.subagents import AgentSpec
-from tinyharness.tools import Tool, ToolContext, ToolError, ToolInput, ToolOutput
+from tinyharness.tools import ArtifactRef, Tool, ToolContext, ToolError, ToolInput, ToolOutput
 from tinyharness.version import __version__
 
 __all__ = [
     "AgentSpec",
+    "ArtifactPresented",
+    "ArtifactRef",
     "AssistantText",
     "Compacted",
     "Config",

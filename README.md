@@ -36,7 +36,7 @@ framework underneath, so you can read the whole thing in an afternoon.
   then run normally, and bare Python installs use a project `.venv`. API keys never reach
   the model. Once outside content is
   in the conversation, anything that could send data out asks a person first.
-- **Small and fast.** Six core tools and a short prompt (about 3k tokens before your
+- **Small and fast.** Seven core tools and a short prompt (about 3k tokens before your
   instructions) that stays the same from call to call, so the provider's cache hits.
 - **Extensible.** One Python file with `setup(th)` adds tools, prompt sections, commands
   and hooks. Web search, PDFs, subagents and parallel teams are built-in extensions you
@@ -112,7 +112,7 @@ hooks, skills, subagents on different models, and an extension.
 | | |
 |---|---|
 | **Agent loop** | Streaming, parallel read-only tools, argument validation and repair, recovery from cut-off and empty replies, retries with backoff |
-| **Tools** | Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash`. Built-in extensions you turn on: `web` (WebSearch, WebFetch), `pdf`, `open`, `todo`, `agents` (Agent, Team) |
+| **Tools** | Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash` `Open`. Built-in extensions you turn on: `web` (WebSearch, WebFetch), `pdf`, `todo`, `agents` (Agent, Team) |
 | **Extensions** | One Python file with `setup(th)` adds tools, prompt sections, slash commands and event handlers ([docs/extension-api.md](docs/extension-api.md)); `/extensions on|off` |
 | **Permissions** | Routine work in the project and the sandbox doesn't ask; anything beyond it asks, with a diff for edits. Modes `default`, `auto` (an LLM classifier for unclear cases), `plan`, `ask` (every edit and command) and `bypassPermissions`; persistent allow/deny rules |
 | **Sandbox** | Native Seatbelt on macOS; optional Sandbox Runtime on Linux, Windows and as a fallback. Commands have narrow writes, blocked credential reads and allowlisted network access; `/sandbox` shows it |

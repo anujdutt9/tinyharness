@@ -34,6 +34,7 @@ from tinyharness.agent.runaway import RunawayGuard
 from tinyharness.agent.transcript import trace_id, trace_scope, update_trace
 from tinyharness.agent.world import file_meta
 from tinyharness.events import (
+    ArtifactPresented,
     AssistantText,
     Compacted,
     Done,
@@ -484,6 +485,16 @@ async def _run_agent_loop(
                 meta = {} if is_error else file_meta(item.tool, item.args, deps.ctx)
                 finished[i] = (output, meta, result.images)
                 yield ToolResult(item.tool.name, output, is_error, id=item.call.id)
+                if not is_error:
+                    for artifact in result.artifacts:
+                        deps.transcript.write(
+                            "artifact",
+                            target=artifact.target,
+                            media_type=artifact.media_type or None,
+                            title=artifact.title or None,
+                            tool_call=item.call.id,
+                        )
+                        yield ArtifactPresented(artifact.target, artifact.media_type, artifact.title)
                 if item.tool.name == "TodoWrite" and not is_error:
                     yield TodosUpdated(list(deps.ctx.todos))
         finally:

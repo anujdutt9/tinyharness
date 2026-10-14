@@ -77,6 +77,7 @@ from tinyharness.subagents.runner import run_subagent
 from tinyharness.tools.base import Tool, ToolContext, ToolError, file_version
 from tinyharness.tools.bash import BashInput, BashTool
 from tinyharness.tools.registry import default_registry
+from tinyharness.tools.todo import normalize_todo_ids
 from tinyharness.trust import TrustStore
 from tinyharness.workspace import Scratch, Workspace
 
@@ -271,7 +272,11 @@ class Session:
         self.log = SessionLog(self.transcript)
         self.history = History()
         self.ctx = ToolContext(
-            workspace=self.workspace, config=self.config, scratch=self.scratch, notify=self.options.on_event
+            workspace=self.workspace,
+            config=self.config,
+            scratch=self.scratch,
+            notify=self.options.on_event,
+            session_id=self.id,
         )
 
         # Extensions: skills, agents, hooks (plugins contribute to all three).
@@ -326,6 +331,9 @@ class Session:
             if self.sandbox is not None and not getattr(self.sandbox, "manages_network", False) and hosts
             else None
         )
+        # Exact hosts approved "for this session" become part of later Bash sandboxes.
+        # A new Session gets a new set, and extension-owned commands do not inherit it.
+        self._session_network_hosts: set[str] = set()
         self.extensions: list[Extension] = []
         self.extension_errors: list[LoadError] = []
         enabled = list(self.config.extensions.enabled)
@@ -342,6 +350,7 @@ class Session:
             rules=PermissionRules.parse(cfg.permissions.allow, cfg.permissions.deny, root),
             hooks=self.hooks,
             callback=_one_at_a_time(self.options.permission_callback),
+            session_network_hosts=self._session_network_hosts,
             scratch=self.scratch,
             # Files that would run code outside the sandbox: writing them always asks.
             protected=(
@@ -367,6 +376,13 @@ class Session:
         self._resume_note = ""
         if saved is not None:
             self._restore(saved)
+            try:
+                self._activate_skill_requirements(
+                    [skill for skill in self.skills.list() if self._skill_in_context(skill)]
+                )
+            except BaseException:
+                self.close()
+                raise
         self.transcript.write(
             "session_resumed" if saved else "session_start",
             model=cfg.model,
@@ -421,7 +437,7 @@ class Session:
         if first.role == "system" and not (first.content or "").startswith(SUMMARY_MARK):
             history.messages[0] = Message(role="system", content=self._system_prompt())
         self.history = history
-        self.ctx.todos = list(saved.todos)
+        self.ctx.todos = normalize_todo_ids(saved.todos)
         self.ctx.read_paths = set(report.current_reads)
         # Those files are as the agent last saw them, so a change from now on (the user
         # editing one) must make Edit and Write ask for a fresh Read, as in a live session.
@@ -611,16 +627,26 @@ class Session:
         extension's, in order. Also used to switch extensions mid-session."""
         ext_hooks = {id(h) for ext in self.extensions for h in ext.hooks}
         self.hooks.hooks = [h for h in self.hooks.hooks if id(h) not in ext_hooks]
+        core = default_registry()
+        core_names = {name.casefold() for name in core.names()}
+        extension_names = [name for name in names if name.casefold() not in core_names]
         self.extensions, self.extension_errors = load_extensions(
-            names,
+            extension_names,
             self,
             self.config.extensions.settings(),
             project=self.project_trusted,
             given=self.options.extensions,
         )
-        self.tools = default_registry()
+        self.tools = core
         if shutil.which("bash") or shutil.which("sh"):
-            self.tools.register(BashTool(self.sandbox, self.sandbox_policy, proxy=self.proxy))
+            self.tools.register(
+                BashTool(
+                    self.sandbox,
+                    self.sandbox_policy,
+                    proxy=self.proxy,
+                    session_hosts=self._session_network_hosts,
+                )
+            )
         for tool in self.options.tools:  # before the Agent tool, so subagents can use them too
             self.tools.register(tool)
         for ext in self.extensions:
@@ -740,6 +766,11 @@ class Session:
     def mode(self) -> PermissionMode:
         return self.gate.mode
 
+    @property
+    def session_network_hosts(self) -> tuple[str, ...]:
+        """Exact destinations the user approved for this active session."""
+        return tuple(sorted(self._session_network_hosts))
+
     def set_mode(self, mode: PermissionMode | str) -> None:
         """For the session and its subagents, including ones already running."""
         self.gate.set_mode(PermissionMode.parse(mode))
@@ -806,6 +837,8 @@ class Session:
             previous = self.id
             self.transcript.close()
             self.id = _new_id()
+            self.ctx.session_id = self.id
+            self.ctx.turn_id = ""
             self.transcript = self.store.writer(self.id)
             if isinstance(self.transcript, Transcript):
                 self.transcript.set_secrets(self.config.credential_values())
@@ -844,6 +877,7 @@ class Session:
             Model text, tool activity, usage, and the final turn outcome.
         """
         named = self.skills_named(prompt)
+        self._activate_skill_requirements(named)
         if named:
             prompt = "\n\n".join([*(build_skill_prompt(s) for s in named), f"User message: {prompt}"])
         for skill in named:
@@ -882,6 +916,7 @@ class Session:
 
     async def _turn(self, prompt: str, images: Sequence[Image] = ()) -> AsyncGenerator[Event, None]:
         turn_id = trace_id("turn")
+        self.ctx.turn_id = turn_id
         turn_started = time.monotonic()
         if not self._started:
             await self.hooks.fire(
@@ -1123,10 +1158,41 @@ class Session:
         if skill is None:
             available = ", ".join(s.name for s in self.skills.list()) or "(none)"
             raise ValueError(f"unknown skill {name!r}; available: {available}")
+        self._activate_skill_requirements([skill])
         prompt = build_skill_prompt(skill, args)
         yield SkillLoaded(skill.name, count_tokens(prompt), "command")
         async for event in self._turn(prompt):
             yield event
+
+    def _activate_skill_requirements(self, skills: Sequence[Skill]) -> None:
+        """Activate capabilities an explicitly invoked skill declares it cannot work without."""
+        self._register_skill_network(skills)
+        required = list(
+            dict.fromkeys(extension for skill in skills for extension in skill.required_extensions)
+        )
+        core_names = {name.casefold() for name in default_registry().names()}
+        missing = [
+            name
+            for name in required
+            if name not in self.config.extensions.enabled and name.casefold() not in core_names
+        ]
+        if not missing:
+            return
+        self.set_extensions([*self.config.extensions.enabled, *missing])
+        loaded = {extension.name for extension in self.extensions}
+        failed = [name for name in missing if name not in loaded]
+        if failed:
+            details = "; ".join(
+                f"{error.name}: {error.error}" for error in self.extension_errors if error.name in failed
+            )
+            raise ValueError(
+                f"skill requires extension(s) that could not load: {', '.join(failed)}"
+                + (f" ({details})" if details else "")
+            )
+
+    def _register_skill_network(self, skills: Sequence[Skill]) -> None:
+        for skill in skills:
+            self.gate.add_network_bundle(skill.name, tuple(skill.network_hosts))
 
     def close(self) -> None:
         """Release proxies, logs, and temporary session data."""

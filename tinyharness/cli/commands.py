@@ -611,10 +611,12 @@ def sandbox(repl: Repl, arg: str) -> None:
     table.add_row("  [bold default]reads[/]", "anything except credential files (.env, keys, auth.json)")
     network = ", ".join(policy.allowed_hosts) or "none"
     table.add_row("  [bold default]network[/]", network)
+    if session.session_network_hosts:
+        table.add_row("  [bold default]session network[/]", ", ".join(session.session_network_hosts))
     repl.console.print(table)
     repl.console.print(
-        "  [muted]Bash cannot disable containment. A blocked exact host can be approved for "
-        "one command or the session; configure stable destinations with \\[sandbox] allow_hosts.[/]"
+        "  [muted]Bash cannot disable containment. Allow a blocked exact host once or for the "
+        "session; session approvals carry forward. Stable hosts: \\[sandbox] allow_hosts.[/]"
     )
     if session.ctx.outside:
         repl.console.print(

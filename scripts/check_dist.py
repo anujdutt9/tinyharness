@@ -20,6 +20,7 @@ REQUIRED = [
     "tinyharness/prompts/compaction.md",
     "tinyharness/prompts/classifier.md",
     "tinyharness/prompts/agents/explore.md",
+    "tinyharness/sandbox/srt.py",
 ]
 
 

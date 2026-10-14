@@ -3,7 +3,18 @@ with, which the agent keeps with the Memory tool and you can edit by hand (/memo
 
 from tinyharness.ext import CommandContext, Extension
 from tinyharness.paths import pretty_path
-from tinyharness.tools.memory import LIMITS, TITLES, MemoryTool, memory_path, read_notes, render, size
+from tinyharness.tools.memory import (
+    LIMITS,
+    TITLES,
+    MemoryTool,
+    Scope,
+    memory_history_path,
+    memory_path,
+    read_history,
+    read_notes,
+    render,
+    size,
+)
 
 GUIDANCE = (
     "Notes you saved in earlier sessions with the Memory tool: what the user wants and what "
@@ -28,8 +39,20 @@ def setup(th: Extension) -> None:
 
     @th.command("memory", help="show what the agent remembers, and where to edit it")
     async def show(arg: str, ctx: CommandContext) -> None:
+        scopes: tuple[Scope, ...] = ("user", "project")
+        if arg.strip().lower() == "history":
+            rows: list[str] = []
+            for scope in scopes:
+                records = read_history(memory_history_path(scope, root))[-10:]
+                rows.extend(
+                    f"- {r.get('recorded_at', '?')} · {scope} · {r.get('action', '?')} · "
+                    f"{r.get('memory_id', '?')} · {r.get('note') or r.get('previous') or '(empty)'}"
+                    for r in records
+                )
+            ctx.say("Memory history (latest 10 per scope):\n" + ("\n".join(rows) or "(empty)"))
+            return
         parts = []
-        for scope in ("user", "project"):
+        for scope in scopes:
             path = memory_path(scope, root)
             notes = read_notes(path)
             parts.append(
@@ -41,5 +64,5 @@ def setup(th: Extension) -> None:
             + "\n\nUser memory follows you across projects; project memory applies only here. "
             "Standing global instructions belong in ~/.tinyharness/AGENTS.md, and shared "
             "project rules belong in AGENTS.md. Edit the memory files to change their notes; "
-            "new sessions read them."
+            "new sessions read them. Use /memory history to audit changes."
         )

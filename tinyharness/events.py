@@ -116,6 +116,15 @@ class TodosUpdated:
 
 
 @dataclass(frozen=True)
+class ArtifactPresented:
+    """A file or URL is available to the user without launching an external app."""
+
+    target: str
+    media_type: str = ""
+    title: str = ""
+
+
+@dataclass(frozen=True)
 class Compacted:
     """Context was reduced before the next model call."""
 
@@ -191,6 +200,7 @@ Event = (
     | ToolResult
     | SkillLoaded
     | TodosUpdated
+    | ArtifactPresented
     | Compacted
     | TokenUsage
     | SubagentUpdate

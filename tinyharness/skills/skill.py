@@ -7,6 +7,7 @@ lazily, step by step. This is "progressive disclosure".
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,8 +23,10 @@ class Skill:
     description: str
     body: str
     allowed_tools: list[str] = field(default_factory=list)
+    required_extensions: list[str] = field(default_factory=list)
     model: str | None = None
     source: Path | None = None  # path to SKILL.md
+    network_hosts: list[str] = field(default_factory=list)
 
     @property
     def directory(self) -> Path | None:
@@ -40,9 +43,24 @@ def parse_skill_md(path: Path) -> Skill | None:
         description=str(meta.get("description") or ""),
         body=body,
         allowed_tools=list(meta.get("allowed-tools") or meta.get("allowed_tools") or []),
+        required_extensions=list(meta.get("requires-extensions") or meta.get("requires_extensions") or []),
+        network_hosts=_network_hosts(meta.get("requires-network") or meta.get("requires_network") or []),
         model=meta.get("model"),
         source=path,
     )
+
+
+_EXACT_HOST = re.compile(
+    r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+)
+
+
+def _network_hosts(value: object) -> list[str]:
+    """Exact destinations a skill may ask the user to approve as one reviewed set."""
+    values = value if isinstance(value, list) else []
+    hosts = [str(host).lower().rstrip(".") for host in values]
+    return list(dict.fromkeys(host for host in hosts if _EXACT_HOST.fullmatch(host)))
 
 
 def scan_skills(root: Path) -> list[Skill]:
@@ -92,6 +110,13 @@ def build_skill_prompt(skill: Skill, args: str = "") -> str:
         parts.append(
             f"(Bundled files for this skill live in `{skill.directory}`. Read each one only "
             "when the current step needs it; do not pre-load them all.)"
+        )
+    if skill.network_hosts:
+        parts.append(
+            "This skill declares these exact network destinations: "
+            f"{', '.join(skill.network_hosts)}. When a command needs one, set Bash's "
+            "network_host to that exact hostname. The permission UI may offer the whole "
+            "reviewed set for this session; never request a wildcard or leave containment."
         )
     if args:
         parts.append(f"User arguments: {args}")

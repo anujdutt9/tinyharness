@@ -101,6 +101,13 @@ class PermissionGate:
     # While there is any, calls that can send data out ask a person ("Rule of Two").
     outside: Callable[[], list[str]] = field(default=lambda: [], repr=False)
     callback: PermissionCallback | None = None
+    # Bash and the gate share this set. Remembering a host must expand the sandbox's
+    # actual policy too; remembering only the prompt decision leaves later commands blocked.
+    session_network_hosts: set[str] = field(default_factory=set, repr=False)
+    # An explicitly invoked skill may declare a reviewed set of exact destinations. The
+    # first host still asks; choosing the session option grants that finite set, so a
+    # redirect chain or multi-source workflow does not turn into one prompt per host.
+    network_bundles: dict[str, tuple[str, ...]] = field(default_factory=dict, repr=False)
     scratch: Scratch | None = None
     protected: tuple[Path, ...] = ()  # changing anything under these always asks (see `_protected`)
     agent: str = ""  # a subagent's gate: whose (shown when it asks)
@@ -206,6 +213,8 @@ class PermissionGate:
             case "allow" if scoped_escape:
                 # The remembered rule grants only this sandbox-enforced capability. The
                 # command still passes through mode and risk checks below.
+                if tool.name == "Bash" and site and site.startswith(DOMAIN):
+                    self.session_network_hosts.add(site.removeprefix(DOMAIN))
                 escape = None
 
         if escape is not None:
@@ -230,6 +239,7 @@ class PermissionGate:
                         if approval_boundary is not None and not separate_boundary
                         else escape
                     )
+                    + self._network_bundle_warning(tool, target_host)
                     + self._outside_warning()
                 ),
             )
@@ -370,6 +380,9 @@ class PermissionGate:
         self, tool: Tool[Any], path: Path | None, trusted: bool, host: str | None = None
     ) -> str:
         if host:
+            if bundle := self._network_bundle(tool, host):
+                name, hosts = bundle
+                return f"allow {len(hosts)} exact destinations declared by /{name} this session"
             return f"allow {tool.name} for {host} this session"
         if path is None:
             return f"don't ask again for {tool.name} this session"
@@ -381,7 +394,13 @@ class PermissionGate:
 
     def _remember(self, tool: Tool[Any], path: Path | None, trusted: bool, site: str | None = None) -> None:
         if site:
-            self.rules.add_allow(Rule(tool.name, site))
+            host = site.removeprefix(DOMAIN)
+            bundle = self._network_bundle(tool, host)
+            hosts = bundle[1] if bundle else (host,)
+            for allowed_host in hosts:
+                self.rules.add_allow(Rule(tool.name, f"{DOMAIN}{allowed_host}"))
+                if tool.name == "Bash":
+                    self.session_network_hosts.add(allowed_host)
         elif path is None:
             self.rules.add_allow(Rule(tool.name))
         elif trusted:
@@ -392,6 +411,27 @@ class PermissionGate:
                 self.rules.add_allow(Rule(name, f"{folder}/*"))
                 if name in READING_TOOLS:
                     self.rules.add_allow(Rule(name, folder))  # Grep or Glob on the folder itself
+
+    def add_network_bundle(self, name: str, hosts: tuple[str, ...]) -> None:
+        """Make a skill's finite destination set available to the session approval UI."""
+        if hosts:
+            self.network_bundles[name] = tuple(dict.fromkeys(hosts))
+
+    def _network_bundle(self, tool: Tool[Any], host: str) -> tuple[str, tuple[str, ...]] | None:
+        if tool.name != "Bash":
+            return None
+        lowered = host.lower()
+        return next(
+            ((name, hosts) for name, hosts in self.network_bundles.items() if lowered in hosts),
+            None,
+        )
+
+    def _network_bundle_warning(self, tool: Tool[Any], host: str | None) -> str:
+        bundle = self._network_bundle(tool, host) if host else None
+        if bundle is None:
+            return ""
+        name, hosts = bundle
+        return f"; /{name} declares this exact destination set: {', '.join(hosts)}"
 
 
 _GIT_INTERNALS = re.compile(r"(^|/)\.git(/|$)")

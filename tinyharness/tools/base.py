@@ -39,9 +39,18 @@ if TYPE_CHECKING:
 LARGE_CHANGE = 20  # lines; removing more than this counts as destructive (auto mode asks)
 
 
+@dataclass(frozen=True)
+class ArtifactRef:
+    """A file or URL the harness should present to the user without opening a host app."""
+
+    target: str
+    media_type: str = ""
+    title: str = ""
+
+
 @dataclass
 class ToolOutput:
-    """Return text and optional images from a tool.
+    """Return text, images, and user-facing artifacts from a tool.
 
     Attributes
     ----------
@@ -49,10 +58,13 @@ class ToolOutput:
         Text returned to the model.
     images : list[Image]
         Images returned to the model.
+    artifacts : list[ArtifactRef]
+        Files or URLs presented to the user by the harness UI, not sent to the model.
     """
 
     text: str
     images: list[Image] = field(default_factory=list)
+    artifacts: list[ArtifactRef] = field(default_factory=list)
 
 
 class ToolError(Exception):
@@ -116,6 +128,10 @@ class ToolContext:
     # docs.python.org"): once there is any, calls that can send data out need a person's
     # yes (permissions/gate.py). Shared with subagents; changed in place, never replaced.
     outside: list[str] = field(default_factory=list)
+    # Trusted correlation metadata for durable tool records. Tools must not ask the
+    # model to supply these: the session sets them itself.
+    session_id: str = ""
+    turn_id: str = ""
 
 
 def note_outside(ctx: ToolContext, source: str) -> None:
