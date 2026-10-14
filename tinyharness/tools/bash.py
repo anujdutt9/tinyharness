@@ -767,7 +767,12 @@ class BashTool(Tool[BashInput]):
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=ctx.workspace.root,
-                env=command_env({**(policy.env if sandboxed else {}), **install_env}),
+                env=command_env(
+                    {
+                        **(self.sandbox.environment(policy) if sandboxed and self.sandbox else {}),
+                        **install_env,
+                    }
+                ),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,

@@ -106,7 +106,7 @@ async def test_reads_refuse_a_path_that_became_a_symlink(project, tool, name, sw
         swap_for_link(root / "sub", outside)
     else:
         swap_for_link(root / "sub" / name, outside / name)
-    with pytest.raises(ToolError, match="is now a symlink"):
+    with pytest.raises(ToolError, match=r"is now a (?:symlink|reparse point)"):
         await tool.run(args, make_ctx(root))
 
 
@@ -116,7 +116,7 @@ async def test_windows_fallback_read_refuses_a_swapped_parent(project, monkeypat
     args = await approve(root, ReadTool(), {"path": "sub/f.txt"})
     swap_for_link(root / "sub", outside)
     monkeypatch.setattr(files, "_SUPPORTED", False)
-    with pytest.raises(ToolError, match="is now a symlink"):
+    with pytest.raises(ToolError, match=r"is now a (?:symlink|reparse point)"):
         await ReadTool().run(args, make_ctx(root))
 
 
@@ -125,7 +125,7 @@ async def test_windows_fallback_read_refuses_a_swapped_file(project, monkeypatch
     args = await approve(root, ReadTool(), {"path": "sub/f.txt"})
     swap_for_link(root / "sub" / "f.txt", outside / "f.txt")
     monkeypatch.setattr(files, "_SUPPORTED", False)
-    with pytest.raises(ToolError, match="is now a symlink"):
+    with pytest.raises(ToolError, match=r"is now a (?:symlink|reparse point)"):
         await ReadTool().run(args, make_ctx(root))
 
 
@@ -171,4 +171,6 @@ async def test_edit_keeps_the_files_permissions(project):
     ctx = make_ctx(root)
     ctx.read_paths.add(str(script))
     await call(EditTool(), {"path": "run.sh", "old_string": "old", "new_string": "new"}, ctx)
-    assert script.read_text() == "echo new\n" and stat.S_IMODE(script.stat().st_mode) == 0o750
+    assert script.read_text() == "echo new\n"
+    if os.name != "nt":
+        assert stat.S_IMODE(script.stat().st_mode) == 0o750

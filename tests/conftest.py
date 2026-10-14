@@ -39,7 +39,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Never touch the real ~/.tinyharness or ~/.config, or pick up a developer's API keys."""
     home = tmp_path / "_home"
-    monkeypatch.setenv("HOME", str(tmp_path / "_user"))
+    user = tmp_path / "_user"
+    monkeypatch.setenv("HOME", str(user))
+    # pathlib uses USERPROFILE, not HOME, on Windows. Without this, tests share the
+    # runner's real legacy config directory and leak state into later tests.
+    monkeypatch.setenv("USERPROFILE", str(user))
     monkeypatch.setenv("TINYHARNESS_HOME", str(home))
     for var in ("TINYHARNESS_MODEL", "TINYHARNESS_ALLOW_SECRET_READS", "XDG_CONFIG_HOME"):
         monkeypatch.delenv(var, raising=False)

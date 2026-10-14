@@ -173,12 +173,13 @@ class _Budget:
                 f"to fingerprint (reached at {self._where(path)})"
             )
 
-    def _where(self, path: Path) -> Path:
-        return path.relative_to(self.root) if path.is_relative_to(self.root) else path
+    def _where(self, path: Path) -> str:
+        selected = path.relative_to(self.root) if path.is_relative_to(self.root) else path
+        return selected.as_posix()
 
 
 def _list_tree(directory: Path, budget: _Budget) -> list[tuple[str, Path, bool]]:
-    """(relative path, path, is a directory symlink) for each file and directory symlink,
+    """(relative path, path, is a symlink) for each file and symlink,
     in a stable order. Every entry counts against the budget as it's read, so a huge
     directory stops the listing partway. Directory symlinks aren't followed: a link to /
     or a loop would never end."""
@@ -188,12 +189,12 @@ def _list_tree(directory: Path, budget: _Budget) -> list[tuple[str, Path, bool]]
     while pending:
         with os.scandir(pending.pop()) as listing:
             for entry in listing:
-                if entry.is_dir(follow_symlinks=False):
-                    budget.add(Path(entry.path))
-                    pending.append(entry.path)
-                elif entry.is_symlink() and entry.is_dir():
+                if entry.is_symlink():
                     budget.add(Path(entry.path))
                     entries.append((entry.path[skip:], Path(entry.path), True))
+                elif entry.is_dir(follow_symlinks=False):
+                    budget.add(Path(entry.path))
+                    pending.append(entry.path)
                 elif entry.is_file():  # not sockets, devices or broken links
                     budget.add(Path(entry.path), entry.stat().st_size)
                     entries.append((entry.path[skip:], Path(entry.path), False))

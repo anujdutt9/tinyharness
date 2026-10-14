@@ -41,14 +41,17 @@ class Rule:
         if pattern.startswith(DOMAIN):
             return cls(tool, DOMAIN + pattern.removeprefix(DOMAIN).strip().lower())
         path = Path(pattern).expanduser()
-        return cls(tool, str(path if path.is_absolute() else root / path))
+        selected = path if path.is_absolute() else root / path
+        # Rules are user-authored with `/` on every platform. Store one separator
+        # form so a WindowsPath from the permission gate matches the same rule.
+        return cls(tool, selected.as_posix())
 
     def matches(self, tool: str, path: str | None) -> bool:
         if self.tool not in ("*", tool):
             return False
         if self.pattern is None:
             return True
-        return path is not None and fnmatchcase(path, self.pattern)
+        return path is not None and fnmatchcase(path.replace("\\", "/"), self.pattern)
 
     def __str__(self) -> str:
         return f"{self.tool}({self.pattern})" if self.pattern else self.tool

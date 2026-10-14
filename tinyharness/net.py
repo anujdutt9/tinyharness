@@ -68,8 +68,17 @@ def _reason(error: BaseException) -> tuple[str, str]:
         if isinstance(cause, socket.gaierror):
             return "DNS lookup failed", _EAI.get(cause.errno, f"EAI {cause.errno}")
         if isinstance(cause, OSError) and cause.errno:
-            what = os.strerror(cause.errno)  # the OS's wording, not asyncio's "Connect call failed"
-            return what[:1].lower() + what[1:], errno.errorcode.get(cause.errno, f"errno {cause.errno}")
+            code = errno.errorcode.get(cause.errno, f"errno {cause.errno}")
+            # Winsock exposes the same failures with WSA-prefixed names and can
+            # return "Unknown error" for their numeric values. Keep diagnostics
+            # stable across providers and operating systems.
+            code = code.removeprefix("WSA")
+            known = {
+                "ECONNRESET": "connection reset by peer",
+                "ECONNREFUSED": "connection refused",
+            }
+            what = known.get(code, os.strerror(cause.errno))
+            return what[:1].lower() + what[1:], code
     text = next((str(c) for c in _chain(error) if str(c)), "")
     return text or "no details from the network library", type(error).__name__
 

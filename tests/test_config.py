@@ -26,7 +26,7 @@ def clean_env(tmp_path, monkeypatch):
 
 def write_config(tmp_path, body: str = ""):
     path = tmp_path / "config.toml"
-    path.write_text(f'working_dir = "{tmp_path}/work"\n{body}')
+    path.write_text(f"working_dir = {json.dumps(str(tmp_path / 'work'))}\n{body}")
     return path
 
 
@@ -134,7 +134,7 @@ def test_required_sandbox_cannot_be_disabled(tmp_path):
 
 def test_legacy_sandbox_root_key_still_works(tmp_path):
     path = tmp_path / "config.toml"
-    path.write_text(f'sandbox_root = "{tmp_path}/legacy"\n')
+    path.write_text(f"sandbox_root = {json.dumps(str(tmp_path / 'legacy'))}\n")
     assert load_config(path).working_dir == (tmp_path / "legacy").resolve()
 
 
@@ -284,7 +284,8 @@ def test_saved_keys_go_to_auth_json_by_provider(no_keys):
     save_key("anthropic", "sk-ant-2", providers)  # replaces; the other key stays
     assert path == auth_path()
     assert json.loads(path.read_text()) == {"anthropic": {"api_key": "sk-ant-2"}, "groq": {"api_key": "gk-1"}}
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
     assert providers["anthropic"].api_key == "sk-ant-2"  # usable right away
     assert providers["anthropic"].api_key_source == "auth.json"
     assert "ANTHROPIC_API_KEY" not in os.environ

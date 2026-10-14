@@ -163,7 +163,8 @@ async def test_switching_to_a_provider_without_a_key_asks_for_it(repl, monkeypat
     await provider(repl, "anthropic")
     assert repl.session.config.provider == "anthropic"
     assert read_auth() == {"anthropic": ANTHROPIC_KEY}
-    assert oct(auth_path().stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":
+        assert oct(auth_path().stat().st_mode & 0o777) == "0o600"
     text = repl.console.export_text()
     assert "Anthropic needs an API key" in text and "console.anthropic.com" in text
     assert "No API key for" not in text

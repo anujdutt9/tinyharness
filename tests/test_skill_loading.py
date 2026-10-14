@@ -1,5 +1,7 @@
 """Seeing when a skill is loaded, and loading one asked for as /name mid-message."""
 
+import json
+
 import pytest
 
 from tinyharness.events import SkillLoaded, ToolResult
@@ -116,7 +118,7 @@ async def test_invoked_skill_registers_its_exact_network_set(session):
 
 async def test_the_model_reading_a_skill_file_is_shown(session):
     path = str(session.skills.get("claude-design-skill").source)
-    play(session, [[("Read", f'{{"path": "{path}"}}')], "done"])
+    play(session, [[("Read", json.dumps({"path": path}))], "done"])
     got = await events(session, "design me a landing page")
     i = next(i for i, e in enumerate(got) if isinstance(e, SkillLoaded))
     assert got[i].how == "read" and isinstance(got[i - 1], ToolResult)

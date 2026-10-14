@@ -352,7 +352,7 @@ class PermissionGate:
         """Why auto mode must ask about this call, or None if it may decide itself."""
         if tool.read_only or not tool.needs_permission or self._in_scratch(path):
             return None
-        if path is not None and _GIT_INTERNALS.search(str(path)):
+        if path is not None and _GIT_INTERNALS.search(path.as_posix()):
             return "it changes version-control internals (.git)"
         if path is not None and not trusted:
             return "it changes a file outside the project"
@@ -408,7 +408,7 @@ class PermissionGate:
         elif trusted:
             self.set_mode(PermissionMode.DEFAULT)
         else:
-            folder = glob.escape(str(_directory(path)))
+            folder = glob.escape(_directory(path).as_posix())
             for name in _readers(tool):
                 self.rules.add_allow(Rule(name, f"{folder}/*"))
                 if name in READING_TOOLS:

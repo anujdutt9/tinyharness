@@ -155,6 +155,12 @@ def test_rule_matching(rule, tool, path, expected):
     assert Rule.parse(rule, Path("/p")).matches(tool, path) is expected
 
 
+def test_windows_rule_paths_match_with_either_separator():
+    """Seen in CI: remembered and configured rules used different Windows separators."""
+    rule = Rule("Read", "C:/Users/example/Downloads/*")
+    assert rule.matches("Read", r"C:\Users\example\Downloads\report.pdf")
+
+
 def test_invalid_rule_is_rejected(tmp_path):
     with pytest.raises(ValueError):
         Rule.parse("Edit(src/*", tmp_path)

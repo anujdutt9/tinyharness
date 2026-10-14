@@ -64,7 +64,20 @@ class SandboxRuntime(Sandbox):
                 if os.path.exists(temporary):
                     os.unlink(temporary)
         path.chmod(0o600)
+        private_tmp = {name: policy.env[name] for name in ("TMPDIR", "TMP", "TEMP") if name in policy.env}
+        if private_tmp:
+            env = shutil.which("env")
+            if env is None:
+                raise RuntimeError("Sandbox Runtime needs the env command to set its private temp directory")
+            argv = [env, *(f"{name}={value}" for name, value in private_tmp.items()), *argv]
         return [executable, "--settings", str(path), "--", *argv]
+
+    def environment(self, policy: SandboxPolicy) -> dict[str, str]:
+        """Keep SRT control sockets out of a long per-session temporary path."""
+        # Linux Unix-domain socket paths are limited to 108 bytes. SRT creates its
+        # proxy bridge before it starts the wrapped command, so only that command
+        # receives the private session temp variables added in wrap().
+        return {key: value for key, value in policy.env.items() if key not in {"TMPDIR", "TMP", "TEMP"}}
 
     def _settings(self, policy: SandboxPolicy) -> dict[str, object]:
         """Build SRT settings without exposing regex-based native policy details."""
@@ -85,7 +98,7 @@ class SandboxRuntime(Sandbox):
         ]
         allow_read: list[str] = []
         for root in policy.project_roots:
-            prefix = str(root)
+            prefix = root.as_posix()
             deny_read.extend(
                 [
                     f"{prefix}/**/.env",

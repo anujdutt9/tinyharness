@@ -3,6 +3,7 @@
 import json
 import re
 import subprocess
+import sys
 import time
 
 import pytest
@@ -433,6 +434,7 @@ def fake_terminal(monkeypatch, reply: bytes | None):
         (None, None),  # a terminal that doesn't answer
     ],
 )
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no POSIX pseudo-terminal")
 def test_the_terminal_is_asked_for_its_background(monkeypatch, reply, light):
     from tinyharness.cli.theme import terminal_is_light
 

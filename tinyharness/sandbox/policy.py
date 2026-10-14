@@ -102,8 +102,10 @@ def _test_fixtures(private_tmp: Path | None = None) -> tuple[str, ...]:
     """pytest's temp root, where tests make their own fake auth.json and .env files: the
     project's tests have to read them back. Real secrets don't live there, and none can
     be copied there, since reading the original is still denied."""
-    roots = [*_temp_dirs(), *([private_tmp] if private_tmp is not None else [])]
-    return tuple(f"^{re.escape(str(d))}/pytest-of-[^/]+/" for d in dict.fromkeys(roots))
+    # Only the temp directory created for this sandbox is safe to reopen. A broad
+    # pytest temp-root exception can also contain the project and its real .env.
+    roots = [private_tmp] if private_tmp is not None else []
+    return tuple(f"^{re.escape(d.as_posix())}/pytest-of-[^/]+/" for d in dict.fromkeys(roots))
 
 
 def _cache_env(cache: Path) -> dict[str, str]:

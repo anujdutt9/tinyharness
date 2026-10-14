@@ -8,6 +8,10 @@ the SDK, and every break is listed here.
 ## Unreleased
 
 ### Fixed
+- Native Windows CI now isolates each test's home directory, accepts portable permission
+  rules and diagnostics, and does not apply POSIX-only terminal or file-mode assertions.
+  Sandbox Runtime keeps its Linux control sockets in a short system temp path while each
+  sandboxed command still receives its private session temp directory.
 - Windows in-process file reads and writes now reject reparse-point swaps after approval;
   directory handles keep every checked parent from being replaced until the operation ends.
 - Software-acquisition approval now covers shell conditionals, wrapper options such as

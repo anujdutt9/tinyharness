@@ -117,7 +117,7 @@ def sandbox_path_globs(regexes: Iterable[str], roots: Iterable[Path]) -> tuple[s
             [
                 *direct,
                 *(
-                    f"{Path(root).expanduser().resolve()}/**/{suffix}"
+                    f"{Path(root).expanduser().resolve().as_posix()}/**/{suffix}"
                     for root in roots
                     for suffix in suffixes
                 ),

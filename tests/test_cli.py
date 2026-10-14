@@ -205,8 +205,11 @@ def test_pasted_screenshot_paths_are_attached(tmp_path):
     shots.mkdir()
     for n in (1, 2):
         (shots / f"Screenshot 2026-09-30 at 3.11.0{n} PM.png").write_bytes(PNG)
+    import shlex
+
     line = "\n".join(
-        f"{shots}/Screenshot\\ 2026-09-30\\ at\\ 3.11.0{n}\\ PM.png  - This is slide {n}" for n in (1, 2)
+        f"{shlex.quote(str(shots / f'Screenshot 2026-09-30 at 3.11.0{n} PM.png'))}  - This is slide {n}"
+        for n in (1, 2)
     )
     images, problems = attachments(line, tmp_path)
     assert [i.name for i in images] == [

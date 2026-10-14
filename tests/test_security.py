@@ -1,3 +1,4 @@
+import os
 from pathlib import PureWindowsPath
 
 import pytest
@@ -165,8 +166,9 @@ def test_session_logs_mask_credentials_but_keep_reasoning_intact(tmp_path, monke
     assert last["harness_version"]
     assert {"turn", "step", "agent", "model_call", "routing_decision", "tool_call"} <= last.keys()
     assert last["message"]["state"]["data"]["sig"] == blob  # resuming must send it back unchanged
-    assert stat.S_IMODE(log.path.stat().st_mode) == 0o600
-    assert stat.S_IMODE((state_dir(tmp_path) / "sessions").stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(log.path.stat().st_mode) == 0o600
+        assert stat.S_IMODE((state_dir(tmp_path) / "sessions").stat().st_mode) == 0o700
 
 
 def test_existing_log_directories_are_made_private(tmp_path):
@@ -179,7 +181,8 @@ def test_existing_log_directories_are_made_private(tmp_path):
     old.mkdir(parents=True)
     old.chmod(0o755)  # as earlier versions left it
     Transcript(tmp_path, "s2").close()
-    assert stat.S_IMODE(old.stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(old.stat().st_mode) == 0o700
 
 
 @pytest.mark.parametrize("path", ["/home/me/.tinyharness/auth.json", "project/auth.json"])

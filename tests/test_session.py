@@ -328,7 +328,7 @@ async def test_evaluator_timeout_and_failure_do_not_delay_done(tmp_path, monkeyp
             config_path=tmp_path / "none.toml",
             working_dir=tmp_path / "work",
             evaluators=[slow, broken],
-            evaluator_timeout=0.01,
+            evaluator_timeout=0.1,
         )
     )
     try:
@@ -338,7 +338,7 @@ async def test_evaluator_timeout_and_failure_do_not_delay_done(tmp_path, monkeyp
         records = [json.loads(line) for line in evaluated.transcript.path.read_text().splitlines()]
         evaluations = [record for record in records if record["event"] == "evaluation"]
         assert [record["status"] for record in evaluations] == ["timeout", "error"]
-        assert evaluations[0]["timeout_seconds"] == 0.01
+        assert evaluations[0]["timeout_seconds"] == 0.1
         assert evaluated.history.messages[-1].content == "real answer"
     finally:
         evaluated.close()

@@ -22,3 +22,7 @@ class Sandbox(ABC):
     @abstractmethod
     def wrap(self, argv: list[str], policy: SandboxPolicy) -> list[str]:
         """The command line that runs `argv` under `policy`."""
+
+    def environment(self, policy: SandboxPolicy) -> dict[str, str]:
+        """Environment additions for the outer sandbox process and its child."""
+        return policy.env

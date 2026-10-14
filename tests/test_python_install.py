@@ -1,6 +1,7 @@
 """Cross-platform preparation of Python package installations."""
 
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -33,13 +34,13 @@ def test_fresh_environment_keeps_the_bootstrap_interpreter_separate(tmp_path, mo
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     monkeypatch.delenv("CONDA_PREFIX", raising=False)
     command, _, environment = _python_install_environment(
-        f"{sys.executable} -m pip install requests", SandboxPolicy.for_project(tmp_path)
+        f"{shlex.quote(sys.executable)} -m pip install requests", SandboxPolicy.for_project(tmp_path)
     )
     assert environment is not None
     bootstrap, install = command.split(" && ", 1)
     selected = environment_python(environment)
     assert " -m venv " in bootstrap and str(selected) not in bootstrap
-    assert install == f"{selected} -m pip install requests"
+    assert install == f"{shlex.quote(str(selected))} -m pip install requests"
 
 
 def test_only_the_parsed_install_launcher_is_rewritten(tmp_path, monkeypatch):
@@ -51,10 +52,12 @@ def test_only_the_parsed_install_launcher_is_rewritten(tmp_path, monkeypatch):
     selected.parent.mkdir(parents=True)
     selected.touch()
     launcher = environment_python(tmp_path.parent / "launcher")
-    original = f"echo {launcher} && {launcher} -m pip install requests"
+    original = f"echo {shlex.quote(str(launcher))} && {shlex.quote(str(launcher))} -m pip install requests"
     command, _, chosen = _python_install_environment(original, SandboxPolicy.for_project(tmp_path))
     assert chosen == environment
-    assert command == f"echo {launcher} && {selected} -m pip install requests"
+    assert command == (
+        f"echo {shlex.quote(str(launcher))} && {shlex.quote(str(selected))} -m pip install requests"
+    )
 
 
 def test_nested_env_split_launcher_is_rewritten_at_its_parsed_location(tmp_path, monkeypatch):
@@ -65,7 +68,7 @@ def test_nested_env_split_launcher_is_rewritten_at_its_parsed_location(tmp_path,
     selected.parent.mkdir(parents=True)
     selected.touch()
     launcher = environment_python(tmp_path.parent / "launcher")
-    original = f'env -S "{launcher} -m pip install requests"'
+    original = f'env -S "{launcher.as_posix()} -m pip install requests"'
     command, _, _ = _python_install_environment(original, SandboxPolicy.for_project(tmp_path))
     assert str(launcher) not in command and str(selected) in command
 
