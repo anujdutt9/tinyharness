@@ -7,6 +7,9 @@ the SDK, and every break is listed here.
 
 ## Unreleased
 
+### Changed
+- Switched the project license from MIT to Apache License 2.0.
+
 ### Fixed
 - Native Windows CI now isolates each test's home directory, accepts portable permission
   rules and diagnostics, stops timed-out hook process trees, and does not apply POSIX-only
