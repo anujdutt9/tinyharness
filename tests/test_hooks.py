@@ -70,10 +70,11 @@ async def test_a_hook_that_times_out_is_stopped_with_its_children(tmp_path, monk
     pidfile = tmp_path / "child.pid"
     script = tmp_path / "hook.sh"
     script.write_text(f"sh -c 'trap \"\" TERM; sleep 30' & echo $! > {pidfile}; sleep 30\n")
+    timeout = 1.5 if os.name == "nt" else 0.5
     runner = HookRunner(
-        [Hook(event="Stop", command=f"sh {shlex.quote(str(script))}")], cwd=tmp_path, timeout=0.5
+        [Hook(event="Stop", command=f"sh {shlex.quote(str(script))}")], cwd=tmp_path, timeout=timeout
     )
     verdict = await runner.fire("Stop", {})
-    assert verdict == {"decision": "ask", "reason": "hook timed out after 0.5s"}
+    assert verdict == {"decision": "ask", "reason": f"hook timed out after {timeout:g}s"}
     with pytest.raises(ProcessLookupError):
         os.kill(int(pidfile.read_text()), 0)

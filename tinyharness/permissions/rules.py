@@ -51,7 +51,7 @@ class Rule:
             return False
         if self.pattern is None:
             return True
-        return path is not None and fnmatchcase(path.replace("\\", "/"), self.pattern)
+        return path is not None and fnmatchcase(path.replace("\\", "/"), self.pattern.replace("\\", "/"))
 
     def __str__(self) -> str:
         return f"{self.tool}({self.pattern})" if self.pattern else self.tool

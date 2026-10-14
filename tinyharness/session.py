@@ -900,10 +900,18 @@ class Session:
         for m in self.history.messages:
             if m.role == "user" and f"# Skill: {skill.name}\n" in (m.content or ""):
                 return True
-            if skill.source is not None and any(
-                c.name == "Read" and str(skill.source) in c.arguments for c in m.tool_calls
-            ):
-                return True
+            if skill.source is not None:
+                for call in m.tool_calls:
+                    if call.name != "Read":
+                        continue
+                    try:
+                        path = json.loads(call.arguments).get("path")
+                    except (AttributeError, json.JSONDecodeError):
+                        continue
+                    if isinstance(path, str):
+                        target = (self.workspace.root / Path(path).expanduser()).resolve()
+                        if skill.source.resolve() == target:
+                            return True
         return False
 
     def _skill_read(self, call: ToolUse) -> Skill | None:

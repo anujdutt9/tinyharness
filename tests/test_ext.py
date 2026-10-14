@@ -1,6 +1,7 @@
 """Extensions: one file with setup(th) adds tools, prompt sections, commands and event
 handlers, all registered at session start (docs/extension-api.md)."""
 
+import json
 import textwrap
 
 import pytest
@@ -344,6 +345,11 @@ def setup(th):
 '''
 
 
+def needy_source(notes):
+    """Put a native path in generated Python without treating backslashes as escapes."""
+    return NEEDY.replace("{notes}", json.dumps(str(notes))[1:-1])
+
+
 def test_needs_must_be_hosts_or_folders(tmp_path, monkeypatch, isolated_home):
     write_ext(isolated_home, "bad", 'NEEDS = ["everything"]\ndef setup(th):\n    pass\n')
     session = make_session(tmp_path, monkeypatch, ["bad"])
@@ -362,7 +368,7 @@ async def test_an_extensions_needs_apply_only_once_approved_and_until_it_changes
     from tinyharness.permissions import Decision
 
     notes = tmp_path / "notes"
-    write_ext(isolated_home, "sync", NEEDY.replace("{notes}", str(notes)))
+    write_ext(isolated_home, "sync", needy_source(notes))
     asked = []
 
     async def user(request):
@@ -388,7 +394,7 @@ async def test_an_extensions_needs_apply_only_once_approved_and_until_it_changes
         assert again.extensions[0].granted  # remembered
     finally:
         again.close()
-    write_ext(isolated_home, "sync", NEEDY.replace("{notes}", str(notes)) + "\n# changed\n")
+    write_ext(isolated_home, "sync", needy_source(notes) + "\n# changed\n")
     changed = make_session(tmp_path, monkeypatch, ["sync"])
     try:
         assert not changed.extensions[0].granted  # its code changed: ask again
@@ -416,7 +422,7 @@ async def test_th_run_gets_the_extensions_folders_and_hosts_once_approved(
     from tinyharness.tools import bash
 
     notes = tmp_path / "notes"
-    write_ext(isolated_home, "sync", NEEDY.replace("{notes}", str(notes)))
+    write_ext(isolated_home, "sync", needy_source(notes))
     session = make_session(tmp_path, monkeypatch, ["sync"])
     seen = []
 
