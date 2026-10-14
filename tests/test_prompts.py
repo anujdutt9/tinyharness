@@ -10,6 +10,8 @@ from tinyharness.subagents import builtin_agents
 PROMPT_VARIABLES = {
     "system": {"model_name", "model_id", "provider"},
     "compaction": set(),
+    "compaction_system": set(),
+    "compaction_update": set(),
     "classifier": set(),
     "aside": set(),
     "next_prompt": set(),
@@ -36,8 +38,8 @@ def test_json_braces_are_left_alone():
     assert '{"decision": "allow"' in load_prompt("classifier")
 
 
-def test_system_prompt_includes_agent_md(tmp_path):
-    (tmp_path / "AGENT.md").write_text("Always use tabs.")
+def test_system_prompt_includes_agents_md(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("Always use tabs.")
     prompt = build_system_prompt(
         tmp_path,
         tmp_path / "scratch",
@@ -77,8 +79,7 @@ def _prompt(work):
     return build_system_prompt(work, work / "scratch", model_name="M", model_id="m", provider="P")
 
 
-def test_agents_md_is_read_like_agent_md(tmp_path):
-    """AGENTS.md is what most other agents read; a repo set up for them works as is."""
+def test_agents_md_is_read(tmp_path):
     (tmp_path / "AGENTS.md").write_text("Run make check before finishing.")
     assert "Run make check before finishing." in _prompt(tmp_path)
 
@@ -86,7 +87,7 @@ def test_agents_md_is_read_like_agent_md(tmp_path):
 def test_the_model_is_told_when_there_is_no_instructions_file(tmp_path):
     """Otherwise it goes looking (a failed Read of AGENTS.md)."""
     assert "no instructions file" in _prompt(tmp_path)
-    (tmp_path / "AGENT.md").write_text("Use tabs.")
+    (tmp_path / "AGENTS.md").write_text("Use tabs.")
     assert "no instructions file" not in _prompt(tmp_path)
 
 
@@ -116,11 +117,19 @@ def test_subagents_get_the_projects_instructions(tmp_path):
 
 def test_pages_are_written_the_usual_way(tmp_path):
     """Seen live: told pages "must work offline" with a "bundled Chart.js", Sonnet ran
-    `find /` for the file for two minutes, then tried to download it. Pages use CDN links
-    as everywhere else, and are checked with Playwright outside the sandbox."""
+    `find /` for the file for two minutes, then tried to download it. Artifact validation
+    needs a general contained workflow, not a rule for one browser or one demo."""
     prompt = load_prompt("system", **{v: f"<{v}>" for v in PROMPT_VARIABLES["system"]})
     assert "offline" not in prompt and "bundled" not in prompt and "Screenshot" not in prompt
-    assert "playwright screenshot --proxy-server" in prompt
+    assert "non-interactive tool" in prompt and "private cache and $TMPDIR" in prompt
+    assert "network_host" in prompt and "playwright" not in prompt.lower()
+
+
+def test_reading_a_file_is_not_described_as_showing_it_to_the_user():
+    """Seen live: the model read a 372-line report, then falsely said it was shown above."""
+    prompt = load_prompt("system", **{v: f"<{v}>" for v in PROMPT_VARIABLES["system"]})
+    assert "never claim" in prompt and "merely because you used Read" in prompt
+    assert "Open is always available" in prompt
 
 
 def test_the_system_prompt_carries_no_one_demos_instructions():
@@ -134,7 +143,7 @@ def test_the_system_prompt_carries_no_one_demos_instructions():
 
 def test_what_changes_per_session_comes_last(tmp_path):
     """The scratch folder is new in every session; placed mid-prompt it made everything
-    after it (AGENT.md, skills, extension sections) miss the provider's cache each time."""
+    after it (AGENTS.md, skills, extension sections) miss the provider's cache each time."""
     a = build_system_prompt(tmp_path, tmp_path / "s1", model_name="M", model_id="m", provider="P", extra="X")
     b = build_system_prompt(tmp_path, tmp_path / "s2", model_name="M", model_id="m", provider="P", extra="X")
     shared = a[: a.index("# This session")]

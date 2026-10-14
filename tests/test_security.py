@@ -1,3 +1,6 @@
+import os
+from pathlib import PureWindowsPath
+
 import pytest
 
 from conftest import call, make_ctx
@@ -105,6 +108,11 @@ def test_find_api_key_catches_a_configured_key_without_a_prefix(monkeypatch):
     assert find_api_key("here: Zm9vYmFyYmF6cXV4MTIzNDU2") is not None
 
 
+def test_find_api_key_catches_a_resolved_key_outside_the_environment():
+    key = "resolved-key-without-a-known-prefix"
+    assert find_api_key(f"here: {key}", {"MISTRAL_API_KEY": key}) is not None
+
+
 @pytest.mark.parametrize("name", [".env.example", ".env.sample", "app/.env.template", ".env.dist"])
 def test_env_templates_are_not_secrets(name):
     assert not is_secret_path(name)
@@ -113,6 +121,19 @@ def test_env_templates_are_not_secrets(name):
 @pytest.mark.parametrize("name", [".env", ".env.local", "app/.env.production", ".env.example.bak"])
 def test_real_env_files_are_secrets(name):
     assert is_secret_path(name)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        PureWindowsPath(r"C:\Users\example\project\.env"),
+        PureWindowsPath(r"C:\Users\example\.tinyharness\AUTH.JSON"),
+        PureWindowsPath(r"C:\Users\example\.SSH\ID_ED25519"),
+    ],
+)
+def test_windows_paths_are_normalized_before_secret_matching(path):
+    """Seen live: native Windows separators and casing bypassed credential protection."""
+    assert is_secret_path(path)
 
 
 # ---- session logs ----
@@ -128,17 +149,26 @@ def test_session_logs_mask_credentials_but_keep_reasoning_intact(tmp_path, monke
     monkeypatch.setenv("OPENAI_API_KEY", "sk-configured0123456789abcdef")
     pasted = "sk-or-v1-" + "a1b2c3d4" * 4
     blob = "gAAA_sk-" + "x" * 30  # a signed reasoning blob that happens to look key-shaped
-    with Transcript(tmp_path, "s1") as log:
+    saved = "resolved-key-without-a-known-prefix"
+    with Transcript(tmp_path, "s1", secrets={"MISTRAL_API_KEY": saved}) as log:
         log.write("user", text=f"use {pasted} please")
-        log.write("tool_use", tool="Bash", args={"command": "echo sk-configured0123456789abcdef"})
+        log.write(
+            "tool_use",
+            tool="Bash",
+            args={"command": f"echo sk-configured0123456789abcdef {saved}"},
+        )
         log.write("msg", message={"content": "hi", "state": {"owner": "o", "data": {"sig": blob}}})
     text = log.path.read_text()
-    assert pasted not in text and "sk-configured0123456789abcdef" not in text
+    assert pasted not in text and "sk-configured0123456789abcdef" not in text and saved not in text
     assert "[REDACTED API KEY]" in text and "[REDACTED OPENAI_API_KEY]" in text
     last = json.loads(text.splitlines()[-1])
+    assert last["schema"] == 1 and last["session"] == "s1"
+    assert last["harness_version"]
+    assert {"turn", "step", "agent", "model_call", "routing_decision", "tool_call"} <= last.keys()
     assert last["message"]["state"]["data"]["sig"] == blob  # resuming must send it back unchanged
-    assert stat.S_IMODE(log.path.stat().st_mode) == 0o600
-    assert stat.S_IMODE((state_dir(tmp_path) / "sessions").stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(log.path.stat().st_mode) == 0o600
+        assert stat.S_IMODE((state_dir(tmp_path) / "sessions").stat().st_mode) == 0o700
 
 
 def test_existing_log_directories_are_made_private(tmp_path):
@@ -151,7 +181,8 @@ def test_existing_log_directories_are_made_private(tmp_path):
     old.mkdir(parents=True)
     old.chmod(0o755)  # as earlier versions left it
     Transcript(tmp_path, "s2").close()
-    assert stat.S_IMODE(old.stat().st_mode) == 0o700
+    if os.name != "nt":
+        assert stat.S_IMODE(old.stat().st_mode) == 0o700
 
 
 @pytest.mark.parametrize("path", ["/home/me/.tinyharness/auth.json", "project/auth.json"])

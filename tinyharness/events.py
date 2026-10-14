@@ -110,7 +110,18 @@ class SkillLoaded:
 
 @dataclass(frozen=True)
 class TodosUpdated:
+    """Report the current agent todo list."""
+
     todos: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ArtifactPresented:
+    """A file or URL is available to the user without launching an external app."""
+
+    target: str
+    media_type: str = ""
+    title: str = ""
 
 
 @dataclass(frozen=True)
@@ -172,6 +183,8 @@ class SubagentUpdate:
 
 @dataclass(frozen=True)
 class Done:
+    """Report why the current turn finished."""
+
     reason: Literal["stop", "max_steps", "interrupted"] = "stop"
 
 
@@ -187,6 +200,7 @@ Event = (
     | ToolResult
     | SkillLoaded
     | TodosUpdated
+    | ArtifactPresented
     | Compacted
     | TokenUsage
     | SubagentUpdate

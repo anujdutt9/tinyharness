@@ -51,6 +51,8 @@ HookCallable = Callable[[str, dict[str, Any]], Any]
 
 @dataclass
 class Hook:
+    """Configure one shell or Python lifecycle hook."""
+
     event: str
     type: Literal["shell", "python"] = "shell"
     matcher: dict[str, Any] = field(default_factory=dict)

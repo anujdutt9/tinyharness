@@ -3,6 +3,7 @@
 import json
 import re
 import subprocess
+import sys
 import time
 
 import pytest
@@ -11,7 +12,7 @@ from rich.text import Text
 
 from conftest import ScriptedLLM
 from tinyharness import Session, SessionOptions
-from tinyharness.cli.render import Renderer, dollars, tokens
+from tinyharness.cli.render import Renderer, _preview_line, _RunningTool, dollars, tokens
 from tinyharness.cli.repl import Repl, git_status
 from tinyharness.cli.theme import ellipsize
 from tinyharness.config import note_launch
@@ -161,6 +162,38 @@ def test_command_output_is_previewed_under_the_row(renderer):
     assert [line.strip() for line in preview] == ["⎿ row 1", "row 2", "row 3", "… 5 more lines"]
 
 
+def test_command_output_that_mentions_timeout_is_not_reported_as_timed_out(renderer):
+    """Seen live: a source diff containing the timeout marker was shown as a failed command."""
+    output = '+if "(timed out after" in text:\n+    handle_timeout()'
+    replay(renderer, ("Bash(git diff)", "Bash", {"command": "git diff"}, output, False))
+    assert shown(renderer)[0].startswith("✓ Bash")
+
+
+def test_sequential_tool_duration_excludes_time_waiting_for_the_previous_tool(renderer, monkeypatch):
+    """Seen live: a 33ms Git diff displayed the preceding pytest run's 58-second duration."""
+    now = 10.0
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    renderer.handle(ToolUse("Bash", {"command": "pytest"}, "Bash(pytest)", id="tests"))
+    renderer.handle(ToolUse("Bash", {"command": "git diff"}, "Bash(git diff)", id="diff"))
+    renderer.handle(ToolsDispatched(["Bash", "Bash"], False))
+    now = 68.0
+    renderer.handle(ToolResult("Bash", "1 passed", False, id="tests"))
+    now = 68.03
+    renderer.handle(ToolResult("Bash", "+change", False, id="diff"))
+    diff_row = next(line for line in shown(renderer) if "git diff" in line)
+    assert "58s" not in diff_row
+
+
+def test_git_diff_previews_color_additions_and_removals():
+    """Seen live: a Git diff stat was rendered as one muted block despite its useful +/- signal."""
+    tool = _RunningTool("Bash(git diff --stat)", {"command": "git diff --stat"})
+    stat = _preview_line(tool, " app.py | 4 ++--", False)
+    added = _preview_line(tool, "+new line", False)
+    removed = _preview_line(tool, "-old line", False)
+    assert [span.style for span in stat.spans] == ["diff.add", "diff.add", "diff.del", "diff.del"]
+    assert added.style == "diff.add" and removed.style == "diff.del"
+
+
 def test_who_allowed_a_call_without_asking_is_credited_under_it(renderer):
     renderer.handle(ToolUse("Bash", {"command": "ls"}, "Bash(ls)", id="c1"))
     renderer.handle(PermissionDecision("Bash", True, "classifier", "read-only listing"))
@@ -293,6 +326,49 @@ def test_the_status_bar_says_what_matters(repl):
     assert ("no sandbox" in bar) == (repl.session.sandbox is None)
 
 
+async def test_context_status_refreshes_after_each_model_call(repl):
+    """Seen live: context stayed at 0% throughout a long, multi-step first turn."""
+
+    async def events():
+        yield TokenUsage("model", input=20_000, cached=10_000, output=100, cost=0.01)
+
+    received = [event async for event in repl._status_events(events())]
+    assert len(received) == 1
+    assert repl.context_used == pytest.approx(30_000 / repl.session.context_window)
+    assert "~" not in text(repl._status(200))
+
+
+async def test_status_estimates_usage_while_the_model_is_streaming(repl):
+    """Seen live: context, output tokens and cost stayed stale until a reply completed."""
+    cfg = repl.session.config
+    cfg.pricing[f"{cfg.provider}:{cfg.model}"] = Price(input=1.0, output=10.0)
+
+    async def events():
+        yield AssistantText("x" * 800)
+        yield TokenUsage("model", input=20_000, cached=10_000, output=210, cost=0.04)
+
+    stream = repl._status_events(events())
+    assert isinstance(await anext(stream), AssistantText)
+    live = text(repl._status(200))
+    assert "~" in live and "200 out" in live and "~<" in live
+    assert repl.context_used > 0
+
+    assert isinstance(await anext(stream), TokenUsage)
+    exact = text(repl._status(200))
+    assert "~" not in exact
+    assert repl.context_used == pytest.approx(30_000 / repl.session.context_window)
+
+
+def test_idle_status_marks_next_request_context_as_estimated(repl):
+    """The idle context is locally tokenized, while completed output and cost are exact."""
+    repl.session.ctx.usage.add(Usage(input=8_000, output=741, cost=0.07))
+    repl._measure_context()
+    status = text(repl._status(200))
+    assert "~" in status.split(" context")[0]
+    assert "741 out" in status and "~741 out" not in status
+    assert "$0.07" in status and "~$0.07" not in status
+
+
 def test_the_status_bar_drops_the_least_important_parts_first(repl):
     repl.session.ctx.usage.add(Usage(input=12_000, output=300, cost=0.42))
     narrow = text(repl._status(30))
@@ -358,6 +434,7 @@ def fake_terminal(monkeypatch, reply: bytes | None):
         (None, None),  # a terminal that doesn't answer
     ],
 )
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no POSIX pseudo-terminal")
 def test_the_terminal_is_asked_for_its_background(monkeypatch, reply, light):
     from tinyharness.cli.theme import terminal_is_light
 
@@ -465,13 +542,17 @@ def test_a_sandboxed_test_run_that_fails_shows_as_failed(renderer):
         args=BashInput(command="pytest -q"),
         sandboxed=True,
     )
-    assert output.endswith("(exit code 1)") and "(note: this ran in the sandbox" in output
+    assert output.endswith("(exit code 1)")
+    assert "tinyharness:filesystem_or_process_denied" in output
     replay(renderer, ("Bash(pytest -q)", "Bash", {"command": "pytest -q"}, output, False))
     renderer.handle(Done())
-    row, first, last, footer = shown(renderer)[-4:]
+    lines = shown(renderer)
+    row = next(line for line in lines if line.startswith("✗ Bash"))
+    first = next(line for line in lines if "PermissionError" in line)
+    footer = lines[-1]
     assert row.startswith("✗ Bash") and "exit 1" in row
     assert first.strip() == "⎿ E   PermissionError: Operation not permitted"
-    assert last.strip() == "8 failed, 462 passed in 10.29s"  # the note isn't taken for the error
+    assert any(line.strip() == "8 failed, 462 passed in 10.29s" for line in lines)
     assert "tests ✗" in footer
 
 
@@ -490,7 +571,8 @@ def test_an_app_that_crashes_in_the_sandbox_says_to_run_it_outside():
         args=BashInput(command=chrome),
         sandboxed=True,
     )
-    assert "this ran in the sandbox" in output and output.endswith("(exit code 134)")
+    assert "tinyharness:host_application_blocked" in output
+    assert output.endswith("(exit code 134)")
 
 
 def test_cost_explains_where_the_tokens_went():
@@ -658,10 +740,11 @@ def test_ctrl_o_shows_a_running_subagents_calls_so_far(repl, tmp_path):
     assert "Edit  measure.mjs" in text
 
 
-async def test_back_to_back_questions_both_get_the_keyboard(repl):
+async def test_back_to_back_questions_both_get_the_keyboard(repl, monkeypatch):
     """Two approvals in a row (a batch of Read + Grep outside the project): the second used
     to arrive while the input box was coming back, found it not yet running, and waited
-    forever for a keyboard the new input box held."""
+    forever for a keyboard the new input box held. A dumb terminal uses prompt-toolkit's
+    separate fallback application, which must be closed instead of PromptSession.app."""
     import asyncio
 
     from prompt_toolkit.application import create_app_session
@@ -669,6 +752,7 @@ async def test_back_to_back_questions_both_get_the_keyboard(repl):
     from prompt_toolkit.output import DummyOutput
 
     answered = []
+    monkeypatch.setenv("TERM", "dumb")
 
     async def questions() -> None:
         await asyncio.sleep(0.3)  # the input box is up
@@ -757,7 +841,7 @@ def test_waiting_messages_show_above_the_input_with_how_to_send_them_now(repl):
 
 
 async def test_esc_stops_the_turn_and_sends_the_waiting_message_now(repl):
-    """Codex-style: a message typed mid-step waits for the next step, unless Esc says now."""
+    """A message typed mid-step waits for the next step unless Esc sends it immediately."""
     import asyncio
 
     from prompt_toolkit.application import create_app_session

@@ -25,7 +25,7 @@ from tinyharness.events import (
 from tinyharness.llm.types import LLMError, RunawayOutputError, StreamChunk
 from tinyharness.paths import state_dir
 from tinyharness.permissions import Decision, PermissionGate, PermissionMode
-from tinyharness.tools.base import Tool, ToolError, ToolInput
+from tinyharness.tools.base import ApprovalBoundary, Tool, ToolError, ToolInput
 from tinyharness.tools.registry import ToolRegistry
 from tinyharness.workspace import Workspace
 
@@ -69,6 +69,35 @@ async def test_plain_answer_ends_the_loop(tmp_path):
     events, history = await run(tmp_path, ScriptedLLM(["hello"]), [])
     assert events == [AssistantText("hello"), Done()]
     assert [m.role for m in history.messages] == ["system", "user", "assistant"]
+
+
+async def test_tool_approval_boundary_reaches_the_gate(tmp_path):
+    """Seen live: a package launcher downloaded executable code without an install prompt."""
+
+    class Acquire(Tool[ToolInput]):
+        name, description, Input = "Acquire", "acquire software", ToolInput
+
+        def approval_boundary(self, args):
+            return ApprovalBoundary("software:test", "downloads executable code", "allow this acquisition")
+
+        async def run(self, args, ctx):
+            raise AssertionError("denied acquisition must not run")
+
+    requests = []
+
+    async def deny(request):
+        requests.append(request)
+        return Decision(False, "not now", "user")
+
+    events, _ = await run(
+        tmp_path,
+        ScriptedLLM([[("Acquire", "{}")], "understood"]),
+        [Acquire()],
+        callback=deny,
+    )
+    assert len(requests) == 1 and requests[0].warning == "downloads executable code"
+    assert PermissionDecision("Acquire", False, "user", "not now") in events
+    assert not any(isinstance(event, ToolResult) and "AssertionError" in event.output for event in events)
 
 
 async def test_read_only_tools_run_in_parallel(tmp_path):
@@ -233,6 +262,39 @@ async def test_each_model_call_refreshes_the_cache_clock(tmp_path):
         assert deps.compactor.cache_cold
         [e async for e in run_agent_loop("go", History([]), deps)]
     assert not deps.compactor.cache_cold
+
+
+async def test_trace_records_model_tool_permission_and_turn_latency(tmp_path):
+    llm = ScriptedLLM([[("Change", "{}")], "done"])
+    await run(tmp_path, llm, [sleep_tool("Change", False)])
+    records = [
+        json.loads(line)
+        for line in (state_dir(tmp_path) / "sessions" / "test.jsonl").read_text().splitlines()
+    ]
+    by_event = {record["event"]: record for record in records}
+    assert by_event["model_first_token"]["ttft_ms"] >= 0
+    assert by_event["model_call_end"]["duration_ms"] >= 0
+    assert by_event["routing_decision"]["model"]
+    assert by_event["permission"]["duration_ms"] >= 0
+    assert by_event["tool_end"]["duration_ms"] >= 0
+    assert by_event["turn_complete"]["duration_ms"] >= 0
+    assert by_event["tool_end"]["tool_call"]
+    assert by_event["tool_end"]["model_call"]
+    assert by_event["model_call_end"]["routing_decision"]
+
+
+async def test_every_main_loop_model_call_has_exactly_one_trace_start_and_end(tmp_path):
+    from collections import Counter
+
+    await run(tmp_path, ScriptedLLM([[("Change", "{}")], "done"]), [sleep_tool("Change", False)])
+    records = [
+        json.loads(line)
+        for line in (state_dir(tmp_path) / "sessions" / "test.jsonl").read_text().splitlines()
+    ]
+    starts = Counter(r["model_call"] for r in records if r["event"] == "model_call_start")
+    ends = Counter(r["model_call"] for r in records if r["event"] == "model_call_end")
+    assert starts == ends and starts
+    assert set(starts.values()) == {1}
 
 
 async def test_reasoning_state_is_kept_on_the_reply(tmp_path):
@@ -618,8 +680,7 @@ def _call(i, name, arguments, finish=None):
 
 
 async def test_a_tool_call_cut_off_by_the_output_limit_is_not_run(tmp_path):
-    """Seen live: a big Write cut off mid-arguments got "invalid JSON", and the model sent
-    the same oversized call again until the repeat guard stopped it."""
+    """Seen live: a complete Write in an output-limited reply executed before its batch ended."""
     ran = []
 
     class Recorder(Tool[SleepInput]):
@@ -636,16 +697,23 @@ async def test_a_tool_call_cut_off_by_the_output_limit_is_not_run(tmp_path):
     ]
     _, history = await run(tmp_path, ScriptedLLM([cut, "done"]), [Recorder()])
     results = {m.tool_call_id: m.content for m in history.messages if m.role == "tool"}
-    assert ran == [0]  # the complete call ran; the cut-off one didn't
-    assert "hit the output token limit" in results["cut_1"] and "Write the first part" in results["cut_1"]
-    assert results["cut_0"] == "ok"
+    assert ran == []
+    assert set(results) == {"cut_0", "cut_1"}  # every call still gets exactly one result
+    assert all("hit the output token limit" in result for result in results.values())
 
 
 async def test_a_filtered_empty_reply_is_reported_not_retried(tmp_path):
+    """Seen live: failed HTTP model calls must mark the trace as errors, not interruptions."""
     llm = ScriptedLLM([[StreamChunk(finish_reason="filtered", finish_detail="content_filter")], "never"])
     with pytest.raises(LLMError, match=r"withheld the model's reply \(content_filter\)"):
         await run(tmp_path, llm, [])
     assert len(llm.requests) == 1
+    records = [
+        json.loads(line)
+        for line in (state_dir(tmp_path) / "sessions" / "test.jsonl").read_text().splitlines()
+    ]
+    [complete] = [record for record in records if record["event"] == "turn_complete"]
+    assert complete["status"] == "error" and "LLMError" in complete["error"]
 
 
 async def test_a_tool_call_in_the_step_limit_reply_leaves_the_history_valid(tmp_path):
@@ -700,7 +768,7 @@ async def test_a_tool_name_in_the_wrong_case_still_runs(tmp_path):
     [
         # Qwen3-Coder, seen in tinyharness's logs as a teammate's "final answer"
         "Let me read it.\n<tool_call>\n<function=Read>\n<parameter=seconds>\n2\n</parameter>\n</function>\n</tool_call>",
-        # Hermes / Qwen2.5
+        # JSON-style tool call
         'Let me read it.\n<tool_call>\n{"name": "Read", "arguments": {"seconds": 2}}\n</tool_call>',
     ],
 )
@@ -889,12 +957,26 @@ async def test_empty_replies_that_were_billed_blame_the_provider(tmp_path):
 async def test_a_gemma_call_with_a_raw_multiline_command_is_recovered(tmp_path):
     """Seen live: a Python script in Gemma's <|"|> strings, with quotes and newlines, wasn't
     recovered, and the turn ended with the script as its answer."""
-    from tinyharness.sandbox.policy import SandboxPolicy
+    from tinyharness.sandbox import Sandbox, SandboxPolicy
     from tinyharness.tools.bash import BashTool
+
+    class PassthroughSandbox(Sandbox):
+        """Keep this parser regression independent of host sandbox availability."""
+
+        name = "test"
+
+        @classmethod
+        def available(cls):
+            return True
+
+        def wrap(self, argv, policy):
+            return argv
 
     text = '<|tool_call>call:bash{command:<|"|>python3 -c "\nprint(\\"ok\\", 1 + 1)\n"<|"|>}<tool_call|>'
     events, _ = await run(
-        tmp_path, ScriptedLLM([text, "done"]), [BashTool(None, SandboxPolicy(write_roots=(tmp_path,)))]
+        tmp_path,
+        ScriptedLLM([text, "done"]),
+        [BashTool(PassthroughSandbox(), SandboxPolicy(write_roots=(tmp_path,)))],
     )
     assert [e.output for e in events if isinstance(e, ToolResult)] == ["ok 2"]
 
@@ -971,3 +1053,70 @@ async def test_a_call_written_as_text_runs_without_being_shown(tmp_path):
 async def test_text_that_only_looked_like_a_call_is_shown_in_full(tmp_path, parts):
     events, _ = await run(tmp_path, ScriptedLLM([_chunks(*parts)]), [Echo()])
     assert "".join(e.text for e in events if isinstance(e, AssistantText)) == "".join(parts)
+
+
+async def test_after_an_overflow_the_summary_keeps_only_the_smallest_tail(tmp_path):
+    """The usual tail has just been part of a prompt that didn't fit: keeping it again
+    could fail the retry the same way."""
+    from tinyharness.agent.compaction import CHECKPOINT_CONTINUATION, TAIL_MIN
+    from tinyharness.llm.types import ContextOverflowError
+
+    class OverflowOnce(ScriptedLLM):
+        async def stream(self, messages, tools=None, **kw):
+            if not self.requests:
+                self.requests.append(list(messages))
+                raise ContextOverflowError("prompt is too long")
+            async for chunk in super().stream(messages, tools, **kw):
+                yield chunk
+
+    llm = OverflowOnce(["done"])
+    long = "word " * 1000
+    history = History(
+        [Message(role=r, content=f"{r} {i} {long}") for i in range(20) for r in ("user", "assistant")]
+    )
+    compactor = Compactor(llm, preserve_recent_tokens=30_000)  # a tail that would keep everything
+    with Transcript(tmp_path, "test") as transcript:
+        deps = LoopDeps(
+            llm=llm,
+            tools=ToolRegistry([]),
+            gate=PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS),
+            compactor=compactor,
+            transcript=transcript,
+            ctx=make_ctx(tmp_path),
+        )
+        [e async for e in run_agent_loop("go", history, deps)]
+    # After the summary and checkpoint marker: the tail is at most TAIL_MIN of the ~40K.
+    kept = [m for m in llm.requests[1] if m.role != "system" and m.content != CHECKPOINT_CONTINUATION]
+    assert compactor.estimate(kept) <= TAIL_MIN
+
+
+async def test_each_request_asks_for_the_room_compaction_keeps(tmp_path):
+    asked = []
+
+    class Recording(ScriptedLLM):
+        async def stream(self, messages, tools=None, **kw):
+            asked.append(kw.get("max_tokens"))
+            async for chunk in super().stream(messages, tools, **kw):
+                yield chunk
+
+    llm = Recording(["done"])
+    with Transcript(tmp_path, "test") as transcript:
+        deps = LoopDeps(
+            llm=llm,
+            tools=ToolRegistry([]),
+            gate=PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS),
+            compactor=Compactor(llm, context_window=65_536, max_output=12_288),
+            transcript=transcript,
+            ctx=make_ctx(tmp_path),
+        )
+        [e async for e in run_agent_loop("go", History([]), deps)]
+    assert asked == [12_288]
+
+
+def test_an_old_repeated_request_can_still_be_read_from_a_saved_session():
+    """Sessions written before execution checkpoints remain resumable."""
+    from tinyharness.agent.compaction import CONTINUING, RESUME, _request
+
+    request = "Run a team of 8 analysts, then write the report."
+    content = f"{CONTINUING}\n{request}\n\n{RESUME}"
+    assert _request(Message(role="user", content=content)) == request

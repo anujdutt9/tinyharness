@@ -5,6 +5,59 @@ from tinyharness.cli.render import format_todos, summarize_output
 from tinyharness.cli.theme import split_summary
 
 
+async def test_resume_picker_uses_titles_and_search_instead_of_ids(monkeypatch):
+    """Seen live: an opaque timestamp id made resuming feel unusable even though a picker existed."""
+    import io
+    from datetime import datetime, timedelta
+
+    from rich.console import Console
+
+    from tinyharness import SessionInfo
+    from tinyharness.cli import app
+
+    now = datetime.now()
+    sessions = [
+        SessionInfo("1791-opaque", now, "Build the Starbucks presentation", 45, "anthropic:sonnet"),
+        SessionInfo("1790-opaque", now - timedelta(hours=2), "Review the API", 12, "openai:gpt"),
+    ]
+    monkeypatch.setattr(app, "list_sessions", lambda options: sessions)
+    seen = {}
+
+    async def choose(title, options, **kwargs):
+        seen["title"], seen["options"] = title, options
+        return options[0][0]
+
+    monkeypatch.setattr(app, "pick", choose)
+    console = Console(file=io.StringIO(), color_system=None)
+    assert await app.pick_session(object(), console) == "1791-opaque"
+    assert "1791-opaque" not in seen["options"][0][1]
+    assert "Build the Starbucks presentation" in seen["options"][0][1]
+    assert "45 messages" in seen["options"][0][1]
+    assert "anthropic / sonnet" in seen["options"][0][1]
+
+    assert await app.pick_session(object(), console, "starbucks") == "1791-opaque"
+    assert 'Resuming "Build the Starbucks presentation"' in console.file.getvalue()
+
+
+async def test_ambiguous_resume_search_does_not_guess_without_a_terminal(monkeypatch):
+    import io
+    from datetime import datetime
+
+    from rich.console import Console
+
+    from tinyharness import SessionInfo
+    from tinyharness.cli import app
+
+    sessions = [
+        SessionInfo("one", datetime.now(), "Build presentation", 4),
+        SessionInfo("two", datetime.now(), "Review presentation", 6),
+    ]
+    monkeypatch.setattr(app, "list_sessions", lambda options: sessions)
+    console = Console(file=io.StringIO(), color_system=None)
+    assert await app.pick_session(object(), console, "presentation") is None
+    assert "More than one conversation matches" in console.file.getvalue()
+
+
 @pytest.mark.parametrize(
     ("text", "done", "rest"),
     [
@@ -152,8 +205,11 @@ def test_pasted_screenshot_paths_are_attached(tmp_path):
     shots.mkdir()
     for n in (1, 2):
         (shots / f"Screenshot 2026-09-30 at 3.11.0{n} PM.png").write_bytes(PNG)
+    import shlex
+
     line = "\n".join(
-        f"{shots}/Screenshot\\ 2026-09-30\\ at\\ 3.11.0{n}\\ PM.png  - This is slide {n}" for n in (1, 2)
+        f"{shlex.quote(str(shots / f'Screenshot 2026-09-30 at 3.11.0{n} PM.png'))}  - This is slide {n}"
+        for n in (1, 2)
     )
     images, problems = attachments(line, tmp_path)
     assert [i.name for i in images] == [
@@ -217,7 +273,7 @@ def test_pip_greets_you_on_every_launch_when_the_terminal_can_show_him(tmp_path,
 
 async def test_a_run_without_a_terminal_denies_approvals_instead_of_prompting(monkeypatch):
     """Seen live: `tinyharness -p ...` from a script ended with "OSError: [Errno 22]" the
-    first time the model asked for something that needs approval (Bash sandbox=false):
+    first time the model asked for something that needs approval (a host-boundary action):
     the prompt tried to open a terminal that wasn't there. With no terminal there's no
     one to ask: the gate denies it and tells the model why."""
     import argparse

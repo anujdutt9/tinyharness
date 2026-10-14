@@ -76,5 +76,5 @@ def test_a_blocked_host_is_named_in_the_commands_output():
     out = tool._report(
         "curl: (56) CONNECT tunnel failed", 56, False, BashInput(command="curl x"), True, ["example.com"]
     )
-    assert "the sandbox blocked example.com" in out and out.endswith("(exit code 56)")
+    assert "network_destination_denied host=example.com" in out and out.endswith("(exit code 56)")
     assert "PyPI, npm), GitHub and common CDNs" in tool.description

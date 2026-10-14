@@ -53,7 +53,8 @@ async def add_key(
     console: Console, info: Provider, providers: dict[str, Provider], key: str = ""
 ) -> Ping | None:
     """Make sure `info` has a working key: ask for one (unless `key` is given), check it
-    with the provider, and save a pasted one to the key file, where it's used right away.
+    with the provider, and save a pasted one to the key file. A process environment or
+    development ``.env`` key remains active because it has higher precedence.
     Returns the check (which may be inconclusive, e.g. offline), or None if the user
     backed out or the provider rejected every key tried."""
     pasted = False

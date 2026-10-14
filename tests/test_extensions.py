@@ -1,11 +1,11 @@
-"""Skills, agents, hooks, plugins and AGENT.md are loaded from tinyharness's own
+"""Skills, agents, hooks, plugins and AGENTS.md are loaded from tinyharness's own
 directories only; another tool's home (~/.claude) is never read."""
 
 from pathlib import Path
 
 import pytest
 
-from tinyharness.agent.prompts import load_agent_md
+from tinyharness.agent.prompts import load_instructions
 from tinyharness.hooks import load_hooks
 from tinyharness.paths import home_dir
 from tinyharness.plugins import load_plugins
@@ -51,7 +51,7 @@ def test_home_dir_default(monkeypatch):
 def test_dot_claude_is_ignored(fake_home, project):
     assert all(s.name != "trap" for s in load_skills(project))
     assert "trap" not in load_agents(project)
-    assert "trap content" not in load_agent_md(project)
+    assert "trap content" not in load_instructions(project)
 
 
 def test_user_skill_wins_over_project_skill(isolated_home, project):
@@ -138,11 +138,11 @@ def test_a_broken_hooks_file_is_skipped(isolated_home, project):
     assert load_hooks(project) == []
 
 
-def test_agent_md_layers(isolated_home, project):
+def test_agents_md_layers(isolated_home, project):
     isolated_home.mkdir(parents=True)
-    (isolated_home / "AGENT.md").write_text("user context")
-    (project / "CLAUDE.md").write_text("project context")
-    out = load_agent_md(project)
+    (isolated_home / "AGENTS.md").write_text("user context")
+    (project / "AGENTS.md").write_text("project context")
+    out = load_instructions(project)
     assert out.index("user context") < out.index("project context")
 
 
@@ -153,7 +153,7 @@ def test_instructions_are_read_from_the_repo_root_down_to_the_working_directory(
     (repo / "pkg").mkdir()
     (repo / "pkg" / "AGENTS.md").write_text("package rules")
     (repo / "pkg" / "src").mkdir()
-    out = load_agent_md(repo / "pkg" / "src")
+    out = load_instructions(repo / "pkg" / "src")
     assert out.index("repo rules") < out.index("package rules")  # the deeper file comes last and wins
 
 
@@ -161,5 +161,5 @@ def test_outside_a_repo_only_the_working_directory_counts(isolated_home, tmp_pat
     (tmp_path / "AGENTS.md").write_text("some parent's rules")
     (tmp_path / "project").mkdir()
     (tmp_path / "project" / "AGENTS.md").write_text("project rules")
-    out = load_agent_md(tmp_path / "project")
+    out = load_instructions(tmp_path / "project")
     assert "project rules" in out and "some parent's rules" not in out

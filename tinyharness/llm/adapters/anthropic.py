@@ -36,7 +36,7 @@ class AnthropicAdapter(Adapter):
         info = request.info or ModelInfo(id=request.model)
         payload: dict[str, Any] = {
             "model": request.model,
-            "max_tokens": info.max_output or DEFAULT_MAX_TOKENS,
+            "max_tokens": request.max_tokens or info.max_output or DEFAULT_MAX_TOKENS,
             "messages": _messages(request),
             "stream": True,
             "cache_control": {"type": "ephemeral"},

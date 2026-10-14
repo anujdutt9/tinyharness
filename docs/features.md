@@ -19,10 +19,16 @@ guarantees and why each exists):
   and the model is told to write in smaller pieces.
 - The history sent to a provider is always well formed: every tool call answered,
   empty messages dropped, other providers' tool-call ids replaced after `/model`.
-- Tool calls written as text (Hermes JSON, Qwen3-Coder XML) are recovered when a
+- Tool calls written as text (JSON or XML forms) are recovered when a
   server's tool-call parser fails on them; malformed arguments are repaired.
 - Compaction starts from the provider's own token count and can summarize inside one
   long task; the summary keeps the tool calls, files changed and the todo list.
+- When to summarize comes from the model: once the history leaves less
+  room than the model's output limit (at most 32,000 tokens, at most half the window).
+  The recent tail kept word for word is a quarter of that usable room (2,000–15,000
+  tokens), whole turns first. `compaction_reserved` and
+  `compaction_preserve_recent_tokens` override them; `auto_compact_threshold` (a fraction
+  of the window) still works.
 - A model repeating a failing call is told to change approach.
 - The session log records each turn's outcome, the provider's stop reason and, on
   OpenRouter, which upstream served the request.
@@ -33,11 +39,11 @@ Streaming, parallel dispatch of read-only tools, argument validation, Ctrl-C to 
 
 ## Tools
 
-Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash`; each one is a class plus a pydantic input model. The rest are built-in extensions, off until you turn them on (`[extensions] enabled = [...]` in config, or `/extensions on <name>`): `web` (`WebSearch`, `WebFetch`), `pdf` (`Pdf`), `open` (`Open`), `todo` (`TodoWrite`; `todo_list = true` also turns it on), `agents` (`Agent`, `Team`), `memory` (`Memory`: notes about you and the project that every session starts with; `/memory` shows them). Your own tools are extensions too: [extension-api.md](extension-api.md). `Read` shows the model images too, and image paths in your message (pasted screenshots) are attached to it. To look at a page it made, the model renders it with Playwright through Bash and Reads the PNG
+Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash` and `Open` (`Open` provides a safe clickable preview by default, or an explicitly approved external launch); each one is a class plus a pydantic input model. The rest are built-in extensions, off until you turn them on (`[extensions] enabled = [...]` in config, or `/extensions on <name>`): `web` (`WebSearch`, `WebFetch`), `pdf` (`Pdf`), `todo` (`TodoWrite`: stable resumable tasks with progress, blockers and results; `todo_list = true` also turns it on), `agents` (`Agent`, `Team`), `memory` (`Memory`: explicitly scoped notes about you across projects or about this project that every later session starts with; `/memory` shows both and `/memory history` audits changes). User-authored global instructions remain in `~/.tinyharness/AGENTS.md`, while shared project rules belong in the project's `AGENTS.md`. Your own tools are extensions too: [extension-api.md](extension-api.md). `Read` shows the model images too, and image paths in your message (pasted screenshots) are attached to it. To inspect a page it made for visual defects, the model renders it with Playwright through Bash and Reads the PNG; to present the result to you, it uses Open.
 
 ## Permissions
 
-In the `default` mode, routine work doesn't ask: reads, edits inside the project and sandboxed commands run. Anything that leaves that boundary (a file in another folder, a command with `sandbox=false`, a network tool) asks, with a diff preview for edits. Answers are Yes / Yes, don't ask again / No + feedback. Shift+Tab cycles modes (`default` → `auto` → `plan` → `ask`): `auto` lets an LLM classifier decide the unclear cases, `plan` is read-only, `ask` asks before every edit and command; `bypassPermissions` never asks. (`acceptEdits`, the earlier name, means `default`.) Persistent `allow`/`deny` rules in config
+In the `default` mode, routine work doesn't ask: reads, edits inside the project and sandboxed commands run. Files in another folder and network tools ask, with a diff preview for edits. Answers are Yes / Yes, don't ask again / No + feedback. Shift+Tab cycles modes (`default` → `auto` → `plan` → `ask`). Recognizable destructive commands such as `rm`, `find -delete`, `git reset --hard`, and `git clean -f` always ask; an LLM classifier decides other unclear cases. `plan` is read-only and `ask` asks before every edit and command. `bypassPermissions` suppresses routine prompts but does not weaken containment: a missing sandbox backend, opening a host application, and protected code/config changes still require an explicit decision. (`acceptEdits`, the earlier name, means `default`.) Persistent `allow`/`deny` rules in config
 
 **Outside content.** Prompt injection needs three things together: private data, content
 someone else wrote, and a way to send data out ("the lethal trifecta"; Meta's "Rule of
@@ -45,13 +51,24 @@ Two"). tinyharness tracks the second: once a fetched page, search results or a c
 download is in the conversation, any call that could send data to another machine needs a
 person's yes, whatever the mode. Network tools lose the automatic public-page allowance,
 and leaving the sandbox says why it's asking. Sites you approved (config rules, "don't ask
-again", an extension's approved needs) stay allowed, sandboxed commands are unaffected
-(they reach only the allowlist and can't read credentials), and `/clear` starts over.
+again", an extension's approved needs) stay allowed, sandboxed commands stay contained
+(they reach only the allowlist and can't read credential-shaped files), and `/clear` starts over.
 `/sandbox` shows where the outside content came from.
 
 ## Sandbox
 
-`Bash` runs in an OS sandbox (Seatbelt on macOS; on Linux there is no sandbox yet, so every command asks): writes only inside the project, no reading credential files, network only to an allowlist of hosts (package registries, GitHub, CDNs) through a local proxy, and no handing work to other apps (`open`, AppleScript). Git hooks and `.tinyharness/` stay read-only, so nothing can plant code that runs later outside it (Write and Edit ask every time for those). A cloned repo's own hooks and plugins load only after you trust the folder, which is asked once, and only if it has any. Sandboxed commands run without asking in `default` and `auto`. A command that needs another host, or to write elsewhere, can ask to run outside the sandbox, and that asks every time. `/sandbox` shows the limits; `[sandbox] allow_hosts` changes the hosts. `Open` shows you a document or page, and always asks
+`Bash` runs with both filesystem and network isolation: native Seatbelt on macOS, or the optional [Anthropic Sandbox Runtime](https://github.com/anthropics/sandbox-runtime) on Linux, Windows and as a fallback. It writes only inside the project, session scratch directory, configured roots and a private tinyharness cache; cannot read credential files; reaches only explicitly trusted hosts; and cannot hand work to host applications. Common installers use private cache locations, including pip, uv, npm, pnpm, Yarn, Playwright, Puppeteer, Cypress, Hugging Face and Torch; temporary files stay in the session scratch directory. An explicit package, tool, bootstrap script, browser runtime, model, dataset or container acquisition asks first in every execution mode, including `bypassPermissions`; plan mode blocks it. Approval can cover that exact command for the session; a different acquisition asks separately, while direct use of an installed executable stays quiet. Required network destinations are approved separately. A bare Python install reuses an active virtualenv or Conda environment only when that environment is writable inside the sandbox. Otherwise tinyharness creates and activates `.venv` in the project. Explicit pip or uv destinations such as `--target`, `--prefix`, `--root`, `--user` and `--system` are preserved and still constrained by the sandbox. Git hooks and `.tinyharness/` stay read-only. Bash has no model-controlled escape switch. When a proxy-aware download is redirected to a new destination, the result names that exact host and the model may request it with `network_host`; the user can allow it once or for the session while the command remains sandboxed. An explicitly invoked skill can declare a finite `requires-network` list. Its first required destination still asks, but the session option shows and grants that exact reviewed set, avoiding one failure and prompt per redirect or service. It never accepts wildcards. Stable destinations belong in `[sandbox] allow_hosts`; `[]` disables network access. HTTPS allowlisting controls destinations, not content, so an approved host may receive non-secret project data readable by the command. Commands fail fast when a step or pipeline fails, preventing later steps from consuming stale artifacts. For CI and unattended work, `[sandbox] required = true` fails session startup when no backend is active. `/sandbox` shows the active policy. `Open` presents an artifact inside tinyharness without leaving containment; its separate external mode launches a host application and always asks.
+
+Exact hosts approved for the session accumulate in later command policies. This lets a client
+cross several service or redirect hosts without losing earlier grants, while one-command approvals
+remain one-command and model-supplied wildcards remain invalid.
+An allowlisted host is still an outbound channel: after outside content enters the conversation,
+network-capable Bash calls ask before running even when their destination is already allowed.
+
+Tests, previews and development servers can request `network_host="localhost"`. The scoped
+approval enables loopback while the command remains sandboxed; it does not open external network
+access. Credential-shaped pytest fixtures are readable only beneath the session's private temporary
+directory, while real credential locations remain blocked.
 
 ## Security
 
@@ -63,11 +80,16 @@ Three tiers: cap oversized messages → stub old tool output → summarize histo
 
 ## Skills
 
-`SKILL.md` directories, loaded progressively; compatible with Claude Code skills
+`SKILL.md` directories, loaded progressively and portable across tools that use this format. A
+skill that depends on optional harness capabilities can declare `requires-extensions: [agents]`;
+explicit invocation activates those extensions for the current session before the model starts it.
+A skill that uses a known finite set of data services can declare exact hosts with
+`requires-network: [api.example.com, assets.example.com]`; tinyharness offers that reviewed set
+as one session approval while keeping one-command approval limited to the requested host
 
 ## Subagents and teams
 
-Isolated context windows; built-in `explore` / `plan` / `general-purpose` / `researcher`, plus your own in Markdown, each on any model (`model: local:planner`) with its own step limit. `Team` runs a dependency graph of tasks, up to 4 teammates at once: independent tasks run in parallel, each teammate gets the results of the tasks it depends on, the user's request and its working directory, and teammates can message each other. Writing calls take turns on a shared lock; reads (including read-only shell commands) don't wait
+Isolated context windows; built-in `explore` / `plan` / `general-purpose` / `researcher`, plus your own in Markdown, each on any model (`model: local:planner`) with its own step limit. `Team` runs a dependency graph of tasks whose size the model chooses (3-5 teammates suit most goals). Up to `max_parallel_agents` subagents (default 20, or `TINYHARNESS_MAX_PARALLEL_AGENTS`) run at once across the session, Agent calls and teammates together; past that an Agent call fails so the model can wait, and Team tasks wait their turn: independent tasks run in parallel, each teammate gets the results of the tasks it depends on, the user's request and its working directory, and teammates can message each other. Writing calls take turns on a shared lock; reads (including read-only shell commands) don't wait
 
 ## Hooks and plugins
 
@@ -87,4 +109,4 @@ Interactive CLI (streamed Markdown, live tool status, `/` autocomplete, pickers,
 
 ## Resume
 
-Every conversation is saved losslessly as append-only JSONL in `~/.tinyharness/projects/<project>/`, never inside your repo (so it can't be committed) and where sandboxed commands can't write. `-c` continues the latest, `-r` picks one. On resume the harness checks what changed while you were away (files the agent read, git HEAD or branch, AGENT.md): stale file contents in the history are replaced by a stub, and the model is told what changed before your next message
+Every conversation is saved losslessly as append-only JSONL in `~/.tinyharness/projects/<project>/`, never inside your repo (so it can't be committed) and where sandboxed commands can't write. Trace schema 1 adds session, turn, agent, model-call, routing-decision and tool-call correlation plus the harness version. Main-agent and subagent loop calls record request, first-token and completion timing; permission, tool, compaction and total-turn timings are also recorded in milliseconds. Classifier, compaction and web-digest calls do not yet guarantee complete model-call or token/cost records. A `routing_decision` records the configured/static model choice in this release, not automatic routing. `turn_complete` means the agent loop finished, `evaluation` is a bounded post-turn observer result, and `turn_end` means session-level post-processing finished. Evaluators run before the final `Done` reaches an SDK consumer but cannot change the completed trajectory. `-c` continues the latest conversation. `-r` opens a picker showing titles, recency, message counts and models; `-r words` searches those titles, so session ids remain an automation detail. Inside the CLI, `/sessions` searches and switches conversations without a restart. An OS-held lock prevents two tinyharness processes from appending to the same session log; separate conversations can remain open in separate terminals. On resume the harness checks what changed while you were away (files the agent read, git HEAD or branch, AGENTS.md): stale file contents in the history are replaced by a stub, and the model is told what changed before your next message

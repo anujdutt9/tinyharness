@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from tinyharness.agent.compaction import Compactor
 from tinyharness.agent.history import History, Message
 from tinyharness.agent.loop import STEP_LIMIT_RESULT, LoopDeps, run_agent_loop
-from tinyharness.agent.prompts import environment, load_agent_md
+from tinyharness.agent.prompts import environment, load_instructions
 from tinyharness.agent.transcript import Transcript
 from tinyharness.events import (
     AssistantText,
@@ -26,7 +26,9 @@ from tinyharness.events import (
     ToolResult,
     ToolUse,
 )
+from tinyharness.llm import identity
 from tinyharness.llm.providers import DEFAULT_CONTEXT
+from tinyharness.llm.tokens import model_counter
 from tinyharness.llm.types import LLMError
 from tinyharness.subagents.specs import AgentSpec
 
@@ -149,14 +151,32 @@ async def run_subagent(
             doing = (phase, tool, detail)
             report("working", detail, phase, tool)
 
-    with Transcript(ctx.workspace.root, f"{spec.name}-{run_id}", kind="sidechains") as transcript:
+    with Transcript(
+        ctx.workspace.root,
+        f"{spec.name}-{run_id}",
+        kind="sidechains",
+        secrets=ctx.config.credential_values(),
+    ) as transcript:
         log = str(transcript.path)
-        transcript.write("session_start", agent=spec.name, model=model_id, task=task)
+        # Which session and agent this is (set by the caller), so a sidechain can be matched to the
+        # session that started it: with several sessions running at once, times overlap.
+        who = identity.CURRENT.get()
+        ids = {"session": who.session, "agent_id": who.agent, "parent": who.parent} if who is not None else {}
+        transcript.write("session_start", agent=spec.name, model=model_id, task=task, **ids)
         deps = LoopDeps(
             llm=llm,
             tools=registry,
             gate=gate,
-            compactor=Compactor(llm, context_window=_context_window(llm, model)),
+            compactor=Compactor(
+                llm,
+                context_window=_context_window(llm, model),
+                max_output=_max_output(llm, model),
+                counter=lambda: model_counter(_tokenizer(llm, model)),
+                reserved=ctx.config.compaction_reserved,
+                preserve_recent_tokens=ctx.config.compaction_preserve_recent_tokens,
+                threshold=ctx.config.auto_compact_threshold,
+                model=ctx.config.role_model("compaction"),
+            ),
             transcript=transcript,
             ctx=ctx,
             allowed_tools=allowed,
@@ -244,9 +264,21 @@ def subagent_system_prompt(spec: AgentSpec, ctx: ToolContext) -> str:
     if ctx.skills_prompt:  # subagents can load skills too: by reading SKILL.md
         parts.append(ctx.skills_prompt)
     # The project's own rules (how to run tests, which package manager) bind subagents too.
-    if instructions := load_agent_md(ctx.workspace.root):
+    if instructions := load_instructions(ctx.workspace.root):
         parts.append(f"# Project instructions (AGENTS.md)\n\n{instructions}")
     return "\n\n".join(parts)
+
+
+def _tokenizer(llm: Any, model: str | None) -> str | None:
+    """The Hugging Face repo with the subagent's model's tokenizer, if the config names one."""
+    info = llm.model_info(model) if hasattr(llm, "model_info") else None
+    return info.tokenizer if info is not None else None
+
+
+def _max_output(llm: Any, model: str | None) -> int | None:
+    """The subagent's model's output limit, if the provider or the config says."""
+    info = llm.model_info(model) if hasattr(llm, "model_info") else None
+    return info.max_output if info is not None else None
 
 
 def _context_window(llm: Any, model: str | None) -> int:

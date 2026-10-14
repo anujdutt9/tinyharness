@@ -36,12 +36,12 @@ def test_an_installed_copy_reads_no_env_files(installed, tmp_path):
     assert not cfg.has_key("openai")
 
 
-def test_a_provider_picked_from_the_keys_found_is_marked_auto(monkeypatch, tmp_path):
+def test_a_provider_picked_from_credentials_is_named_accurately(monkeypatch, tmp_path):
     monkeypatch.setenv("GEMINI_API_KEY", "g")
     cfg = load_config(tmp_path / "none.toml")
-    assert cfg.auto_selected
+    assert cfg.credential_selected and cfg.auto_selected  # compatibility alias
     cfg.use_provider("gemini")
-    assert not cfg.auto_selected
+    assert not cfg.credential_selected and not cfg.auto_selected
 
 
 @pytest.mark.parametrize(
@@ -147,6 +147,14 @@ def user_types(monkeypatch, *answers):
     monkeypatch.setattr("tinyharness.cli.setup.ask", ask)
 
 
+def test_whoami_reports_the_resolved_key_source(repl):
+    from tinyharness.cli.commands import whoami
+
+    whoami(repl, "")
+    text = repl.console.export_text()
+    assert "key from" in text and "environment" in text
+
+
 async def test_switching_to_a_provider_without_a_key_asks_for_it(repl, monkeypatch):
     from tinyharness.cli.commands import provider
 
@@ -155,7 +163,8 @@ async def test_switching_to_a_provider_without_a_key_asks_for_it(repl, monkeypat
     await provider(repl, "anthropic")
     assert repl.session.config.provider == "anthropic"
     assert read_auth() == {"anthropic": ANTHROPIC_KEY}
-    assert oct(auth_path().stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":
+        assert oct(auth_path().stat().st_mode & 0o777) == "0o600"
     text = repl.console.export_text()
     assert "Anthropic needs an API key" in text and "console.anthropic.com" in text
     assert "No API key for" not in text
@@ -181,13 +190,16 @@ async def test_a_rejected_key_is_asked_for_again(repl, monkeypatch):
     assert "Anthropic rejected that key: invalid x-api-key" in repl.console.export_text()
 
 
-async def test_key_replaces_the_current_providers_key_and_uses_it(repl, monkeypatch):
+async def test_saved_key_does_not_override_the_process_environment(repl, monkeypatch):
     from tinyharness.cli.commands import key
 
     new = "sk-" + "n" * 40
     user_types(monkeypatch, new)
     providers_answer(monkeypatch, Ping(ok=True, status=200, message="auth ok"))
     await key(repl, "openai")
-    assert os.environ["OPENAI_API_KEY"] == new
-    assert repl.session.llm.api_key == new  # the running client, not just the file
-    assert "OpenAI has a key; a new one replaces it." in repl.console.export_text()
+    assert os.environ["OPENAI_API_KEY"] != new
+    assert read_auth() == {"openai": new}
+    assert repl.session.llm.api_key == os.environ["OPENAI_API_KEY"]
+    text = repl.console.export_text()
+    assert "uses a key from environment" in text
+    assert "Saved OpenAI fallback; still using environment." in text

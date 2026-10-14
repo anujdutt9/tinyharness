@@ -14,14 +14,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
+import inspect
 import json
 import logging
 import re
 import shutil
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
-from dataclasses import dataclass, field, replace
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +32,7 @@ from tinyharness.agent import world
 from tinyharness.agent.compaction import SUMMARY_MARK, Compactor
 from tinyharness.agent.history import History, Image, Message
 from tinyharness.agent.loop import LoopDeps, record_usage, run_agent_loop, summary_notes
-from tinyharness.agent.prompts import build_system_prompt, load_agent_md
+from tinyharness.agent.prompts import build_system_prompt, load_instructions
 from tinyharness.agent.sessionlog import (
     FileSessionStore,
     Replayed,
@@ -39,17 +41,19 @@ from tinyharness.agent.sessionlog import (
     SessionStore,
     replay,
 )
-from tinyharness.config import Config, dotenv_paths, load_auth, load_config, load_dotenv_files
+from tinyharness.agent.transcript import Transcript, trace_id
+from tinyharness.config import Config, dotenv_paths, dotenv_values, load_config, resolve_credentials
 from tinyharness.events import Compacted, Done, Event, SkillLoaded, ToolResult, ToolUse
 from tinyharness.ext import Command as ExtCommand
 from tinyharness.ext import Extension, LoadError, NeedsConsent, RunResult, load_extensions
 from tinyharness.hooks import Hook, HookRunner, load_hooks
+from tinyharness.llm import identity
 from tinyharness.llm.calibration import CalibrationStore
 from tinyharness.llm.client import LLMClient, Ping
 from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.providers import DEFAULT_CONTEXT, Provider
 from tinyharness.llm.textcalls import recover_calls
-from tinyharness.llm.tokens import count_tokens, estimate_tokens
+from tinyharness.llm.tokens import count_tokens, estimate_tokens, model_counter
 from tinyharness.llm.types import Effort
 from tinyharness.llm.usage import Usage, UsageMeter
 from tinyharness.paths import default_config_path, home_dir, move_legacy_state, project_dir
@@ -65,7 +69,7 @@ from tinyharness.permissions.classifier import AutoModeClassifier
 from tinyharness.permissions.rules import DOMAIN, Rule
 from tinyharness.plugins import load_plugins
 from tinyharness.prompts import load_prompt
-from tinyharness.sandbox import Sandbox, SandboxPolicy, detect_sandbox
+from tinyharness.sandbox import Sandbox, SandboxPolicy, detect_sandbox, setup_hint
 from tinyharness.sandbox.proxy import AllowlistProxy
 from tinyharness.skills import Skill, SkillRegistry, build_skill_prompt, load_skills, skills_section
 from tinyharness.subagents import AgentSpec, load_agents
@@ -73,6 +77,7 @@ from tinyharness.subagents.runner import run_subagent
 from tinyharness.tools.base import Tool, ToolContext, ToolError, file_version
 from tinyharness.tools.bash import BashInput, BashTool
 from tinyharness.tools.registry import default_registry
+from tinyharness.tools.todo import normalize_todo_ids
 from tinyharness.trust import TrustStore
 from tinyharness.workspace import Scratch, Workspace
 
@@ -121,9 +126,58 @@ class MissingAPIKeyError(RuntimeError):
         )
 
 
+class SandboxRequiredError(RuntimeError):
+    """Raised before agent work when required containment is unavailable."""
+
+
+@dataclass(frozen=True)
+class EvaluationContext:
+    """Provide a read-only snapshot to a post-turn evaluator.
+
+    Attributes
+    ----------
+    session_id : str
+        Identifier of the session being evaluated.
+    turn_id : str
+        Correlation identifier for the completed turn.
+    prompt : str
+        User prompt that started the turn.
+    reason : str
+        Normalized reason the turn ended.
+    working_dir : pathlib.Path
+        Session working directory.
+    messages : tuple[Message, ...]
+        Copy of the normalized conversation history.
+    duration_ms : float
+        Turn duration in milliseconds.
+    """
+
+    session_id: str
+    turn_id: str
+    prompt: str
+    reason: str
+    working_dir: Path
+    messages: tuple[Message, ...]
+    duration_ms: float
+
+
+Evaluator = Callable[[EvaluationContext], Any | Awaitable[Any]]
+
+
+async def _invoke_evaluator(evaluator: Evaluator, context: EvaluationContext) -> Any:
+    """Run synchronous observers off the event loop; await asynchronous ones normally."""
+    if inspect.iscoroutinefunction(evaluator):
+        return await evaluator(context)
+    result = await asyncio.to_thread(evaluator, context)
+    return await result if inspect.isawaitable(result) else result
+
+
 @dataclass
 class SessionOptions:
-    """Per-session overrides on top of the loaded Config. `None` means "use the config"."""
+    """Configure one session.
+
+    Values set to ``None`` inherit from the loaded :class:`Config` where applicable.
+    """
 
     config_path: Path | None = None
     working_dir: Path | None = None
@@ -143,6 +197,8 @@ class SessionOptions:
     permission_callback: PermissionCallback | None = None
     on_event: Callable[[Event], None] | None = None  # progress of subagents/teammates as it happens
     hooks: list[Hook] = field(default_factory=list)
+    evaluators: list[Evaluator] = field(default_factory=list)
+    evaluator_timeout: float = 30.0
     tools: list[Tool[Any]] = field(default_factory=list)  # your own tools; a built-in's name replaces it
     # Extensions given in code: modules with setup(th), or setup functions (tinyharness/ext.py).
     extensions: list[Any] = field(default_factory=list)
@@ -170,7 +226,7 @@ class SessionOptions:
         if self.effort is not None:
             cfg.effort = self.effort
         if self.api_key:
-            cfg.api_key = self.api_key
+            cfg.set_api_key(self.api_key)
         if self.todo_list is not None:
             cfg.todo_list = self.todo_list
         if self.expose_skill_tool is not None:
@@ -179,8 +235,27 @@ class SessionOptions:
 
 
 class Session:
+    """Coordinate models, tools, permissions, and conversation state.
+
+    Parameters
+    ----------
+    options : SessionOptions, optional
+        Per-session configuration and integrations.
+    config : Config, optional
+        Preloaded configuration. When omitted, the session resolves it from ``options``.
+
+    Raises
+    ------
+    ValueError
+        If evaluator timeout or other session settings are invalid.
+    SandboxRequiredError
+        If containment is required but unavailable.
+    """
+
     def __init__(self, options: SessionOptions | None = None, config: Config | None = None) -> None:
         self.options = options or SessionOptions()
+        if self.options.evaluator_timeout <= 0:
+            raise ValueError("evaluator_timeout must be greater than zero")
         self.config = config or self.options.resolve_config()
         root = self.config.working_dir
         move_legacy_state(root)
@@ -192,10 +267,16 @@ class Session:
         self.workspace = Workspace(root)
         self.scratch = Scratch(root, self.id, max_age_hours=self.config.scratch_max_age_hours)
         self.transcript = self.store.writer(self.id)
+        if isinstance(self.transcript, Transcript):
+            self.transcript.set_secrets(self.config.credential_values())
         self.log = SessionLog(self.transcript)
         self.history = History()
         self.ctx = ToolContext(
-            workspace=self.workspace, config=self.config, scratch=self.scratch, notify=self.options.on_event
+            workspace=self.workspace,
+            config=self.config,
+            scratch=self.scratch,
+            notify=self.options.on_event,
+            session_id=self.id,
         )
 
         # Extensions: skills, agents, hooks (plugins contribute to all three).
@@ -228,15 +309,31 @@ class Session:
                 self.workspace.add_read_root(skill.directory)
 
         self.sandbox: Sandbox | None = detect_sandbox() if self.config.sandbox.enabled else None
+        if self.config.sandbox.required and self.sandbox is None:
+            self.transcript.write("sandbox_unavailable", required=True)
+            self.transcript.close()
+            self.scratch.cleanup()
+            raise SandboxRequiredError(
+                "sandbox.required is true, but no supported sandbox backend is available; "
+                f"{setup_hint()}, or set sandbox.required = false"
+            )
         self.sandbox_policy = SandboxPolicy.for_project(
             root,
             scratch=self.scratch.dir,
             cache_dir=home_dir() / "sandbox-cache",
             extra_write=self.config.sandbox.allow_write,
             allow_localhost=self.config.sandbox.allow_localhost,
+            allowed_hosts=self.config.sandbox.allow_hosts,
         )
         hosts = self.config.sandbox.allow_hosts
-        self.proxy = AllowlistProxy(tuple(hosts)) if self.sandbox is not None and hosts else None
+        self.proxy = (
+            AllowlistProxy(tuple(hosts))
+            if self.sandbox is not None and not getattr(self.sandbox, "manages_network", False) and hosts
+            else None
+        )
+        # Exact hosts approved "for this session" become part of later Bash sandboxes.
+        # A new Session gets a new set, and extension-owned commands do not inherit it.
+        self._session_network_hosts: set[str] = set()
         self.extensions: list[Extension] = []
         self.extension_errors: list[LoadError] = []
         enabled = list(self.config.extensions.enabled)
@@ -253,6 +350,7 @@ class Session:
             rules=PermissionRules.parse(cfg.permissions.allow, cfg.permissions.deny, root),
             hooks=self.hooks,
             callback=_one_at_a_time(self.options.permission_callback),
+            session_network_hosts=self._session_network_hosts,
             scratch=self.scratch,
             # Files that would run code outside the sandbox: writing them always asks.
             protected=(
@@ -278,6 +376,13 @@ class Session:
         self._resume_note = ""
         if saved is not None:
             self._restore(saved)
+            try:
+                self._activate_skill_requirements(
+                    [skill for skill in self.skills.list() if self._skill_in_context(skill)]
+                )
+            except BaseException:
+                self.close()
+                raise
         self.transcript.write(
             "session_resumed" if saved else "session_start",
             model=cfg.model,
@@ -324,15 +429,15 @@ class Session:
             reported=saved.reported,
             git_before=saved.world.get("git"),
             instructions_before=saved.world.get("agent_md"),
-            instructions_now=world.text_hash(load_agent_md(self.workspace.root)),
+            instructions_now=world.text_hash(load_instructions(self.workspace.root)),
         )
         report.unfinished = unfinished
-        # A fresh system prompt: the model, scratch dir or AGENT.md may have changed.
+        # A fresh system prompt: the model, scratch dir or AGENTS.md may have changed.
         first = history.messages[0]
         if first.role == "system" and not (first.content or "").startswith(SUMMARY_MARK):
             history.messages[0] = Message(role="system", content=self._system_prompt())
         self.history = history
-        self.ctx.todos = list(saved.todos)
+        self.ctx.todos = normalize_todo_ids(saved.todos)
         self.ctx.read_paths = set(report.current_reads)
         # Those files are as the agent last saw them, so a change from now on (the user
         # editing one) must make Edit and Write ask for a fresh Read, as in a live session.
@@ -352,7 +457,7 @@ class Session:
     def _log_world(self) -> None:
         root = self.workspace.root
         self.transcript.write(
-            "world", git=world.git_state(root), agent_md=world.text_hash(load_agent_md(root))
+            "world", git=world.git_state(root), agent_md=world.text_hash(load_instructions(root))
         )
 
     # ------------------------------------------------------------------ setup
@@ -375,10 +480,25 @@ class Session:
             calibration=self._calibration,
         )
         self.llm.show_reasoning = cfg.show_thinking
-        self.gate.classifier = AutoModeClassifier(self.llm, model=cfg.small_model)
+        self.gate.classifier = AutoModeClassifier(self.llm, model=cfg.role_model("safety_classifier"))
         self.compactor = Compactor(
-            self.llm, context_window=lambda: self.context_window, threshold=cfg.auto_compact_threshold
+            self.llm,
+            context_window=lambda: self.context_window,
+            max_output=lambda: info.max_output if (info := self.llm.model_info()) else None,
+            counter=lambda: model_counter((info := self.llm.model_info()) and info.tokenizer),
+            reserved=cfg.compaction_reserved,
+            preserve_recent_tokens=cfg.compaction_preserve_recent_tokens,
+            threshold=cfg.auto_compact_threshold,
+            model=cfg.role_model("compaction"),
         )
+
+    def _identify(self) -> identity.CallIdentity:
+        """This session's lead identity for the model calls that follow (llm/identity.py)."""
+        who = identity.CURRENT.get()
+        if who is None or who.session != self.id:
+            who = identity.for_session(self.id)
+            identity.CURRENT.set(who)
+        return who
 
     async def _spawn_subagent(
         self,
@@ -397,20 +517,25 @@ class Session:
             llm, model = self.llm_for(spec.model)
         except (MissingAPIKeyError, ValueError) as e:
             raise ToolError(f"can't start the {spec.name} agent: {e}") from None
-        return await run_subagent(
-            spec,
-            task,
-            ctx=ctx,
-            llm=llm,
-            model=model,
-            tools=self.tools,
-            gate=gate,
-            label=label,
-            extra_tools=extra_tools,
-            inbox=inbox,
-            write_lock=self._agent_writes,
-            **({"max_steps": spec.max_steps} if spec.max_steps else {}),
-        )
+        parent = identity.CURRENT.get() or self._identify()
+        token = identity.CURRENT.set(identity.child(parent, spec.name))  # this task only
+        try:
+            return await run_subagent(
+                spec,
+                task,
+                ctx=ctx,
+                llm=llm,
+                model=model,
+                tools=self.tools,
+                gate=gate,
+                label=label,
+                extra_tools=extra_tools,
+                inbox=inbox,
+                write_lock=self._agent_writes,
+                **({"max_steps": spec.max_steps} if spec.max_steps else {}),
+            )
+        finally:
+            identity.CURRENT.reset(token)
 
     def llm_for(self, spec: str | None) -> tuple[LLMClient, str | None]:
         """The client and model id for a subagent's `model` setting:
@@ -447,9 +572,11 @@ class Session:
     # ------------------------------------------------------------------ settings
 
     def reload_keys(self) -> None:
-        """Re-read auth.json (and .env files), in case a key was added while the session ran."""
-        load_auth(self.config.providers)
-        load_dotenv_files(*dotenv_paths(self.config.working_dir))
+        """Resolve credentials again after a source changes."""
+        dotenv = dotenv_values(*dotenv_paths(self.config.working_dir))
+        resolve_credentials(self.config.providers, dotenv)
+        if isinstance(self.transcript, Transcript):
+            self.transcript.set_secrets(self.config.credential_values())
 
     async def check_model(self, spec: str) -> Ping:
         """Send a tiny test request to a model before switching to it ("provider:" = its default).
@@ -500,16 +627,26 @@ class Session:
         extension's, in order. Also used to switch extensions mid-session."""
         ext_hooks = {id(h) for ext in self.extensions for h in ext.hooks}
         self.hooks.hooks = [h for h in self.hooks.hooks if id(h) not in ext_hooks]
+        core = default_registry()
+        core_names = {name.casefold() for name in core.names()}
+        extension_names = [name for name in names if name.casefold() not in core_names]
         self.extensions, self.extension_errors = load_extensions(
-            names,
+            extension_names,
             self,
             self.config.extensions.settings(),
             project=self.project_trusted,
             given=self.options.extensions,
         )
-        self.tools = default_registry()
+        self.tools = core
         if shutil.which("bash") or shutil.which("sh"):
-            self.tools.register(BashTool(self.sandbox, self.sandbox_policy, proxy=self.proxy))
+            self.tools.register(
+                BashTool(
+                    self.sandbox,
+                    self.sandbox_policy,
+                    proxy=self.proxy,
+                    session_hosts=self._session_network_hosts,
+                )
+            )
         for tool in self.options.tools:  # before the Agent tool, so subagents can use them too
             self.tools.register(tool)
         for ext in self.extensions:
@@ -562,10 +699,14 @@ class Session:
         if ext.granted and ext.writes:
             policy = replace(policy, write_roots=(*policy.write_roots, *ext.writes))
         if ext.granted and ext.hosts and self.sandbox is not None:
-            if ext.name not in self._extension_proxies:
-                base = tuple(self.config.sandbox.allow_hosts)
-                self._extension_proxies[ext.name] = AllowlistProxy((*base, *ext.hosts))
-            proxy = self._extension_proxies[ext.name]
+            policy = replace(
+                policy,
+                allowed_hosts=tuple(dict.fromkeys((*policy.allowed_hosts, *ext.hosts))),
+            )
+            if not getattr(self.sandbox, "manages_network", False):
+                if ext.name not in self._extension_proxies:
+                    self._extension_proxies[ext.name] = AllowlistProxy(policy.allowed_hosts)
+                proxy = self._extension_proxies[ext.name]
         bash = BashTool(self.sandbox, policy, proxy=proxy)
         run = await bash.execute(BashInput(command=command, timeout=max(1, min(600, int(timeout)))), self.ctx)
         return RunResult(run.code, run.output)
@@ -625,6 +766,11 @@ class Session:
     def mode(self) -> PermissionMode:
         return self.gate.mode
 
+    @property
+    def session_network_hosts(self) -> tuple[str, ...]:
+        """Exact destinations the user approved for this active session."""
+        return tuple(sorted(self._session_network_hosts))
+
     def set_mode(self, mode: PermissionMode | str) -> None:
         """For the session and its subagents, including ones already running."""
         self.gate.set_mode(PermissionMode.parse(mode))
@@ -678,8 +824,8 @@ class Session:
         return True
 
     def clear(self) -> None:
-        """Start a new conversation, as Claude Code's /clear does: the old one stays saved
-        as it was (`tinyharness -r` picks it), and this one gets its own id and log.
+        """Start a new conversation: the old one stays saved as it was (`tinyharness -r`
+        picks it), and this one gets its own id and log.
         Permissions and scratch space are kept, and so are the token and cost totals: they're
         what the session spent (see UsageMeter.since_clear)."""
         had_conversation = any(m.role != "system" for m in self.history.messages)
@@ -691,7 +837,11 @@ class Session:
             previous = self.id
             self.transcript.close()
             self.id = _new_id()
+            self.ctx.session_id = self.id
+            self.ctx.turn_id = ""
             self.transcript = self.store.writer(self.id)
+            if isinstance(self.transcript, Transcript):
+                self.transcript.set_secrets(self.config.credential_values())
             self.log = SessionLog(self.transcript)
             self.transcript.write(
                 "session_start",
@@ -707,18 +857,32 @@ class Session:
     # ------------------------------------------------------------------ running
 
     async def run(self, prompt: str, images: Sequence[Image] = ()) -> AsyncGenerator[Event, None]:
-        """Send a message and stream what happens. `images` are pictures for the model to
-        look at with it (screenshots, say): see `tinyharness.tools.read.load_image`.
+        """Send a message and stream session events.
 
         A message with an installed skill's `/name` anywhere in it loads that skill with it,
         unless it's already in the conversation: asked for that way, it shouldn't depend on
         the model choosing to read the SKILL.md. A bare name doesn't count ("don't use the
-        claude-design-skill" names it too); the model sees those in the skills list."""
+        some-skill" names it too); the model sees those in the skills list.
+
+        Parameters
+        ----------
+        prompt : str
+            Message to send to the agent.
+        images : Sequence[Image], optional
+            Images supplied with the message.
+
+        Yields
+        ------
+        Event
+            Model text, tool activity, usage, and the final turn outcome.
+        """
         named = self.skills_named(prompt)
+        self._activate_skill_requirements(named)
         if named:
             prompt = "\n\n".join([*(build_skill_prompt(s) for s in named), f"User message: {prompt}"])
         for skill in named:
             yield SkillLoaded(skill.name, count_tokens(build_skill_prompt(skill)), "named")
+        self._identify()
         async for event in self._turn(prompt, images):
             yield event
 
@@ -736,10 +900,18 @@ class Session:
         for m in self.history.messages:
             if m.role == "user" and f"# Skill: {skill.name}\n" in (m.content or ""):
                 return True
-            if skill.source is not None and any(
-                c.name == "Read" and str(skill.source) in c.arguments for c in m.tool_calls
-            ):
-                return True
+            if skill.source is not None:
+                for call in m.tool_calls:
+                    if call.name != "Read":
+                        continue
+                    try:
+                        path = json.loads(call.arguments).get("path")
+                    except (AttributeError, json.JSONDecodeError):
+                        continue
+                    if isinstance(path, str):
+                        target = (self.workspace.root / Path(path).expanduser()).resolve()
+                        if skill.source.resolve() == target:
+                            return True
         return False
 
     def _skill_read(self, call: ToolUse) -> Skill | None:
@@ -751,6 +923,9 @@ class Session:
         return next((s for s in self.skills.list() if s.source and s.source.resolve() == target), None)
 
     async def _turn(self, prompt: str, images: Sequence[Image] = ()) -> AsyncGenerator[Event, None]:
+        turn_id = trace_id("turn")
+        self.ctx.turn_id = turn_id
+        turn_started = time.monotonic()
         if not self._started:
             await self.hooks.fire(
                 "SessionStart", {"session_id": self.id, "resumed": self.resume_report is not None}
@@ -774,6 +949,7 @@ class Session:
             allowed_tools=set(self.options.allowed_tools) if self.options.allowed_tools else None,
             max_steps=self.options.max_steps,
             inbox=self.take_steering,
+            turn_id=turn_id,
         )
         skill_reads: dict[str, Skill] = {}  # Read calls of a SKILL.md, by call id
         try:
@@ -781,7 +957,14 @@ class Session:
                 if isinstance(event, (ToolUse, ToolResult, Compacted, Done)):
                     self._sync()  # saved as it goes, so a crash loses at most one step
                 if isinstance(event, Done):
-                    self.transcript.write("turn_end", reason=event.reason or "done")
+                    duration_ms = round((time.monotonic() - turn_started) * 1000, 3)
+                    await self._evaluate_turn(prompt, turn_id, event.reason or "done", duration_ms)
+                    self.transcript.write(
+                        "turn_end",
+                        turn=turn_id,
+                        reason=event.reason or "done",
+                        duration_ms=duration_ms,
+                    )
                 if isinstance(event, ToolUse) and (skill := self._skill_read(event)):
                     skill_reads[event.id] = skill
                 yield event
@@ -789,10 +972,21 @@ class Session:
                 if read is not None and isinstance(event, ToolResult) and not event.is_error:
                     yield SkillLoaded(read.name, count_tokens(event.output), "read")
         except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
-            self.transcript.write("turn_end", reason="interrupted")
+            self.transcript.write(
+                "turn_end",
+                turn=turn_id,
+                reason="interrupted",
+                duration_ms=round((time.monotonic() - turn_started) * 1000, 3),
+            )
             raise
         except Exception as e:  # recorded, so a failed turn can be told apart from a stopped one
-            self.transcript.write("turn_end", reason="error", error=f"{type(e).__name__}: {e}"[:1000])
+            self.transcript.write(
+                "turn_end",
+                turn=turn_id,
+                reason="error",
+                error=f"{type(e).__name__}: {e}"[:1000],
+                duration_ms=round((time.monotonic() - turn_started) * 1000, 3),
+            )
             raise
         finally:
             # If the turn was interrupted mid tool call, keep the history valid.
@@ -800,10 +994,75 @@ class Session:
             self._sync()
             self._log_world()
 
+    async def _evaluate_turn(self, prompt: str, turn_id: str, reason: str, duration_ms: float) -> None:
+        """Run observers after the trajectory is complete; failures never change its outcome."""
+        if not self.options.evaluators:
+            return
+        context = EvaluationContext(
+            session_id=self.id,
+            turn_id=turn_id,
+            prompt=prompt,
+            reason=reason,
+            working_dir=self.workspace.root,
+            messages=tuple(copy.deepcopy(self.history.messages)),
+            duration_ms=duration_ms,
+        )
+        for evaluator in self.options.evaluators:
+            name = getattr(evaluator, "__name__", type(evaluator).__name__)
+            started = time.monotonic()
+            try:
+                result = await asyncio.wait_for(
+                    _invoke_evaluator(evaluator, context), timeout=self.options.evaluator_timeout
+                )
+                if isinstance(result, Mapping):
+                    data = dict(result)
+                elif is_dataclass(result) and not isinstance(result, type):
+                    data = asdict(result)
+                else:
+                    data = {"result": result}
+                self.transcript.write(
+                    "evaluation",
+                    turn=turn_id,
+                    evaluator=name,
+                    status="ok",
+                    duration_ms=round((time.monotonic() - started) * 1000, 3),
+                    result=data,
+                )
+            except TimeoutError:
+                self.transcript.write(
+                    "evaluation",
+                    turn=turn_id,
+                    evaluator=name,
+                    status="timeout",
+                    duration_ms=round((time.monotonic() - started) * 1000, 3),
+                    timeout_seconds=self.options.evaluator_timeout,
+                )
+            except Exception as e:
+                self.transcript.write(
+                    "evaluation",
+                    turn=turn_id,
+                    evaluator=name,
+                    status="error",
+                    duration_ms=round((time.monotonic() - started) * 1000, 3),
+                    error=f"{type(e).__name__}: {e}"[:1000],
+                )
+
     def steer(self, text: str) -> None:
-        """Say something to the agent while a turn is running: it arrives as a user message
-        before the agent's next step. If the turn ends first, `take_steering()` returns it."""
+        """Queue a user message for a running turn.
+
+        Parameters
+        ----------
+        text : str
+            Message delivered before the agent's next step. It remains pending if the turn
+            ends before delivery.
+        """
         self._steering.append(text)
+
+    def record_suggestion(self, action: str, *, chars: int = 0) -> None:
+        """Record suggestion UX outcomes without saving the suggested text."""
+        if action not in ("shown", "accepted"):
+            raise ValueError("suggestion action must be 'shown' or 'accepted'")
+        self.transcript.write("suggestion", action=action, chars=chars)
 
     @property
     def pending_steering(self) -> tuple[str, ...]:
@@ -818,8 +1077,23 @@ class Session:
     # ------------------------------------------------------------------ side calls
 
     async def aside(self, question: str) -> str:
-        """Answer a side question about the conversation (the CLI's /btw) without adding it
-        to the conversation: one model call, no tools, fine while a turn is running."""
+        """Answer a side question without changing the conversation.
+
+        Parameters
+        ----------
+        question : str
+            Question about the current conversation.
+
+        Returns
+        -------
+        str
+            The model's answer, or a short explanation when a tool is required.
+
+        Raises
+        ------
+        ValueError
+            If ``question`` is empty.
+        """
         question = question.strip()
         if not question:
             raise ValueError("ask a question, e.g. /btw why this approach?")
@@ -869,16 +1143,67 @@ class Session:
         return answer.strip(), called or bool(calls)
 
     async def run_skill(self, name: str, args: str = "") -> AsyncGenerator[Event, None]:
+        """Run an installed skill as a turn.
+
+        Parameters
+        ----------
+        name : str
+            Installed skill name.
+        args : str, optional
+            Additional instructions passed to the skill.
+
+        Yields
+        ------
+        Event
+            Skill loading, model, tool, and completion events.
+
+        Raises
+        ------
+        ValueError
+            If ``name`` is not installed.
+        """
         skill = self.skills.get(name)
         if skill is None:
             available = ", ".join(s.name for s in self.skills.list()) or "(none)"
             raise ValueError(f"unknown skill {name!r}; available: {available}")
+        self._activate_skill_requirements([skill])
         prompt = build_skill_prompt(skill, args)
         yield SkillLoaded(skill.name, count_tokens(prompt), "command")
         async for event in self._turn(prompt):
             yield event
 
+    def _activate_skill_requirements(self, skills: Sequence[Skill]) -> None:
+        """Activate capabilities an explicitly invoked skill declares it cannot work without."""
+        self._register_skill_network(skills)
+        required = list(
+            dict.fromkeys(extension for skill in skills for extension in skill.required_extensions)
+        )
+        core_names = {name.casefold() for name in default_registry().names()}
+        missing = [
+            name
+            for name in required
+            if name not in self.config.extensions.enabled and name.casefold() not in core_names
+        ]
+        if not missing:
+            return
+        self.set_extensions([*self.config.extensions.enabled, *missing])
+        loaded = {extension.name for extension in self.extensions}
+        failed = [name for name in missing if name not in loaded]
+        if failed:
+            details = "; ".join(
+                f"{error.name}: {error.error}" for error in self.extension_errors if error.name in failed
+            )
+            raise ValueError(
+                f"skill requires extension(s) that could not load: {', '.join(failed)}"
+                + (f" ({details})" if details else "")
+            )
+
+    def _register_skill_network(self, skills: Sequence[Skill]) -> None:
+        for skill in skills:
+            self.gate.add_network_bundle(skill.name, tuple(skill.network_hosts))
+
     def close(self) -> None:
+        """Release proxies, logs, and temporary session data."""
         for proxy in [self.proxy, *self._extension_proxies.values()]:
             if proxy is not None:
                 proxy.close()
@@ -900,7 +1225,20 @@ class Session:
 
 
 def list_sessions(options: SessionOptions | None = None, limit: int = 20) -> list[SessionInfo]:
-    """Saved conversations that can be resumed (`SessionOptions(resume=info.id)`), newest first."""
+    """List resumable conversations from newest to oldest.
+
+    Parameters
+    ----------
+    options : SessionOptions, optional
+        Selects the session store and working directory.
+    limit : int, default=20
+        Maximum number of conversations to return.
+
+    Returns
+    -------
+    list[SessionInfo]
+        Saved conversation summaries.
+    """
     options = options or SessionOptions()
     if options.store is not None:
         return options.store.sessions(limit)
@@ -909,7 +1247,20 @@ def list_sessions(options: SessionOptions | None = None, limit: int = 20) -> lis
 
 
 async def query(prompt: str, options: SessionOptions | None = None) -> AsyncGenerator[Event, None]:
-    """Run a single prompt in a fresh session."""
+    """Run one prompt in a fresh session.
+
+    Parameters
+    ----------
+    prompt : str
+        Message to send to the agent.
+    options : SessionOptions, optional
+        Configuration for the temporary session.
+
+    Yields
+    ------
+    Event
+        Events emitted during the turn.
+    """
     session = Session(options)
     try:
         async for event in session.run(prompt):
@@ -921,7 +1272,22 @@ async def query(prompt: str, options: SessionOptions | None = None) -> AsyncGene
 async def invoke_skill(
     name: str, args: str = "", options: SessionOptions | None = None
 ) -> AsyncGenerator[Event, None]:
-    """Run a single skill in a fresh session."""
+    """Run one skill in a fresh session.
+
+    Parameters
+    ----------
+    name : str
+        Installed skill name.
+    args : str, optional
+        Additional instructions passed to the skill.
+    options : SessionOptions, optional
+        Configuration for the temporary session.
+
+    Yields
+    ------
+    Event
+        Events emitted during the skill turn.
+    """
     session = Session(options)
     try:
         async for event in session.run_skill(name, args):

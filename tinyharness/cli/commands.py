@@ -33,12 +33,13 @@ from tinyharness.cli.theme import (
     THEME_SOURCE,
     percent,
 )
-from tinyharness.cli.widgets import ask, pick
+from tinyharness.cli.widgets import PaletteItem, ask, palette, pick
 from tinyharness.config import RECENT_MODELS, forget_model, recent_models, remember_model, save_theme
 from tinyharness.paths import pretty_path
 from tinyharness.permissions import PermissionMode
+from tinyharness.sandbox import setup_hint
 from tinyharness.security import redact
-from tinyharness.session import MissingAPIKeyError
+from tinyharness.session import MissingAPIKeyError, list_sessions
 
 if TYPE_CHECKING:
     from tinyharness.cli.repl import Repl
@@ -155,6 +156,39 @@ def clear(repl: Repl, arg: str) -> None:
             f" · {dollars(meter.cost)}" if meter.cost is not None else ""
         )
         repl.console.print(f"  [muted]Session so far: {spent} (/cost for details)[/]")
+
+
+@command("/sessions", "switch conversations", group="Session", usage="[search]")
+async def sessions(repl: Repl, arg: str) -> None:
+    """Choose a saved conversation without exposing its storage id."""
+    found = list_sessions(repl.session.options, limit=50)
+    if not found:
+        repl.console.print("  [muted]No saved conversations in this project yet.[/]")
+        return
+    chosen = await palette(
+        "Switch conversation",
+        [
+            PaletteItem(
+                item.id,
+                item.title,
+                " · ".join(
+                    part
+                    for part in (
+                        f"{item.messages} messages",
+                        item.model.replace(":", " / ", 1) if item.model else "",
+                        ("active in another window" if item.active and item.id != repl.session.id else ""),
+                    )
+                    if part
+                ),
+                keywords=f"{item.id} {item.model}",
+            )
+            for item in found
+        ],
+        current=repl.session.id,
+        query=arg,
+    )
+    if chosen:
+        repl.switch_session(chosen)
 
 
 @command("/context", "show how much of the context window is used", group="Session")
@@ -279,7 +313,14 @@ async def model(repl: Repl, arg: str) -> None:
     if not spec:
         options = [(r, _model_label(repl, r)) for r in recent[:RECENT_MODELS]]
         options.append((_SEARCH, "Search all models…"))
-        spec = await pick("Choose a model", options, current) or ""
+        spec = (
+            await palette(
+                "Choose a model",
+                [PaletteItem(value, label) for value, label in options],
+                current,
+            )
+            or ""
+        )
     if spec == _SEARCH:
         spec = await _search_models(repl)
     if spec:
@@ -301,7 +342,7 @@ async def _search_models(repl: Repl) -> str:
         results = await asyncio.gather(
             *(repl.session.client_for(name).list_models() for name in keyed), return_exceptions=True
         )
-    specs: dict[str, str] = {}
+    specs: list[PaletteItem[str]] = []
     for name, result in zip(keyed, results, strict=True):
         label = cfg.providers[name].label
         if isinstance(result, BaseException):
@@ -309,20 +350,22 @@ async def _search_models(repl: Repl) -> str:
             continue
         for m in result:
             context = f" · {m.context // 1000:,}k context" if m.context else ""
-            specs[f"{name}:{m.id}"] = f"{m.label or label}{context}"
-    hint = (
-        f"type to search {len(specs):,} models"
-        if specs
-        else "provider:model, e.g. " + f"{cfg.provider}:{cfg.model}"
-    )
-    return await ask("Model", choices=list(specs), meta=specs, hint=hint)
+            spec = f"{name}:{m.id}"
+            specs.append(PaletteItem(spec, m.label or m.id, f"{label}{context}", keywords=spec))
+    if not specs:
+        return await ask("Model", hint="provider:model, e.g. " + f"{cfg.provider}:{cfg.model}")
+    return await palette("Choose a model", specs, current=f"{cfg.provider}:{cfg.model}") or ""
 
 
 @command("/provider", "pick a provider (uses its default model)", group="Model", usage="[name]")
 async def provider(repl: Repl, arg: str) -> None:
     repl.session.reload_keys()
     cfg = repl.session.config
-    name = arg or await pick("Choose a provider", _provider_options(repl), cfg.provider)
+    name = arg or await palette(
+        "Choose a provider",
+        [PaletteItem(value, label) for value, label in _provider_options(repl)],
+        cfg.provider,
+    )
     if name:
         await _switch(repl, f"{name}:")
 
@@ -379,7 +422,7 @@ async def _ask_for_key(repl: Repl, info: Provider) -> bool:
     return True
 
 
-@command("/key", "add or replace a provider's API key", group="Model", usage="[provider]")
+@command("/key", "add or replace a provider key saved in auth.json", group="Model", usage="[provider]")
 async def key(repl: Repl, arg: str) -> None:
     session = repl.session
     session.reload_keys()
@@ -392,7 +435,13 @@ async def key(repl: Repl, arg: str) -> None:
         return
     info = cfg.providers[name]
     if cfg.has_key(name):
-        repl.console.print(f"  [muted]{info.label} has a key; a new one replaces it.[/]")
+        if info.api_key_source in ("environment", ".env"):
+            repl.console.print(
+                f"  [muted]{info.label} uses a key from {info.api_key_source}; auth.json can "
+                "store a fallback but cannot override it.[/]"
+            )
+        else:
+            repl.console.print(f"  [muted]{info.label} has a saved key; a new one replaces it.[/]")
     check = await add_key(repl.console, info, cfg.providers)
     if check is None:
         repl.console.print("  [muted]No change.[/]")
@@ -400,7 +449,9 @@ async def key(repl: Repl, arg: str) -> None:
     session.reload_keys()
     if name == cfg.provider:  # the running client has the old key: reconnect (conversation kept)
         session.set_model(f"{cfg.provider}:{cfg.model}")
-    if check.ok:
+    if info.api_key_source != "auth.json":
+        _ok(repl, f"Saved {info.label} fallback; still using {info.api_key_source}.")
+    elif check.ok:
         _ok(repl, f"{info.label} is ready.")
     else:
         repl.console.print(f"  [warn]Saved, but couldn't confirm it works ({escape(check.message)}).[/]")
@@ -410,6 +461,12 @@ async def key(repl: Repl, arg: str) -> None:
 def whoami(repl: Repl, arg: str) -> None:
     session, cfg = repl.session, repl.session.config
     table = _grid()
+    key_source = {
+        "environment": f"environment (${cfg.api_key_env})",
+        ".env": "development .env",
+        "auth.json": "~/.tinyharness/auth.json",
+        "SDK override": "SessionOptions(api_key=...)",
+    }.get(cfg.api_key_source, cfg.api_key_source)
     for label, value in [
         ("provider", f"{cfg.provider_info.label} ({cfg.provider})"),
         ("api", f"{cfg.provider_info.api} · {session.llm.endpoint}"),
@@ -418,11 +475,7 @@ def whoami(repl: Repl, arg: str) -> None:
         ("effort", cfg.effort or "model default"),
         (
             "key from",
-            "api_key (config)"
-            if cfg.api_key
-            else f"${cfg.api_key_env}"
-            if cfg.api_key_env
-            else "(none needed)",
+            key_source or ("(none needed)" if not cfg.api_key_env else "(not set)"),
         ),
         ("key", redact(cfg.resolve_api_key())),
     ]:
@@ -550,17 +603,20 @@ def sandbox(repl: Repl, arg: str) -> None:
     session = repl.session
     if session.sandbox is None:
         repl.console.print("  [warn]No sandbox[/] [muted]· every command asks before it runs[/]")
+        repl.console.print(f"  [muted]Setup: {setup_hint()}.[/]")
         return
     policy = session.sandbox_policy
     table = _grid(12)
     table.add_row("  [bold default]writes[/]", ", ".join(pretty_path(p) for p in policy.write_roots[:4]))
     table.add_row("  [bold default]reads[/]", "anything except credential files (.env, keys, auth.json)")
-    network = ", ".join(session.proxy.allowed) if session.proxy is not None else "none"
+    network = ", ".join(policy.allowed_hosts) or "none"
     table.add_row("  [bold default]network[/]", network)
+    if session.session_network_hosts:
+        table.add_row("  [bold default]session network[/]", ", ".join(session.session_network_hosts))
     repl.console.print(table)
     repl.console.print(
-        "  [muted]Anything else asks first (sandbox=false). Change the hosts with \\[sandbox] "
-        "allow_hosts in config.toml.[/]"
+        "  [muted]Bash cannot disable containment. Allow a blocked exact host once or for the "
+        "session; session approvals carry forward. Stable hosts: \\[sandbox] allow_hosts.[/]"
     )
     if session.ctx.outside:
         repl.console.print(
@@ -638,8 +694,8 @@ def extensions(repl: Repl, arg: str) -> None:
         repl.console.print("  [muted]No extensions. Add one at[/] ~/.tinyharness/extensions/<name>.py")
 
 
-@command("/skills", "list skills", group="Tools & skills")
-def skills(repl: Repl, arg: str) -> None:
+@command("/skills", "find and choose a skill", group="Tools & skills", usage="[search]")
+async def skills(repl: Repl, arg: str) -> None:
     found = repl.session.skills.list()
     if not found:
         repl.console.print(
@@ -647,7 +703,17 @@ def skills(repl: Repl, arg: str) -> None:
             "[muted]or run[/] tinyharness --import-skills"
         )
         return
-    table = _grid()
-    for skill in found:
-        table.add_row(f"  [bold default]/{skill.name}[/]", _short(skill.description))
-    repl.console.print(table)
+    chosen = await palette(
+        "Choose a skill",
+        [
+            PaletteItem(skill.name, f"/{skill.name}", _short(skill.description), skill.description)
+            for skill in found
+        ],
+        query=arg,
+        mark_current=False,
+    )
+    if chosen:
+        repl._draft = f"/{chosen} "
+        repl.console.print(
+            f"  [muted]Ready: add what you want [bold]/{chosen}[/] to do, then press Enter.[/]"
+        )

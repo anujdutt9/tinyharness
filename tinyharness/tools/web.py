@@ -348,8 +348,9 @@ class WebSearchTool(Tool[WebSearchInput]):
     def outside_source(self, args: WebSearchInput) -> str | None:
         return "WebSearch results"
 
-    def __init__(self, llm: Callable[[], LLMClient]) -> None:
+    def __init__(self, llm: Callable[[], LLMClient], model: Callable[[], str] | None = None) -> None:
         self.llm = llm  # the current client: the model can change during a session
+        self.model = model
 
     def describe(self, args: WebSearchInput) -> str:
         return f"WebSearch({args.query})"
@@ -358,7 +359,13 @@ class WebSearchTool(Tool[WebSearchInput]):
         llm = self.llm()
         if not llm.supports_web_search:
             raise ToolError(self.unsupported.format(provider=llm.provider.label))
-        answer = await llm.one_shot_small(SEARCH_PROMPT.format(query=args.query), web_search=True)
+        role = self.model() if self.model is not None else None
+        prompt = SEARCH_PROMPT.format(query=args.query)
+        answer = (
+            await llm.one_shot_small(prompt, web_search=True, model=role)
+            if role
+            else await llm.one_shot_small(prompt, web_search=True)
+        )
         if not answer.strip():
             raise ToolError("the search returned nothing")
         return f"Search results for {args.query!r}\n{UNTRUSTED}\n\n{answer.strip()}"

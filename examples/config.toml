@@ -1,6 +1,8 @@
 # tinyharness config. Copy to ~/.tinyharness/config.toml.
 # Every key is optional. API keys never go here: add them with `/key <provider>` (stored in
-# ~/.tinyharness/auth.json, readable only by you) or set them in your shell.
+# ~/.tinyharness/auth.json, readable only by you), set them in your shell, or use a
+# checkout-local .env while developing tinyharness. Resolution order is SDK override,
+# process environment, development .env, then auth.json.
 #
 # Plain keys come first and [tables] last: in TOML, every key after a [table] header
 # belongs to that table.
@@ -14,6 +16,14 @@
 # effort = "high"                      # low | medium | high | max; default: the model's own
 # request_timeout = 1800               # seconds per model call
 # request_retries = 3                  # on 429/5xx (honoring Retry-After) or a refused connection
+
+# Background jobs can use distinct models from the active provider. Use bare model IDs,
+# not provider:model specifications. Unset classifier/search roles use the provider's
+# legacy small_model; compaction falls back to compaction_model, then the active model.
+# [models.roles]
+# safety_classifier = "claude-haiku-4-5"
+# search_digest = "claude-haiku-4-5"
+# compaction = "claude-sonnet-5"
 
 # --- Workspace & permissions -------------------------------------------------
 # working_dir = "~/code/project"       # default: the directory you launch from
@@ -63,20 +73,22 @@
 # deny = ["Edit(*.lock)", "Read(*/secrets/*)"]
 
 # --- Sandbox ------------------------------------------------------------------
-# Bash commands run in an OS sandbox (macOS: Seatbelt): they write only to the project,
-# scratch and temp dirs, can't read credential files, and reach only the allowed hosts,
-# through a local proxy. Sandboxed commands run without asking in default and auto
-# modes; a command run outside the sandbox (sandbox=false) asks every time. /sandbox
-# shows the limits.
+# Bash commands run in an OS sandbox (native Seatbelt on macOS; optional Anthropic
+# Sandbox Runtime on Linux, Windows and as a fallback): they write only to the project
+# and private scratch/cache dirs, can't read credential files, and reach only allowed
+# hosts. A blocked exact host can be approved without removing containment. /sandbox
+# shows the active backend and limits.
 # [sandbox]
 # enabled = true
+# required = false                    # true: fail startup if no sandbox backend is active
 # allow_write = ["~/code/other-repo"]  # more writable dirs (protected like the project)
 # allow_localhost = false              # true: tests may start and reach local servers
 # allow_hosts = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com",
-#                "*.github.com", "*.githubusercontent.com", "cdn.jsdelivr.net"]  # [] = no network
+#                "*.github.com", "*.githubusercontent.com"]  # [] = no network
 
 # --- Extensions ---------------------------------------------------------------
-# Built-in: web (WebSearch, WebFetch), pdf, open, todo, agents (Agent, Team). Your own go
+# Built-in: web (WebSearch, WebFetch), pdf, todo, agents (Agent, Team). Open is a core
+# tool and needs no extension. Your own extensions go
 # in ~/.tinyharness/extensions/<name>.py (docs/extension-api.md). Off unless listed;
 # /extensions shows what each adds to every request, /extensions on <name> for a session.
 # [extensions]

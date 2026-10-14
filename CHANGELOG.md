@@ -5,9 +5,163 @@ All notable changes to tinyharness. The format follows
 [semantic versioning](https://semver.org/): while on 0.x, minor versions may break
 the SDK, and every break is listed here.
 
-## 0.1.0 (unreleased)
+## Unreleased
+
+### Fixed
+- Native Windows CI now isolates each test's home directory, accepts portable permission
+  rules and diagnostics, stops timed-out hook process trees, and does not apply POSIX-only
+  terminal or file-mode assertions.
+  Sandbox Runtime keeps its Linux control sockets in a short system temp path while each
+  sandboxed command still receives its private session temp directory.
+- Windows in-process file reads and writes now reject reparse-point swaps after approval;
+  directory handles keep every checked parent from being replaced until the operation ends.
+- Software-acquisition approval now covers shell conditionals, wrapper options such as
+  `env -u` and `env -S`, and versioned `pip` commands. Absolute Python package installers
+  are rebound at their parsed invocation—not an earlier textual match—to the writable
+  environment named by the approval, while fresh-environment bootstrapping stays separate.
+- After outside content enters a conversation, sandboxed Bash asks before running whenever
+  its network policy has an outbound destination; an allowlist limits destinations but is
+  not treated as consent to transmit project data.
+- Windows-style paths now receive the same case-insensitive credential-file protection as
+  POSIX paths. Replies stopped at their output limit cannot execute any tool call, even when
+  one call looks complete. Software-acquisition approval now recognizes newline-separated
+  commands, common Python/package-manager options, and dependency scripts after `cd`.
+- Context, output tokens and cost now update with lightweight estimates while a model is
+  streaming, then reconcile to the provider's exact usage when each response completes.
+  The locally tokenized next-request context remains visibly approximate while exact output
+  and cost totals retain their provider-reported values.
+- Sandboxed test suites can read credential-shaped fixtures created beneath the session's
+  private temporary directory without exposing real credentials. Commands that need a local
+  test, preview or development server can request the scoped `localhost` capability while
+  remaining sandboxed, and a denied loopback bind now explains that recovery path.
+- Git diff previews color additions green and removals red, including `--stat` graphs,
+  without accepting terminal control sequences from command output.
+- Sequential tool rows now measure execution time rather than time spent queued behind
+  another tool, and source output containing timeout-related text no longer creates a
+  false timeout.
+- Software-acquisition approvals are bound to the complete shell command, including every
+  chained install. Combined shell flags such as `bash -lc` and `uv run --with` dependencies
+  can no longer bypass the approval boundary.
+- Sandbox Runtime now augments its existing home-directory protections by translating the
+  shared credential policy across the project and sibling repositories. Real Linux SRT tests
+  cover write confinement, project and sibling credentials, and blocked network access.
+- Publishing waits for the same lint, type, platform-matrix, minimum-dependency, package,
+  and real Linux Sandbox Runtime checks as ordinary CI.
+
+## 0.1.0 (2026-10-13)
 
 First release.
+
+Release validation is summarized in
+[`docs/releases/v0.1.0-smoke.md`](docs/releases/v0.1.0-smoke.md). Raw session traces are
+intentionally excluded because they can contain prompts, filesystem paths and project context.
+
+### Added
+- The core Open tool now presents files and URLs as typed, clickable artifacts
+  inside tinyharness by default. Launching a browser or host application remains a separate,
+  explicit mode that always crosses the permission boundary.
+- Todo tasks now have stable IDs across updates and resumed sessions, plus blocked and
+  cancelled states and a short result field for completion evidence or blockers.
+- Memory changes now have a private append-only audit ledger with stable IDs, timestamps,
+  source session/turn, outside-content provenance, and `/memory history`. The small Markdown
+  snapshot remains the only memory content loaded into model context.
+- `/sessions` opens a searchable conversation switcher inside the running CLI. The same
+  searchable picker is used for models, providers and skills; choosing a skill prepares its
+  slash command so arguments can be added before it runs. Session logs use an OS-held lock,
+  preventing two tinyharness windows from writing the same conversation at once.
+- Explicit software acquisition through common package managers, tool launchers, bootstrap
+  scripts, browser runtimes, model downloaders and container clients now asks before downloading
+  or executing new code, even inside the sandbox or `bypassPermissions`. The exact acquisition can be
+  allowed for the session; using an already-installed executable does not ask again.
+  `uv run` also asks when its target is a PEP 723 script that declares dependencies; ordinary
+  installed commands such as `uv run pytest`, `--offline`, and `--no-sync` stay quiet.
+  Network-host approval stays separate, while plan mode continues to block acquisition.
+- Approved bare Python installs reuse an active writable virtualenv or Conda environment.
+  When the launcher environment is outside the sandbox or none exists, tinyharness creates
+  and uses `.venv` in the project instead of modifying a global or harness environment.
+- Linux and Windows can use Anthropic's optional Sandbox Runtime as the same filesystem
+  and network policy backend; native Seatbelt remains preferred on macOS. No new Python
+  dependency is installed, and `/sandbox` gives platform-specific setup help when none is active.
+- `[sandbox] required = true` now fails closed at session startup when no supported
+  sandbox is active, so unattended runs cannot approve an unsandboxed fallback.
+- Session JSONL records now use trace schema 1 and carry session, turn, agent, model-call,
+  routing-decision and tool-call IDs plus the harness version. Main-loop model calls and
+  permission, tool, compaction and total-turn latency are recorded for evaluation.
+- Background model policies can now be set independently under `[models.roles]` for the
+  safety classifier, search digest and compaction. Lead and subagent compaction use the
+  same resolution; provider `small_model` and `compaction_model` remain compatibility fallbacks.
+- SDK sessions accept post-turn `evaluators`; each gets a deep-copied trajectory and its
+  result, error or timeout is appended to the trace without changing the completed task.
+  `examples/09_evaluator.py` shows the complete observer flow.
+
+### Changed
+- Resuming no longer requires remembering an opaque session id: `-r` opens a title-based
+  picker with recency, message count and model, while `-r words` searches conversation titles.
+  Exact ids remain supported for automation.
+- A blocked proxy-aware download now returns a structured failure with the exact destination.
+  Bash may request that one host; the user can allow it once or for the session while the
+  command remains sandboxed. Broad redirect hosts are not trusted by default.
+- Shell commands run fail-fast, including pipelines, so a denied or failed intermediate
+  step cannot silently continue and consume a stale artifact.
+- Bash containment is selected entirely by the harness; its tool schema exposes no
+  containment control. Permission modes, allow rules and allow hooks cannot silently
+  cross a missing-sandbox or host-app boundary.
+- Sandboxed commands now use a per-session temporary directory and a private tinyharness
+  cache, including explicit locations for Playwright and other common package/model
+  installers, instead of inheriting broad system temporary directories.
+- API keys now go through one resolver with visible provenance: SDK override, process
+  environment, development `.env`, then `auth.json`. Saved and dotenv keys are no longer
+  copied into `os.environ`, and `/whoami` reports the selected source.
+- Public SDK and extension examples now use concise numpydoc documentation. Function
+  tools read their input descriptions from numpydoc `Parameters` sections while keeping
+  the earlier compact form compatible.
+- Code comments and documentation now explain tinyharness behavior directly, without
+  relying on comparisons to other agent products or their implementations.
+- Credential-based provider fallback is now named `credential_selected` internally;
+  `auto_selected` remains a compatibility alias and no longer occupies future routing terminology.
+- Prompt-suggestion shown/accepted events are recorded without their text so the default
+  model call can be evaluated before changing its behavior.
+- Removed the obsolete compaction implementation plan; the current design remains in the
+  feature documentation and `agent/compaction.py` rationale.
+
+### Fixed
+- PEP 723 scripts launched after a shell directory change can no longer bypass the
+  software-acquisition approval when their path cannot be inspected before execution.
+- Resuming a conversation now restores the optional extensions required by skills already
+  loaded into its context, and migrates older saved todo lists to stable task IDs.
+- Memory audit entries after `/clear` now carry the new conversation's session ID rather than
+  the cleared conversation's ID.
+- Exact network destinations approved for a session now accumulate in the sandbox policy,
+  not only in the permission prompt state. Multi-host clients such as market-data libraries
+  can continue across redirects and service hosts without disabling containment or losing
+  earlier approvals; one-command approvals remain limited to that command. An invoked skill
+  can declare a finite `requires-network` set, letting the user review and approve all of its
+  exact destinations once for the session instead of discovering them through repeated failures.
+- Invoked skills can declare `requires-extensions` in their frontmatter. tinyharness turns
+  those capabilities on for the session before the first model call, so a multi-agent skill
+  receives `Agent`/`Team` instead of silently collapsing isolated roles into the main context.
+- Indirect PEP 723 launches such as `uv run $SKILL_DIR/scripts/tool.py` no longer bypass the
+  software-acquisition prompt merely because the harness cannot resolve the shell variable.
+- Reading an artifact is no longer described to the model as showing it to the user. Requests
+  to show or open a result use the Open capability when available, or get an honest fallback.
+- Memory writes now require an explicit `user` or `project` scope, and the tool and
+  `/memory` explain when a durable fact belongs in memory versus a user `AGENTS.md` or
+  shared project `AGENTS.md`.
+- Per-project memory, session logs, sidechains and scratch files now live under a readable,
+  collision-resistant directory such as `projects/tinyharness-8f31c2a4d6e709ab/`, rather
+  than a directory containing the machine's full absolute path. Existing state is migrated
+  automatically on first use.
+- The distribution smoke test now checks the source version's wheel instead of silently
+  selecting a stale, higher-version artifact left in `dist/`.
+- Recognizable destructive commands (`rm`, `find -delete`, `git reset --hard`, and `git
+  clean -f`) require one-time explicit approval in auto mode while routine sandboxed work
+  remains uninterrupted.
+- Context compaction now resumes from an execution-state checkpoint instead of repeating
+  the original request as the newest user instruction. Completed tool, Agent, and Team
+  work is explicitly marked not to repeat, preventing long tasks from restarting after a
+  summary while preserving compatibility with older saved sessions.
+- Back-to-back permission questions no longer hang when tinyharness runs in a dumb or
+  redirected terminal: the input box now releases the actual fallback application.
 
 ### CLI
 - Interactive coding agent with streamed Markdown, live tool status, `/` command
@@ -53,8 +207,8 @@ First release.
   tools, even while the agent works; neither question nor answer joins the conversation.
   The answer shows above the input box until Esc closes it; `/output` prints it.
   It reuses the agent's cached prefix (one short call). SDK: `Session.aside()`.
-- After each turn the empty input box suggests your likely next message (Tab takes it), as
-  Claude Code does: one short call per turn, mostly cache reads. `prompt_suggestions =
+- After each turn the empty input box suggests your likely next message (Tab takes it):
+  one short call per turn, mostly cache reads. `prompt_suggestions =
   false` turns it off. SDK: `Session.suggest_next()`.
 - `ctrl+t` after a turn shows its hidden reasoning once, not again on every press.
 - Images: the model can see them. `Read` shows it a PNG, JPEG, GIF or WebP (a
@@ -63,10 +217,10 @@ First release.
   it. Sent as each provider takes them: inside tool results for Anthropic, in a message
   right after them for the others. Shrunk to fit (see below). SDK: `session.run(prompt, images)`,
   `tools.read.load_image`, and `ToolOutput` for tools that return pictures.
-- Checking a page by looking: the model renders it with Playwright through Bash (outside
-  the sandbox, since pages load scripts and fonts from the network) and Reads the PNG,
-  as in other harnesses. Pages use CDN links as usual. (Google Chrome.app can't start in
-  the sandbox; a Bash attempt now says so instead of just "Abort trap: 6".)
+- Checking a page by looking: the model renders it with a headless browser through
+  sandboxed Bash and Reads the PNG. Browser and package caches remain private; redirected
+  download hosts need exact, visible approval. Desktop Chrome remains a host application
+  and is not a sandbox workaround.
 - A running subagent shows its last few tool calls under it (outcome, first line of the
   result, time) with a count of earlier ones, so you can tell progress from going in
   circles; `ctrl+o` while one runs shows all its calls so far. Pasting a file path at
@@ -91,8 +245,8 @@ First release.
   and other apps (`open`, `osascript`, browsers) can't be reached, so it stops probing
   for them: `osascript` hangs until the timeout rather than failing.
 - The TodoWrite checklist is off by default: current models keep track of multi-step work
-  without one, and keeping it up costs steps and tokens (Claude Code dropped its todo
-  tools from Opus 4.8 on). Turn it on with `todo_list = true`, `TINYHARNESS_TODO_LIST=1`
+  without one, and keeping it up costs steps and tokens. Turn it on with
+  `todo_list = true`, `TINYHARNESS_TODO_LIST=1`
   or the SDK's `SessionOptions(todo_list=True)`, e.g. for smaller or older models or to
   watch a live plan. When on, it asks for a few coarse steps that match how the work is
   done, skips simple work, and lets one call finish several steps. Subagents never get
@@ -110,9 +264,9 @@ First release.
   covers the others on it. Reading a folder outside the project was one question per tool.
 - The auto-mode classifier sees only your messages and the agent's tool calls: no tool
   output, no agent text, no teammates' messages. A page or file saying "the user
-  approved this" can no longer argue for an action (Claude Code's auto mode does the same).
-- `AGENTS.md` is read as project instructions too (the name Codex, Cursor, Amp and Gemini
-  CLI use), next to `AGENT.md` and `CLAUDE.md`. When a project has none, the model is told,
+  approved this" can no longer argue for an action.
+- `AGENTS.md` is the single instruction filename at the system, user, project and local levels.
+  When a project has none, the model is told,
   so it doesn't go looking. Reading a file that isn't there shows a quiet `not found`, not
   a red error.
 - The turn summary counts subagents' and teammates' tool calls too: `128 tools (111 by 4
@@ -120,25 +274,35 @@ First release.
 - A project's tests can read back the fake `auth.json` and `.env` files they make in
   pytest's temp folder when run in the sandbox; those names stay unreadable everywhere
   else. tinyharness's own test suite now passes when the agent runs it.
-- The Bash tool states the sandbox's limits in three sentences (writes, credentials and
-  API keys, network, apps) and that a command needing any of them runs with
-  sandbox=false. A sandboxed failure that looks like one of them gets one short note; the
-  advice notes for servers (wrong whenever localhost is allowed) and apps are gone.
+- The Bash tool states the sandbox's limits directly: writable roots, credentials and API
+  keys, network destinations, and host applications. A blocked operation gets one short,
+  actionable note.
 - Images are shrunk to at most 2000 px a side (and 5 MB) before the model sees them: pasted
   screenshots and images the agent reads. A Retina screenshot used to go in at full size,
-  and once a request had several images, Claude rejected it and every request after it. If a provider still
+  and once a request had several images, the provider rejected it and every request after it. If a provider still
   rejects an image, the images in the conversation are shrunk further (or dropped, with a
   note) and the request is retried once. Adds Pillow as a dependency.
-- `/clear` starts a new conversation, as in Claude Code: the old one stays saved as it was
+- `/clear` starts a new conversation: the old one stays saved as it was
   (`tinyharness -r` picks it). It used to be emptied in place, so `-c` right after a
   `/clear` failed with "has nothing to resume". `-c` and the `-r` list now also skip
   conversations emptied that way.
 - A message you send while the agent works is listed above the input (`• Sent after the
-  agent's current step (esc: stop it and send now)`, as Codex shows it): wait, and it
+  agent's current step (esc: stop it and send now)`): wait, and it
   goes in after the current step; press Esc, and the step stops and your message goes
   in right away. When it reaches the agent, `↳ delivered to the agent: …` says so. SDK:
   `MessageDelivered` events and `Session.pending_steering`.
-- Subagents that can write run side by side too: Team teammates (up to 4) and several
+- `send_ids = true` on a provider sends who is calling with every request: X-Session-ID,
+  X-Agent-ID, X-Parent-Agent-ID, X-Agent-Role, X-Agent-Name and X-Task (from `TH_TASK`),
+  so a gateway of your own can admit, queue and attribute per session and per agent.
+  Each subagent gets its own id (its parent's as X-Parent-Agent-ID), also when several run
+  at once. Off by default. SDK: `tinyharness.llm.identity`.
+- One ceiling on subagents running at once: `max_parallel_agents`
+  (default 20; `TINYHARNESS_MAX_PARALLEL_AGENTS`), shared by Agent calls and Team
+  teammates. The model decides the team's size (the Team tool suggests 3-5); past the
+  ceiling an Agent call fails so the model can wait, and Team tasks wait their turn.
+  A Team takes up to 20 tasks (was 12) and no longer stops at 4 teammates at once.
+  SDK: `AgentSlots`; `run_team(..., slots=)` replaces `max_parallel=`.
+- Subagents that can write run side by side too: Team teammates and several
   Agent calls in one reply. Only their calls that change things (Bash, Edit, Write) take
   turns, on one lock per session, so two never write at once; their model calls overlap.
   A team of writers used to run one whole agent at a time. SDK: `Tool.runs_alongside`,
@@ -241,8 +405,8 @@ First release.
 
 ### Permission modes
 - `default` no longer asks for routine work: reads, edits inside the project and
-  sandboxed commands run; anything that leaves that boundary (another folder,
-  `sandbox=false`, a network tool) asks. The new `ask` mode asks before every edit and
+  sandboxed commands run; operations in another folder and network tools ask. The new
+  `ask` mode asks before every edit and
   command, as `default` used to. `acceptEdits` still works and means `default`.
   Shift+Tab cycles `default` → `auto` → `plan` → `ask`. Reading a public web page (a URL
   without a query string) doesn't ask in `default` either, as in `auto`.
@@ -263,8 +427,8 @@ First release.
   `user_prompt`, `tool_call`, `tool_result` and `turn_end` (the same bus as `hooks.toml`).
   Turned on in `[extensions] enabled = [...]` or with `/extensions on|off`, which lists
   each one's tokens per request. See docs/extension-api.md.
-- The core is six tools: Read, Write, Edit, Glob, Grep, Bash. Web, Pdf, Open and TodoWrite
-  are built-in extensions (`web`, `pdf`, `open`, `todo`), off until turned on, so a session
+- The core is seven tools: Read, Write, Edit, Glob, Grep, Bash and Open. Web, Pdf and TodoWrite
+  are built-in extensions (`web`, `pdf`, `todo`), off until turned on, so a session
   that doesn't use them doesn't send their schemas with every request.
 - Memory across sessions, the `memory` extension (off until turned on): the agent keeps
   short notes about you (`~/.tinyharness/memory.md`, every project) and about the project
@@ -279,7 +443,7 @@ First release.
   (`th.run_agent`), with their briefing guidance as its prompt section.
 - The core system prompt is about 670 tokens (was about 2,300): how to work, safety, pages,
   harness notes and answering. With no extensions on, the whole prefix is about 2.9k tokens
-  before your AGENT.md and skills (was about 7k).
+  before your AGENTS.md and skills (was about 7k).
 
 ### Reports and pages
 - Pages are written as models write them elsewhere, CDN links included: no offline
@@ -291,8 +455,8 @@ First release.
   (teammates) were dropped. They pushed models into costly teams and double work.
 
 ### Project instructions
-- AGENTS.md (and AGENT.md, CLAUDE.md) are read from the repository's root down to the
-  folder tinyharness runs in, as Codex does: launching in `src/` still gets the repo's
+- AGENTS.md files are read from the repository's root down to the
+  folder tinyharness runs in: launching in `src/` still gets the repo's
   rules, and a subfolder's file refines them. Outside a git repository only the working
   directory counts, so a file in a parent folder doesn't apply everywhere.
 
@@ -310,8 +474,8 @@ First release.
   `docs/features.md` and `docs/configuration.md`.
 
 ### Reliability
-From an audit of 157 real sessions across 9 models, the code, and how opencode, pi,
-Codex and deepseek-harness handle the same things. Each item has a regression test.
+From an audit of 157 real sessions across 9 models and the code. Each item has a
+regression test.
 - Every reply has one of a shared set of outcomes (`stop`, `tool_calls`, `length`,
   `filtered`, `refused`, `paused`), normalized from each API's own words. A reply cut off
   at the output limit is continued instead of taken as the answer; a tool call cut off
@@ -325,7 +489,7 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   can cut inside one long task, repeats the request word for word, and sees the tool
   calls, files changed, todo list and any earlier summary in full. Old tool calls' long
   arguments are trimmed like old results.
-- Tool calls written as text (Hermes JSON, Qwen3-Coder XML, Gemma 4's own format) are
+- Tool calls written as text (JSON and XML forms, including model-specific variants) are
   recovered when they name a real tool (Gemma's raw `<|"|>` strings included, multi-line
   commands with quotes and all); a reply ending in a call that can't be used (a made-up
   tool, unreadable arguments, or a call's bare JSON with no tags) is answered with what went wrong instead of ending the turn; malformed arguments are repaired (a code fence, double encoding, two
@@ -360,7 +524,7 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   `SessionOptions(resume=...)`; `list_sessions()` lists them. The session log lives
   under `.tinyharness/`, which sandboxed commands can't write to.
 - On resume the harness checks what changed while the session was away: files the
-  agent read (content hashes), git HEAD or branch, and AGENT.md. Old contents of
+  agent read (content hashes), git HEAD or branch, and AGENTS.md. Old contents of
   changed files are replaced by a stub, the agent must read them again before editing,
   the model is told once what changed, and tool calls with no recorded result are
   flagged as maybe run. The system prompt is rebuilt; the conversation's model is kept
@@ -377,12 +541,33 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   includes providers that stream it only as `reasoning` (Groq, vLLM, Ollama).
 - Models, context windows and capabilities come from each provider's model list.
 - Models are checked before switching; context overflows are compacted and retried.
-- Old tool output (results over 6k tokens) is cleared in batches, not one result per
-  turn, so the prompt cache survives. While the cache is warm, output is only cleared
-  once the history passes 60% of the context window, and at least 20k tokens at a
-  time. After 5 idle minutes, when the cache has expired anyway, it's cleared freely.
-  The last 40k tokens of tool output are kept, and so are skill reads, `Agent` and `Team`
-  results.
+- Old tool output is cleared in batches, not one result per turn, so the prompt cache
+  survives. While the cache is warm, output is only cleared once the history passes 75%
+  of the room before a summary, and only when that frees enough (15% of it, at most 20k
+  tokens). Results under 3.6% of it (at most 6k tokens) are left alone. On a 64k window
+  that clears 1-2k-token results before a summary is needed; before, it never did. After 5 idle minutes, when the cache has expired anyway, it's cleared freely.
+  The most recent tool output is kept (30% of the usable window, at most 40k tokens), and
+  so are skill reads, `Agent` and `Team` results.
+- Compaction sizes its limits from each model's window, so a 64k model gets them too: the
+  protected tool output above, and the largest single message (half the usable window,
+  at most 16k tokens). An oversized message keeps its start and its end (where a test
+  run's result is), and trimmed output is saved to a file in the session's scratch space,
+  named in its place, for the model to Read back instead of running the tool again.
+- Requests ask for the output room compaction keeps for the reply (the model's output
+  limit, at most 32k tokens or half the window) when the model list or config gives that
+  limit; summaries ask for at most 8,192 tokens. After a context overflow, the summary
+  keeps only the last ~2k tokens word for word, so the retry fits.
+- Without `compaction_model`, a subagent's summaries are written on its own model; one on
+  another model of the session's provider used the session's model.
+- A subagent's transcript (`sidechains/`) records the session, agent id and parent that started
+  it, so it can be matched to its session when several run at once.
+- `auto` mode's permission classifier sends its calls as role `classifier` (`X-Agent-Role`), as
+  summaries are `compaction`, so a gateway can tell them from the agent's turns.
+- A Team saves every member's result to a file and names it, short ones too, so a lead
+  never goes looking for a file that isn't there.
+- A model's tokenizer (`tokenizer` in a `models` entry) is read from the local Hugging Face
+  cache once downloaded: no request to the Hub, and no warning about unauthenticated
+  requests, on every session.
 - WebSearch runs on the provider's `small_model`, as the auto-mode classifier already
   did. If the small model can't take a request (no search tool, rate limited), the main
   model answers instead. Compaction summaries stay on the main model: a weak summary
@@ -492,9 +677,8 @@ Codex and deepseek-harness handle the same things. Each item has a regression te
   for loopback); no `open`/AppleScript; `.git/hooks`, `.git/config` and `.tinyharness/`
   are read-only. Package managers get their own cache. Where no sandbox is available,
   every command asks. `[sandbox]` in the config adds writable dirs or turns it off.
-- A command can ask to run outside the sandbox (`sandbox=false`, e.g. to install a
-  package). That always asks, whatever the mode or allow rules; only
-  `bypassPermissions` or a hook can approve it, and "don't ask again" isn't offered.
+- Bash containment is harness-owned. Dependency hosts and additional writable roots are
+  explicit configuration; host application actions use structured tools and ask.
 - The `general-purpose` subagent can run commands (`Bash`).
 - Subagents run in the session's permission mode and follow it live: switching to
   auto mid-run reaches subagents already running (so does "allow all edits" at a

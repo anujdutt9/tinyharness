@@ -1,7 +1,7 @@
 # AGENTS.md
 
 tinyharness: a small, readable LLM agent harness (CLI + Python SDK) for coding and
-general agent work, on any major provider. Read by Codex, Claude Code and tinyharness
+general agent work, on any major provider. Read by development agents and tinyharness
 itself. Every line here should change what you do.
 
 ## Commands
@@ -52,8 +52,10 @@ Each was a real failure; each has tests. A change that weakens one needs a reaso
 - Every user-visible change gets a line in `CHANGELOG.md`, written for users.
 - Comments say why, in plain words, matching the surrounding density. No new
   dependencies without asking.
-- Compare with how opencode, pi, Codex or Claude Code do it (read their source) before
-  inventing a new approach; say what you borrowed.
+- Public classes and functions use concise numpydoc docstrings. Keep obvious private
+  helpers to a one-line summary; add sections only when they convey useful information.
+- Check established implementations and relevant standards before inventing a new
+  approach; record the rationale that matters to tinyharness.
 - Verify with a real model before calling an agent-behavior change done: the test suite
   uses scripted models and can't show how a real one reacts.
 

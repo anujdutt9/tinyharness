@@ -17,7 +17,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from tinyharness import __version__
+from tinyharness import SessionInfo, __version__
 from tinyharness.agent.history import Message
 from tinyharness.cli import pip
 from tinyharness.cli.render import Renderer
@@ -47,7 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="resume the latest conversation here",
     )
     p.add_argument(
-        "-r", "--resume", nargs="?", const="", metavar="ID", help="resume a conversation (picker if no ID)"
+        "-r",
+        "--resume",
+        nargs="?",
+        const="",
+        metavar="SEARCH",
+        help="choose a conversation by title, or search its title",
     )
     p.add_argument("--cwd", type=Path, help="working directory (default: current directory)")
     p.add_argument("--config", type=Path, help="config file (default: ~/.tinyharness/config.toml)")
@@ -228,7 +233,7 @@ async def run(args: argparse.Namespace, console: Console) -> None:
     if interactive:
         options = await confirm_trust(options, console)
     if args.resume_latest or args.resume is not None:
-        which = "latest" if args.resume_latest else args.resume or await pick_session(options, console)
+        which = "latest" if args.resume_latest else await pick_session(options, console, args.resume or "")
         if which is None:
             return
         options = replace(options, resume=which)
@@ -342,14 +347,49 @@ async def confirm_needs(session: Session, console: Console) -> None:
             session.grant_needs(ext.name)
 
 
-async def pick_session(options: SessionOptions, console: Console) -> str | None:
-    """Choose a saved conversation from this project."""
+async def pick_session(options: SessionOptions, console: Console, search: str = "") -> str | None:
+    """Choose a saved conversation by its human-readable title, not its storage id."""
     sessions = list_sessions(options)
     if not sessions:
         console.print("\n  [muted]No saved conversations in this project yet.[/]\n")
         return None
-    labels = [(s.id, f"{s.title}  [{_ago(s.updated)} · {s.messages} messages]") for s in sessions]
+    if search:
+        query = search.casefold()
+        exact = next((s for s in sessions if s.id == search), None)
+        matches = [
+            s
+            for s in sessions
+            if s.id.startswith(search)
+            or query in s.title.casefold()
+            or (s.model and query in s.model.casefold())
+        ]
+        if exact is not None:
+            return exact.id
+        if len(matches) == 1:
+            console.print(f'\n  [brand]↻[/] Resuming [bold]"{matches[0].title}"[/]\n')
+            return matches[0].id
+        if not matches:
+            console.print(f'\n  [warn]No conversation matching "{search}" in this project.[/]\n')
+            return None
+        sessions = matches
+        if not console.is_terminal:
+            console.print(
+                f'\n  [warn]More than one conversation matches "{search}". '
+                "Run interactively to choose one.[/]\n"
+            )
+            return None
+    labels = [(s.id, _session_label(s)) for s in sessions]
     return await pick("Resume which conversation?", labels, mark_current=False)
+
+
+def _session_label(session: SessionInfo) -> str:
+    """The picker label keeps the opaque id out of the normal interface."""
+    details = [_ago(session.updated), f"{session.messages} messages"]
+    if session.model:
+        details.append(session.model.replace(":", "/").replace("/", " / ", 1))
+    if session.active:
+        details.append("active in another window")
+    return f"{session.title}  [{' · '.join(details)}]"
 
 
 def print_resumed(console: Console, session: Session) -> None:
@@ -384,7 +424,7 @@ async def first_run_setup(options: SessionOptions, console: Console, *, force: b
     if not force and source_checkout() is not None:
         return True
     config = options.resolve_config()
-    if not (force or config.auto_selected or not config.has_key(config.provider)):
+    if not (force or config.credential_selected or not config.has_key(config.provider)):
         return True
     name = await run_setup(console, config)
     if name is None:

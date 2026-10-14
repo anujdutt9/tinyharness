@@ -4,6 +4,7 @@ from tinyharness.agent.sessionlog import FileSessionStore, SessionInfo, SessionS
 from tinyharness.agent.world import ResumeReport
 from tinyharness.config import Config, load_config
 from tinyharness.events import (
+    ArtifactPresented,
     AssistantText,
     Compacted,
     Done,
@@ -23,7 +24,10 @@ from tinyharness.events import (
 from tinyharness.hooks import Hook
 from tinyharness.permissions import Decision, PermissionMode, PermissionRequest
 from tinyharness.session import (
+    EvaluationContext,
+    Evaluator,
     MissingAPIKeyError,
+    SandboxRequiredError,
     Session,
     SessionOptions,
     invoke_skill,
@@ -32,17 +36,20 @@ from tinyharness.session import (
 )
 from tinyharness.skills import Skill, import_skills, load_skills
 from tinyharness.subagents import AgentSpec
-from tinyharness.tools import Tool, ToolContext, ToolError, ToolInput, ToolOutput
-
-__version__ = "0.1.5"
+from tinyharness.tools import ArtifactRef, Tool, ToolContext, ToolError, ToolInput, ToolOutput
+from tinyharness.version import __version__
 
 __all__ = [
     "AgentSpec",
+    "ArtifactPresented",
+    "ArtifactRef",
     "AssistantText",
     "Compacted",
     "Config",
     "Decision",
     "Done",
+    "EvaluationContext",
+    "Evaluator",
     "Event",
     "FileSessionStore",
     "Hook",
@@ -53,6 +60,7 @@ __all__ = [
     "PermissionRequest",
     "Reasoning",
     "ResumeReport",
+    "SandboxRequiredError",
     "Session",
     "SessionInfo",
     "SessionOptions",
@@ -71,6 +79,7 @@ __all__ = [
     "ToolResult",
     "ToolUse",
     "ToolsDispatched",
+    "__version__",
     "import_skills",
     "invoke_skill",
     "list_sessions",

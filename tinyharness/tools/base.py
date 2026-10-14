@@ -10,6 +10,7 @@ Flags tell the harness how to treat it:
   * `read_only`        — no side effects: allowed in plan mode, safe to run in parallel
   * `needs_permission` — False for bookkeeping tools (e.g. TodoWrite) that skip the gate
   * `network`          — reaches other machines (WebFetch): asks per site, never free
+  * `approval_boundary`— a contained capability that still needs an explicit decision
 """
 
 from __future__ import annotations
@@ -38,13 +39,32 @@ if TYPE_CHECKING:
 LARGE_CHANGE = 20  # lines; removing more than this counts as destructive (auto mode asks)
 
 
+@dataclass(frozen=True)
+class ArtifactRef:
+    """A file or URL the harness should present to the user without opening a host app."""
+
+    target: str
+    media_type: str = ""
+    title: str = ""
+
+
 @dataclass
 class ToolOutput:
-    """A tool's result with pictures for the model to look at (Read returns one for an
-    image file). Plain results are just a `str`."""
+    """Return text, images, and user-facing artifacts from a tool.
+
+    Attributes
+    ----------
+    text : str
+        Text returned to the model.
+    images : list[Image]
+        Images returned to the model.
+    artifacts : list[ArtifactRef]
+        Files or URLs presented to the user by the harness UI, not sent to the model.
+    """
 
     text: str
     images: list[Image] = field(default_factory=list)
+    artifacts: list[ArtifactRef] = field(default_factory=list)
 
 
 class ToolError(Exception):
@@ -52,6 +72,8 @@ class ToolError(Exception):
 
 
 class ToolInput(BaseModel):
+    """Validate the common behavior of tool input models."""
+
     # Lenient where intent is clear: a number given for a text field is that text (models
     # send `"content": 233`).
     model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
@@ -76,9 +98,18 @@ class ToolInput(BaseModel):
 InputT = TypeVar("InputT", bound=ToolInput)
 
 
+@dataclass(frozen=True)
+class ApprovalBoundary:
+    """A contained capability whose first use needs an explicit decision."""
+
+    key: str
+    warning: str
+    remember_label: str
+
+
 @dataclass
 class ToolContext:
-    """Per-session state shared by all tool calls."""
+    """Hold per-session state shared by tool calls."""
 
     workspace: Workspace
     config: Config
@@ -97,6 +128,10 @@ class ToolContext:
     # docs.python.org"): once there is any, calls that can send data out need a person's
     # yes (permissions/gate.py). Shared with subagents; changed in place, never replaced.
     outside: list[str] = field(default_factory=list)
+    # Trusted correlation metadata for durable tool records. Tools must not ask the
+    # model to supply these: the session sets them itself.
+    session_id: str = ""
+    turn_id: str = ""
 
 
 def note_outside(ctx: ToolContext, source: str) -> None:
@@ -132,6 +167,12 @@ def mark_seen(ctx: ToolContext, path: Path) -> None:
 
 
 class Tool(ABC, Generic[InputT]):
+    """Define the interface implemented by every tool.
+
+    Subclasses provide an input model and implement :meth:`run`. The remaining methods
+    describe permissions, concurrency, and presentation to the harness.
+    """
+
     name: ClassVar[str]
     description: str
     Input: type[InputT]
@@ -143,7 +184,22 @@ class Tool(ABC, Generic[InputT]):
     persists: ClassVar[bool] = False
 
     @abstractmethod
-    async def run(self, args: InputT, ctx: ToolContext) -> str | ToolOutput: ...
+    async def run(self, args: InputT, ctx: ToolContext) -> str | ToolOutput:
+        """Execute the tool.
+
+        Parameters
+        ----------
+        args : InputT
+            Validated tool arguments.
+        ctx : ToolContext
+            State shared by tools in the session.
+
+        Returns
+        -------
+        str or ToolOutput
+            Content returned to the model.
+        """
+        ...
 
     def describe(self, args: InputT) -> str:
         """One-line label shown to the user, e.g. `Read(src/main.py)`."""
@@ -166,6 +222,10 @@ class Tool(ABC, Generic[InputT]):
         """The site a network tool contacts, used for permission decisions."""
         return None
 
+    def approval_boundary(self, args: InputT) -> ApprovalBoundary | None:
+        """A contained capability that still needs explicit user approval, if any."""
+        return None
+
     def outside_source(self, args: InputT) -> str | None:
         """Where this call's result comes from, if it's another machine (and so could carry
         instructions the user didn't write); None for local results."""
@@ -184,11 +244,22 @@ class Tool(ABC, Generic[InputT]):
         network), so modes that allow project edits may allow it without asking."""
         return False
 
+    def can_send_out(self, args: dict[str, Any]) -> bool:
+        """Whether this call can contact another machine with conversation data."""
+        return self.network
+
     def escapes(self, args: dict[str, Any]) -> str | None:
-        """Why this call runs outside the sandbox it would normally run in, or None.
-        Such calls always ask: no rule, mode or classifier approves them (only
-        bypassPermissions or a hook), and "don't ask again" isn't offered."""
+        """Why this call crosses a hard boundary, or None. Such calls ask even in bypass
+        mode: suppressing routine prompts never changes containment."""
         return None
+
+    def rememberable_escape(self, args: dict[str, Any]) -> bool:
+        """Whether a narrow boundary expansion may be remembered for its target.
+
+        Most escapes remove containment and must be approved every time. A capability
+        that remains sandbox-enforced, such as one exact network destination, can opt in.
+        """
+        return False
 
     def is_read_only(self, args: InputT) -> bool:
         """Whether this call has no side effects (safe to run alongside others)."""
@@ -207,9 +278,22 @@ class Tool(ABC, Generic[InputT]):
         return self.is_read_only(args)
 
     def parse(self, raw: dict[str, Any]) -> InputT:
+        """Validate raw tool arguments.
+
+        Parameters
+        ----------
+        raw : dict[str, Any]
+            Provider-decoded tool arguments.
+
+        Returns
+        -------
+        InputT
+            Validated input model.
+        """
         return self.Input.model_validate(raw)
 
     def input_schema(self) -> dict[str, Any]:
+        """Return the provider-ready JSON schema for this tool's input."""
         schema = self.Input.model_json_schema()
         defs = schema.pop("$defs", {})
         return _strip_titles(_inline_refs(schema, defs))

@@ -2,7 +2,7 @@
 
 A resumed conversation is only as good as the facts in it. While a session runs, each
 tool result that touched a file records the file's fingerprint; each turn records git
-HEAD and a hash of the AGENT.md instructions. On resume, `check()` compares them with
+HEAD and a hash of the AGENTS.md instructions. On resume, `check()` compares them with
 the world as it is now, and the harness (not the model) acts on the difference:
 
   * results of reading a file that has changed since are replaced by a stub saying
@@ -110,7 +110,7 @@ class ResumeReport:
             lines.append(f"- Git: {self._git_change()}.")
         if self.instructions_changed:
             lines.append(
-                "- The project instructions (AGENT.md) changed; the current version is in the system prompt."
+                "- The project instructions (AGENTS.md) changed; the current version is in the system prompt."
             )
         if self.unfinished:
             lines.append(
@@ -129,7 +129,7 @@ class ResumeReport:
         if self.git_moved:
             parts.append(self._git_change())
         if self.instructions_changed:
-            parts.append("AGENT.md changed")
+            parts.append("AGENTS.md changed")
         if self.unfinished:
             parts.append(f"{self.unfinished} unfinished tool call{'s' if self.unfinished != 1 else ''}")
         return " · ".join(parts)

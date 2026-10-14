@@ -7,7 +7,7 @@ from typing import Any
 
 from tinyharness.ext import Extension
 from tinyharness.subagents import AgentSpec
-from tinyharness.tools.agent import AgentTool
+from tinyharness.tools.agent import AgentSlots, AgentTool
 from tinyharness.tools.base import Tool, ToolContext
 from tinyharness.tools.team import TeamTool
 
@@ -57,6 +57,8 @@ def setup(th: Extension) -> None:
         names = tools.names() if spec.tools is None else spec.tools
         return all(tool.read_only for name in names if (tool := tools.get(name)) is not None)
 
-    th.add_tool(AgentTool(session.agents, spawn, read_only))
-    th.add_tool(TeamTool(session.agents, spawn, read_only))
+    # One ceiling for the session: Agent calls and Team teammates count against it together.
+    slots = AgentSlots(session.config.max_parallel_agents)
+    th.add_tool(AgentTool(session.agents, spawn, read_only, slots))
+    th.add_tool(TeamTool(session.agents, spawn, read_only, slots))
     th.prompt_section("Subagents", GUIDANCE)

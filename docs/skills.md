@@ -89,9 +89,9 @@ async for event in invoke_skill("release-notes", "v1.2..v1.3", SessionOptions())
 - **Keep reference files lazy.** Each file you read costs context. Tell the model which step needs which file.
 - **Delegate big stages.** For long pipelines, the `Agent` tool runs a stage in a fresh context and returns only the result.
 
-## Importing skills from other tools
+## Importing existing skills
 
-Skills written for Claude Code or another tool that uses `SKILL.md` work unchanged:
+Skills stored in the common `SKILL.md` directory format work unchanged:
 
 ```bash
 tinyharness --import-skills              # from ~/.claude/skills

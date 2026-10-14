@@ -1,5 +1,7 @@
 """Seeing when a skill is loaded, and loading one asked for as /name mid-message."""
 
+import json
+
 import pytest
 
 from tinyharness.events import SkillLoaded, ToolResult
@@ -71,9 +73,52 @@ async def test_running_a_skill_says_so(session):
     assert sum(isinstance(e, SkillLoaded) for e in got) == 1
 
 
+async def test_invoked_skill_enables_the_extensions_it_requires(session):
+    skill = session.skills.get("claude-design-skill")
+    assert skill is not None
+    skill.required_extensions = ["agents"]
+    play(session, ["ok"])
+    await events(session, "please use /claude-design-skill")
+    assert "agents" in session.config.extensions.enabled
+    assert session.tools.get("Agent") is not None
+
+
+async def test_resumed_skill_reenables_the_extensions_it_requires(tmp_path):
+    """Seen live: a resumed multi-agent skill lost Agent because it was already in context."""
+    root = tmp_path / "work"
+    folder = root / ".tinyharness" / "skills" / "needs-agents"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: needs-agents\ndescription: delegate work\n"
+        "requires-extensions: [agents]\n---\nUse Agent.\n"
+    )
+    first = scripted_session(root, ["done"])
+    await events(first, "use /needs-agents")
+    assert first.tools.get("Agent") is not None
+    first.close()
+
+    resumed = scripted_session(root, [], resume="latest")
+    try:
+        assert "agents" in resumed.config.extensions.enabled
+        assert resumed.tools.get("Agent") is not None
+    finally:
+        resumed.close()
+
+
+async def test_invoked_skill_registers_its_exact_network_set(session):
+    skill = session.skills.get("claude-design-skill")
+    assert skill is not None
+    skill.network_hosts = ["assets.example.com", "fonts.example.com"]
+    play(session, ["ok"])
+    await events(session, "please use /claude-design-skill")
+    assert session.gate.network_bundles == {
+        "claude-design-skill": ("assets.example.com", "fonts.example.com")
+    }
+
+
 async def test_the_model_reading_a_skill_file_is_shown(session):
     path = str(session.skills.get("claude-design-skill").source)
-    play(session, [[("Read", f'{{"path": "{path}"}}')], "done"])
+    play(session, [[("Read", json.dumps({"path": path}))], "done"])
     got = await events(session, "design me a landing page")
     i = next(i for i, e in enumerate(got) if isinstance(e, SkillLoaded))
     assert got[i].how == "read" and isinstance(got[i - 1], ToolResult)

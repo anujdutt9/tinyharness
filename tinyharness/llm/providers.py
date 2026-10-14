@@ -19,12 +19,11 @@ a built-in one with a `[providers.<name>]` table:
 
 from __future__ import annotations
 
-import os
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from tinyharness.llm.types import ModelInfo
 
@@ -35,6 +34,9 @@ Api = Literal["chat", "responses", "anthropic", "gemini"]
 
 
 class Provider(BaseModel):
+    _api_key: str = PrivateAttr(default="")
+    _api_key_source: str = PrivateAttr(default="")
+
     name: str
     label: str = ""
     api: Api = "chat"  # wire format; see tinyharness/llm/adapters
@@ -45,6 +47,10 @@ class Provider(BaseModel):
     small_model: str = ""  # cheap model for background work (classifier, WebSearch digests)
     extra_headers: dict[str, str] = Field(default_factory=dict)
     extra_body: dict[str, Any] = Field(default_factory=dict)  # merged into every request
+    # Send who is calling (session, agent, parent agent, role) as X-* headers on every
+    # request: for a gateway of your own that admits, queues or bills per session and agent
+    # (tinyharness/llm/identity.py). Off: no provider gets them unless you ask.
+    send_ids: bool = False
     effort_param: str = "reasoning_effort"  # chat API only: where the reasoning effort goes
     # The provider's own web search: true for APIs with a built-in search tool, a table
     # merged into the request for chat providers that switch it on another way, false: none.
@@ -82,7 +88,17 @@ class Provider(BaseModel):
 
     @property
     def api_key(self) -> str:
-        return os.environ.get(self.api_key_env, "") if self.api_key_env else ""
+        return self._api_key
+
+    @property
+    def api_key_source(self) -> str:
+        """Describe where the resolved key came from without exposing its value."""
+        return self._api_key_source
+
+    def set_api_key(self, value: str, source: str) -> None:
+        """Set the single resolved credential used for this provider."""
+        self._api_key = value
+        self._api_key_source = source if value else ""
 
     @property
     def needs_key(self) -> bool:

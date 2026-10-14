@@ -9,18 +9,21 @@ Both live outside the project (never committed) and outside what sandboxed comma
 write, so only the Memory tool changes them, and the permission gate sees every change.
 A session reads them once, at its start (see extensions/memory.py): saving a note
 changes the next session's system prompt, never this one's, so the cached prefix holds.
-Hermes Agent does the same (a frozen snapshot plus a dedicated tool with a size budget);
-Claude Code and Gemini CLI write memory files with the generic Write tool, which here
-would ask every time, since ~/.tinyharness is protected.
+The frozen snapshot and dedicated tool keep memory updates bounded and explicit. A generic
+Write call would ask every time because ~/.tinyharness is protected.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import Field
 
@@ -31,8 +34,8 @@ from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
 
 Scope = Literal["user", "project"]
 
-# Characters, as Hermes counts them: every note is in every request of every later
-# session, so the budget is small. A full memory makes the model merge or drop notes.
+# Every note is in every request of every later session, so the character budget is small.
+# A full memory makes the model merge or drop notes.
 LIMITS: dict[Scope, int] = {"user": 1500, "project": 3000}
 TITLES: dict[Scope, str] = {"user": "user memory", "project": "project memory"}
 
@@ -42,6 +45,41 @@ def memory_path(scope: Scope, working_dir: Path) -> Path:
     if scope == "user":
         return home_dir() / "memory.md"
     return state_dir(repo_root(working_dir)) / "memory.md"
+
+
+def memory_history_path(scope: Scope, working_dir: Path) -> Path:
+    """The audit ledger beside a scope's editable Markdown snapshot."""
+    return memory_path(scope, working_dir).with_name("memory-history.jsonl")
+
+
+def read_history(path: Path) -> list[dict[str, Any]]:
+    """Read valid ledger records; an interrupted final line never hides earlier history."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    records = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(record, dict) and record.get("memory_id"):
+            records.append(record)
+    return records
+
+
+def _append_history(path: Path, record: dict[str, Any]) -> None:
+    """Append one compact record with private permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
 
 
 def read_notes(path: Path) -> list[str]:
@@ -79,8 +117,10 @@ def render(notes: list[str]) -> str:
 class MemoryInput(ToolInput):
     action: Literal["add", "replace", "remove"]
     scope: Scope = Field(
-        default="project",
-        description="'user': about the user, for every project. 'project': about this project",
+        description=(
+            "Required destination: 'user' for durable facts about the user across projects; "
+            "'project' for durable context that only applies to this project"
+        ),
     )
     note: str = Field(default="", description="The note to add, or the new text for 'replace'")
     old: str = Field(
@@ -93,6 +133,7 @@ class MemoryInput(ToolInput):
 class _Change:
     notes: list[str]
     done: str
+    previous: str = ""
 
 
 class MemoryTool(Tool[MemoryInput]):
@@ -100,9 +141,11 @@ class MemoryTool(Tool[MemoryInput]):
     description = (
         "Add, replace or remove a note in your memory. Memory is loaded into the system prompt "
         "of every later session (not this one), so a note is something a future session needs "
-        "to know. There are two memories: 'user' for facts about the user that hold in any "
-        "project (their role, what they know, how they want you to work), and 'project' for "
-        "this project.\n\n"
+        "to know. Choose the scope explicitly:\n"
+        "- 'user': durable facts about the user across projects, such as their name, role, "
+        "expertise or communication preferences\n"
+        "- 'project': durable decisions or external context specific to this project that "
+        "cannot be learned from its files or Git history\n\n"
         "Save a note when:\n"
         "- the user asks you to remember something (or to forget it: remove the note)\n"
         "- the user corrects how you work, or confirms an approach that wasn't obvious: save "
@@ -110,9 +153,10 @@ class MemoryTool(Tool[MemoryInput]):
         "- you learn something about the project that later sessions need and can't get from "
         "the code, git history or AGENTS.md: a decision and why, a deadline, where something "
         "outside the repository lives\n\n"
-        "Don't save what the code, git or AGENTS.md already say, progress on the current task, "
-        "anything only true for now, or secrets. A rule the whole team should follow belongs in "
-        "AGENTS.md: suggest it there instead.\n\n"
+        "Don't save what the code or Git already says, progress on the current task, anything "
+        "only true for now, or secrets. Explicit standing instructions for every project belong "
+        "in ~/.tinyharness/AGENTS.md; a rule the project team should share belongs in its "
+        "AGENTS.md. Suggest the appropriate file instead.\n\n"
         "A note is one fact, in one short line that makes sense on its own (two facts are two "
         "calls, each in its own scope); write dates as dates "
         "(2026-10-01, not 'yesterday'). Before adding, look at your memory in the system "
@@ -131,7 +175,8 @@ class MemoryTool(Tool[MemoryInput]):
         path = memory_path(args.scope, self.working_dir)
         # Read the file now, not the session's snapshot: another session or the user may
         # have changed it since this one started.
-        change = self._apply(args, read_notes(path))
+        before = read_notes(path)
+        change = self._apply(args, before, ctx.config.credential_values())
         limit = LIMITS[args.scope]
         if size(change.notes) > limit:
             raise ToolError(
@@ -141,18 +186,43 @@ class MemoryTool(Tool[MemoryInput]):
                 + render(read_notes(path))
             )
         write_notes(path, change.notes)
+        if change.notes != before:
+            history_path = memory_history_path(args.scope, self.working_dir)
+            memory_id = (
+                f"mem-{uuid4().hex[:12]}"
+                if args.action == "add"
+                else _memory_id(args.scope, change.previous, read_history(history_path))
+            )
+            note = " ".join(args.note.split()) if args.action != "remove" else ""
+            _append_history(
+                history_path,
+                {
+                    "schema": 1,
+                    "memory_id": memory_id,
+                    "scope": args.scope,
+                    "action": args.action,
+                    "status": "removed" if args.action == "remove" else "active",
+                    "note": note,
+                    "previous": change.previous or None,
+                    "recorded_at": datetime.now(UTC).isoformat(),
+                    "session": ctx.session_id or None,
+                    "turn": ctx.turn_id or None,
+                    "outside_sources": list(ctx.outside),
+                    "policy_version": 1,
+                },
+            )
         return (
             f"{change.done} ({len(change.notes)} notes, {size(change.notes)} of {limit} "
             "characters). Sessions started from now on will see it."
         )
 
-    def _apply(self, args: MemoryInput, notes: list[str]) -> _Change:
+    def _apply(self, args: MemoryInput, notes: list[str], secrets: dict[str, str] | None = None) -> _Change:
         title = TITLES[args.scope]
         note = " ".join(args.note.split())  # one line: the file has one note per line
         if args.action != "remove":
             if not note:
                 raise ToolError(f"Give the note's text in `note` to {args.action} it.")
-            if (key := find_api_key(note)) is not None:
+            if (key := find_api_key(note, secrets)) is not None:
                 raise ToolError(
                     f"The note contains what looks like an API key ({key}). Memory is plain text "
                     "loaded into every later session: never save credentials. Save where the key "
@@ -160,12 +230,16 @@ class MemoryTool(Tool[MemoryInput]):
                 )
         if args.action == "add":
             if note in notes:
-                return _Change(notes, f"The {title} already has this note")
+                return _Change(notes, f"The {title} already has this note", note)
             return _Change([*notes, note], f"Added to the {title}")
         index = self._find(args.old, notes, title)
         if args.action == "remove":
-            return _Change(notes[:index] + notes[index + 1 :], f"Removed from the {title}")
-        return _Change([*notes[:index], note, *notes[index + 1 :]], f"Replaced in the {title}")
+            return _Change(notes[:index] + notes[index + 1 :], f"Removed from the {title}", notes[index])
+        return _Change(
+            [*notes[:index], note, *notes[index + 1 :]],
+            f"Replaced in the {title}",
+            notes[index],
+        )
 
     @staticmethod
     def _find(old: str, notes: list[str], title: str) -> int:
@@ -182,3 +256,18 @@ class MemoryTool(Tool[MemoryInput]):
             )
         shown = "\n".join(f"- {notes[i]}" for i in matches)
         raise ToolError(f"{len(matches)} notes contain {old!r}; give more of the one you mean:\n{shown}")
+
+
+def _memory_id(scope: Scope, note: str, records: list[dict[str, Any]]) -> str:
+    """Recover a note's stable ID, including notes created before the ledger existed."""
+    active: dict[str, str] = {}
+    for record in records:
+        memory_id = str(record.get("memory_id", ""))
+        if record.get("status") == "removed":
+            active.pop(memory_id, None)
+        elif memory_id:
+            active[memory_id] = str(record.get("note", ""))
+    if found := next((memory_id for memory_id, text in active.items() if text == note), ""):
+        return found
+    digest = hashlib.sha256(f"{scope}\0{note}".encode()).hexdigest()[:12]
+    return f"mem-{digest}"

@@ -21,19 +21,19 @@ import shlex
 import signal
 import subprocess
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable
-from dataclasses import dataclass
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Iterator
+from dataclasses import dataclass, replace
 from functools import cache
 from pathlib import Path
 from typing import Any
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.application import get_app
+from prompt_toolkit.application import Application, get_app
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.formatted_text import ANSI, FormattedText, StyleAndTextTuples
+from prompt_toolkit.formatted_text import ANSI, AnyFormattedText, FormattedText, StyleAndTextTuples
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
@@ -49,6 +49,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from tinyharness.agent.history import Image
+from tinyharness.agent.transcript import SessionBusyError
 from tinyharness.cli.commands import COMMANDS
 from tinyharness.cli.markdown import render as render_markdown
 from tinyharness.cli.render import Renderer, dollars, tokens, without_links
@@ -63,9 +64,18 @@ from tinyharness.cli.theme import (
     tool_style,
 )
 from tinyharness.cli.widgets import pick
-from tinyharness.events import Event, SubagentUpdate
+from tinyharness.events import (
+    AssistantText,
+    Event,
+    Reasoning,
+    SubagentUpdate,
+    TokenUsage,
+    ToolInputStreaming,
+    ToolUse,
+)
 from tinyharness.ext import CommandContext
 from tinyharness.llm.client import LLMError, ProviderConnectionError
+from tinyharness.llm.usage import Usage
 from tinyharness.paths import auth_path, home_dir, pretty_path
 from tinyharness.permissions import PermissionMode
 from tinyharness.security import find_api_key
@@ -178,6 +188,22 @@ class _CompactPrompt(PromptSession[str]):
     the bottom anyway."""
 
     live: Callable[[], str] | None = None
+    _active_dumb_app: Application[str] | None = None
+
+    @contextlib.contextmanager
+    def _dumb_prompt(self, message: AnyFormattedText = "") -> Iterator[Application[str]]:
+        """Remember prompt-toolkit's temporary app so permission questions can close it.
+
+        On a dumb terminal, ``PromptSession.prompt_async`` runs this application instead
+        of ``self.app``. Without tracking it, ``Repl._close_input`` targets the idle app
+        and waits forever for the temporary one to release the UI lock.
+        """
+        with super()._dumb_prompt(message) as app:
+            self._active_dumb_app = app
+            try:
+                yield app
+            finally:
+                self._active_dumb_app = None
 
     def _create_layout(self) -> Layout:
         layout = super()._create_layout()
@@ -212,7 +238,8 @@ class Repl:
         self.console = console
         self.renderer = renderer
         self.running = True
-        self.context_used = 0.0  # fraction of the context window, refreshed after each turn
+        self.context_used = 0.0  # fraction of the window, refreshed after model calls and turns
+        self._context_approximate = False
         self._exit_armed_until = 0.0  # a second Ctrl-C before this time exits
         self._draft = ""  # pre-filled into the next prompt (a message that wasn't sent)
         self.expanded = False  # ctrl+o: the last output / running subagents, above the input box
@@ -229,6 +256,10 @@ class Repl:
         self._suggesting: asyncio.Task[None] | None = None
         self.aside: Aside | None = None  # the /btw answer shown above the input box (Esc closes it)
         self._answering: asyncio.Task[None] | None = None
+        self._live_input_tokens = 0  # estimated current call, until its TokenUsage arrives
+        self._live_output_chars = 0
+        self._live_tool_chars = 0
+        self._last_usage_refresh = 0.0
 
     # -- input ----------------------------------------------------------------
 
@@ -271,12 +302,19 @@ class Repl:
             if self.context_used >= 0.5
             else "toolbar.dim"
         )
-        parts.append((6, [(f"class:{level}", f"{percent(self.context_used)} context")]))
+        live = bool(self._live_input_tokens or self._live_output_chars)
+        context_approx = "~" if self._context_approximate or live else ""
+        live_approx = "~" if live else ""
+        parts.append((6, [(f"class:{level}", f"{context_approx}{percent(self.context_used)} context")]))
         meter = session.ctx.usage
-        if meter.total.output:  # what the model wrote; /cost has the full breakdown
-            parts.append((1, [("class:toolbar.dim", f"{tokens(meter.total.output)} out")]))
-        if meter.cost is not None:
-            parts.append((5, [("class:toolbar", dollars(meter.cost))]))
+        live_output = self._live_output_tokens
+        if meter.total.output or live_output:  # what the model wrote; /cost has the full breakdown
+            parts.append(
+                (1, [("class:toolbar.dim", f"{live_approx}{tokens(meter.total.output + live_output)} out")])
+            )
+        cost = self._live_cost
+        if cost is not None:
+            parts.append((5, [("class:toolbar", f"{live_approx}{dollars(cost)}")]))
         while parts and _cells(_join(parts)) > room:
             parts.remove(min(parts, key=lambda p: p[0]))
         return _join(parts)
@@ -333,6 +371,7 @@ class Repl:
             the rest of an earlier message), or the highlighted (else first) menu entry."""
             buffer = event.current_buffer
             if not buffer.text and self.suggestion and not self.turn_running:
+                self.session.record_suggestion("accepted", chars=len(self.suggestion))
                 buffer.insert_text(self.suggestion)
             elif buffer.suggestion and buffer.suggestion.text:
                 buffer.insert_text(buffer.suggestion.text)
@@ -447,8 +486,7 @@ class Repl:
         return without_links(captured.get().rstrip("\n"))
 
     def _pending(self, width: int) -> str:
-        """Messages waiting for the agent's next step, and how to send them now (as Codex
-        shows them): `• Sent after the agent's current step (esc: stop it and send now)`."""
+        """Messages waiting for the next step, and how to send them immediately."""
         pending = self.session.pending_steering
         if not pending:
             return ""
@@ -549,6 +587,8 @@ class Repl:
         async def suggest() -> None:
             try:
                 self.suggestion = await self.session.suggest_next()
+                if self.suggestion:
+                    self.session.record_suggestion("shown", chars=len(self.suggestion))
             except Exception as e:  # a missing suggestion isn't worth an error panel
                 log.debug("no prompt suggestion: %s", e)
                 return
@@ -587,7 +627,8 @@ class Repl:
 
     def _close_input(self) -> None:
         """Close the input box if it's up, keeping what was typed."""
-        app = self._prompt.app if self._prompt is not None else None
+        prompt = self._prompt
+        app = (prompt._active_dumb_app or prompt.app) if prompt is not None else None
         if app is None or app.future is None or app.future.done():
             return  # between runs: the next one sees the waiting question (_make_way)
         self._draft = app.current_buffer.text
@@ -722,6 +763,51 @@ class Repl:
             highlight=False,
         )
 
+    def switch_session(self, session_id: str) -> bool:
+        """Atomically replace the idle conversation, keeping the old one on any error."""
+        if session_id == self.session.id:
+            self.console.print("  [muted]That conversation is already open here.[/]")
+            return False
+        old = self.session
+        options = replace(
+            old.options,
+            working_dir=old.workspace.root,
+            provider=None,
+            model=None,
+            permission_mode=old.mode,
+            resume=session_id,
+            trust_project=old.project_trusted,
+            use_last_model=True,
+        )
+        try:
+            selected = Session(options)
+        except SessionBusyError as error:
+            self.console.print(Text(f"  ✗ {error}", style="err"))
+            return False
+        except Exception as error:
+            report_error(self.console, error)
+            return False
+
+        self.session = selected
+        old.close()
+        self.renderer.use_session(
+            str(selected.workspace.root),
+            selected.ctx.usage,
+            show_thinking=selected.config.show_thinking,
+        )
+        self.context_used = 0.0
+        self.git = git_status(selected.workspace.root)
+        self.expanded = False
+        self.close_aside()
+        self._forget_suggestion()
+        if self._prompt is not None:
+            self._prompt.completer = SlashCompleter(selected)
+        from tinyharness.cli.app import print_resumed
+
+        print_resumed(self.console, selected)
+        self._measure_context()
+        return True
+
     def _show_subagent(self, agent: SubagentUpdate) -> None:
         """What a running subagent has done so far, printed in full (/output)."""
         body = self._subagent_calls(agent, self.console.width)
@@ -796,7 +882,7 @@ class Repl:
 
     async def _safe_to_send(self, line: str) -> bool:
         """Catch an API key pasted into the chat before it reaches the model."""
-        if (key := find_api_key(line)) is None:
+        if (key := find_api_key(line, self.session.config.credential_values())) is None:
             return True
         self.console.print(
             f"\n  [warn]⚠ Your message contains what looks like an API key[/] [muted]({key})[/]\n"
@@ -842,7 +928,7 @@ class Repl:
     async def _turn_in_background(self, events: AsyncGenerator[Event, None]) -> None:
         finished = False
         try:
-            await self.renderer.render(events)
+            await self.renderer.render(self._status_events(events))
             finished = True
         except asyncio.CancelledError:
             if self._sending_now:  # Esc: the waiting messages go to the agent right away
@@ -863,7 +949,7 @@ class Repl:
 
     async def run_turn(self, events: AsyncGenerator[Event, None]) -> None:
         """Render one agent turn. Ctrl-C cancels the turn but keeps the REPL alive."""
-        task = asyncio.create_task(self.renderer.render(events))
+        task = asyncio.create_task(self.renderer.render(self._status_events(events)))
         loop = asyncio.get_running_loop()
         with contextlib.suppress(NotImplementedError):  # not available on Windows
             loop.add_signal_handler(signal.SIGINT, task.cancel)
@@ -878,10 +964,81 @@ class Repl:
                 loop.remove_signal_handler(signal.SIGINT)
             self._measure_context()
 
+    async def _status_events(self, events: AsyncGenerator[Event, None]) -> AsyncGenerator[Event, None]:
+        """Keep the toolbar moving during a model call, then replace estimates with usage."""
+        self._clear_live_usage()
+        async for event in events:
+            if isinstance(event, TokenUsage):
+                if self.session.context_window:
+                    self.context_used = (event.input + event.cached) / self.session.context_window
+                    self._context_approximate = False
+                self._clear_live_usage()
+                self._refresh_status(force=True)
+            elif isinstance(event, AssistantText | Reasoning):
+                self._start_live_usage()
+                self._live_output_chars += len(event.text)
+                self._refresh_live_context()
+                self._refresh_status()
+            elif isinstance(event, ToolInputStreaming):
+                self._start_live_usage()
+                # `chars` is cumulative for the current tool call, so only add its growth.
+                self._live_output_chars += max(event.chars - self._live_tool_chars, 0)
+                self._live_tool_chars = event.chars
+                self._refresh_live_context()
+                self._refresh_status()
+            elif isinstance(event, ToolUse):
+                self._live_tool_chars = 0
+            yield event
+
+    @property
+    def _live_output_tokens(self) -> int:
+        return self._live_output_chars // 4
+
+    @property
+    def _live_cost(self) -> float | None:
+        base = self.session.ctx.usage.cost
+        if not (self._live_input_tokens or self._live_output_chars):
+            return base
+        cfg = self.session.config
+        info = self.session.llm.model_info(cfg.model)
+        price = cfg.price(cfg.provider, cfg.model) or (info.price if info else None)
+        if price is None:
+            return base
+        estimated = price.cost(Usage(input=self._live_input_tokens, output=self._live_output_tokens))
+        return (base or 0.0) + estimated
+
+    def _start_live_usage(self) -> None:
+        if self._live_input_tokens:
+            return
+        with contextlib.suppress(Exception):
+            self._live_input_tokens = self.session.compactor.used(self.session.history)
+
+    def _refresh_live_context(self) -> None:
+        if self.session.context_window:
+            self.context_used = (
+                self._live_input_tokens + self._live_output_tokens
+            ) / self.session.context_window
+            self._context_approximate = True
+
+    def _clear_live_usage(self) -> None:
+        self._live_input_tokens = 0
+        self._live_output_chars = 0
+        self._live_tool_chars = 0
+
+    def _refresh_status(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and now - self._last_usage_refresh < 0.1:
+            return
+        self._last_usage_refresh = now
+        if self._prompt is not None and self._prompt.app.is_running:
+            self._prompt.app.invalidate()
+
     def _measure_context(self) -> None:
+        self._clear_live_usage()
         with contextlib.suppress(Exception):  # the toolbar is a nicety; never fail a turn over it
             used = self.session.compactor.used(self.session.history)
             self.context_used = used / self.session.context_window
+            self._context_approximate = True
         self.git = git_status(self.session.workspace.root)
 
 

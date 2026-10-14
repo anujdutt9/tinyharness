@@ -5,34 +5,38 @@ process group so a timeout or Ctrl-C kills everything it spawned. The environmen
 has credentials stripped, and output is capped (head and tail kept) before the
 loop masks any remaining secrets.
 
-With a sandbox, the command can write only to the project, scratch and temp dirs,
+With a sandbox, the command can write only to the project and private scratch/cache dirs,
 can't read credential files and reaches only the allowlist proxy's hosts, so the gate
-lets it run without asking in default and auto modes. Without one, every command asks. The model can
-ask to skip the sandbox (sandbox=false) for one command, which asks the user every time.
+lets it run without asking in default and auto modes. Without one, every command asks.
+Containment is chosen by the harness, never by a model tool argument.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import os
+import re
 import shlex
 import shutil
+import sys
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, field_validator
 
 from tinyharness.process import kill_group
 from tinyharness.sandbox import Sandbox, SandboxPolicy
-from tinyharness.sandbox.proxy import AllowlistProxy
+from tinyharness.sandbox.proxy import AllowlistProxy, host_allowed
 from tinyharness.security import sanitized_env
-from tinyharness.tools.base import Tool, ToolContext, ToolInput, note_outside
+from tinyharness.tools.base import ApprovalBoundary, Tool, ToolContext, ToolInput, note_outside
 
 HEAD_BYTES = 15_000  # output kept from the start...
 TAIL_BYTES = 15_000  # ...and from the end
-# Nothing waits for a person: no pagers, colors, terminal UIs or password prompts (the
-# same settings Codex and deepseek-harness use). A command that would ask hangs until it times out.
+# Nothing waits for a person: no pagers, colors, terminal UIs or password prompts.
+# A command that would ask hangs until it times out.
 NONINTERACTIVE_ENV = {
     "PAGER": "cat",
     "GIT_PAGER": "cat",
@@ -66,17 +70,527 @@ _GIT_READS = frozenset({"status", "log", "diff", "show", "ls-files", "rev-parse"
 _FIND_WRITES = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls"})
 _SQLITE_WRITES = (".output", ".once", ".save", ".backup", ".import", ".shell", ".system", ".log", ".excel")
 
+# Keep this deterministic: a small model must not decide whether an irreversible shell
+# command is routine. These recognizable destructive operations always ask in auto mode.
+_DESTRUCTIVE_COMMANDS = (
+    (re.compile(r"(?:^|[;&|()\s])(?:/[^\s;&|()]+/)?(?:rm|rmdir|unlink|shred)(?=\s|$)"), "deletes files"),
+    (re.compile(r"(?:^|[;&|()\s])find\s+[^\n;&|]*\s-delete(?:\s|$)"), "deletes files with find"),
+    (
+        re.compile(r"(?:^|[;&|()\s])git\s+[^\n;&|]*\breset\s+--hard(?:\s|$)"),
+        "discards changes with git reset --hard",
+    ),
+    (
+        re.compile(r"(?:^|[;&|()\s])git\s+[^\n;&|]*\bclean\s+-[^\s;&|]*f"),
+        "deletes untracked files with git clean",
+    ),
+)
+
+_SHELL_OPERATORS = frozenset(";&|()\n")
+_WRAPPERS = {"command", "env", "nohup", "sudo", "time"}
+_SHELL_PREFIXES = {"!", "if", "then", "elif", "else", "while", "until", "do"}
+_WRAPPER_OPTIONS_WITH_VALUES = {
+    "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+    "sudo": {"-C", "-D", "-g", "-h", "-p", "-R", "-T", "-u"},
+    "time": {"-f", "--format", "-o", "--output"},
+}
+_DOWNLOAD_AND_EXECUTE = re.compile(
+    r"\b(?:curl|wget)\b[^\n]*(?:\||&&|;)\s*(?:sudo\s+)?"
+    r"(?:bash|sh|zsh|python\d*(?:\.\d+)*|node|chmod\s+\+x|\./)\b"
+    r"|\b(?:iwr|irm|invoke-webrequest|invoke-restmethod)\b[^\n]*\|\s*"
+    r"(?:iex|invoke-expression)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class _SoftwareAcquisition:
+    scope: str
+    kind: str
+    needs_python_environment: bool = False
+    # Token-index paths to absolute Python launchers. A nested path starts with the
+    # outer shell/env argument token, then identifies the executable inside it.
+    python_launchers: tuple[tuple[int, ...], ...] = ()
+
+
+def _software_acquisition(command: str, cwd: Path | None = None) -> _SoftwareAcquisition | None:
+    """Return one boundary covering every acquisition in the complete command."""
+    found: list[_SoftwareAcquisition] = []
+    if _DOWNLOAD_AND_EXECUTE.search(command):
+        found.append(_SoftwareAcquisition("software:bootstrap", "downloaded executable"))
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()\n")
+        lexer.whitespace = " \t\r"  # an unquoted newline is a command boundary, not a space
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        tokens = []
+
+    segment: list[str] = []
+    segment_start = 0
+    segment_cwd = cwd
+    for token_index, token in enumerate([*tokens, ";"]):
+        if token and set(token) <= _SHELL_OPERATORS:
+            if acquisition := _acquisition_in_segment(segment, segment_cwd, segment_start):
+                found.append(acquisition)
+            segment_cwd = _directory_after(segment, segment_cwd)
+            segment = []
+            segment_start = token_index + 1
+        else:
+            segment.append(token)
+    if not found:
+        return None
+
+    # A remembered decision must authorize exactly the command the user saw, not only
+    # its first install segment. Include nested/script scopes so changing a PEP 723
+    # dependency also invalidates the earlier approval.
+    material = command + "\0" + "\0".join(item.scope for item in found)
+    digest = hashlib.sha256(material.encode()).hexdigest()[:16]
+    kinds = tuple(dict.fromkeys(item.kind for item in found))
+    kind = kinds[0] if len(kinds) == 1 else "software"
+    return _SoftwareAcquisition(
+        f"software:command:{digest}",
+        kind,
+        any(item.needs_python_environment for item in found),
+        tuple(launcher for item in found for launcher in item.python_launchers),
+    )
+
+
+def _directory_after(tokens: list[str], cwd: Path | None) -> Path | None:
+    """Track a simple shell `cd`; an expression we cannot resolve makes later paths uncertain."""
+    if not tokens or Path(tokens[0]).name.lower() != "cd":
+        return cwd
+    values = [value for value in tokens[1:] if value != "--"]
+    if len(values) != 1 or any(char in values[0] for char in "$`*"):
+        return None
+    path = Path(values[0]).expanduser()
+    if not path.is_absolute():
+        if cwd is None:
+            return None
+        path = cwd / path
+    return path.resolve()
+
+
+def _acquisition_in_segment(
+    tokens: list[str], cwd: Path | None = None, token_offset: int = 0
+) -> _SoftwareAcquisition | None:
+    if not tokens:
+        return None
+    index = 0
+    while index < len(tokens):
+        name = Path(tokens[index]).name.lower().removesuffix(".exe").removesuffix(".cmd")
+        if name in _SHELL_PREFIXES:
+            index += 1
+            continue
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[index]):
+            index += 1
+            continue
+        if name in _WRAPPERS:
+            index += 1
+            options_with_values = _WRAPPER_OPTIONS_WITH_VALUES.get(name, set())
+            while index < len(tokens):
+                value = tokens[index]
+                option, equals, inline = value.partition("=")
+                if name == "env" and option in {"-S", "--split-string"}:
+                    if equals:
+                        nested, argument_index = inline, index
+                    elif index + 1 < len(tokens):
+                        nested, argument_index = tokens[index + 1], index + 1
+                    else:
+                        return None
+                    acquisition = _software_acquisition(nested, cwd)
+                    if acquisition is None:
+                        return None
+                    launchers = (
+                        tuple((token_offset + argument_index, *path) for path in acquisition.python_launchers)
+                        if not equals
+                        else tuple(
+                            (-(token_offset + argument_index + 1), *path)
+                            for path in acquisition.python_launchers
+                        )
+                    )
+                    return replace(acquisition, python_launchers=launchers)
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", value):
+                    index += 1
+                elif value.partition("=")[0] in options_with_values:
+                    index += 1 if "=" in value else 2
+                elif value.startswith("-"):
+                    index += 1
+                else:
+                    break
+            continue
+        break
+    if index >= len(tokens):
+        return None
+
+    executable_token = tokens[index]
+    executable = Path(executable_token).name.lower().removesuffix(".exe").removesuffix(".cmd")
+    args = tokens[index + 1 :]
+    if executable in {"bash", "sh", "zsh"}:
+        command_index = next(
+            (
+                index
+                for index, arg in enumerate(args)
+                if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:])
+            ),
+            None,
+        )
+        if command_index is not None and command_index + 1 < len(args):
+            acquisition = _software_acquisition(args[command_index + 1], cwd)
+            if acquisition is None:
+                return None
+            argument_index = token_offset + index + command_index + 2
+            return replace(
+                acquisition,
+                python_launchers=tuple((argument_index, *path) for path in acquisition.python_launchers),
+            )
+    python_invocation = bool(re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", executable))
+    if python_invocation:
+        try:
+            module = args.index("-m")
+        except ValueError:
+            module = -1
+        if module >= 0 and module + 1 < len(args):
+            executable, args = args[module + 1].lower(), args[module + 2 :]
+
+    pip_executable = bool(re.fullmatch(r"pip(?:\d+(?:\.\d+)*)?", executable))
+    positional = _positional_args("pip" if pip_executable else executable, args)
+    operation = positional[0] if positional else ""
+    subcommand = positional[1] if len(positional) > 1 else ""
+    explicit_python_destination = any(
+        arg in {"--prefix", "--root", "--system", "--target", "--user", "-t"}
+        or arg.startswith(("--prefix=", "--root=", "--target="))
+        for arg in args
+    )
+    javascript_acquisition = (
+        executable in {"npx", "pnpx", "bunx"} and not {"--no-install", "--offline"} & set(args)
+    ) or (
+        (executable == "npm" and operation in {"add", "ci", "exec", "i", "install", "update", "upgrade"})
+        or (executable == "pnpm" and operation in {"add", "dlx", "i", "install", "up", "update"})
+        or (executable == "yarn" and operation in {"add", "dlx", "install", "up", "upgrade"})
+        or (executable == "bun" and operation in {"add", "install", "update", "x"})
+    )
+    kind = ""
+    python_environment = False
+    uv_script_scope = _uv_script_dependency_scope(args, cwd) if executable == "uv" else None
+    uv_inline_dependencies = (
+        executable == "uv"
+        and operation == "run"
+        and any(
+            arg in {"--with", "--with-editable", "--with-requirements"}
+            or arg.startswith(("--with=", "--with-editable=", "--with-requirements="))
+            for arg in args
+        )
+    )
+    if pip_executable and operation in {"install", "download", "wheel"}:
+        kind = "Python package"
+        python_environment = operation == "install" and not explicit_python_destination
+    elif executable == "uv" and (
+        operation in {"add", "sync"}
+        or (operation == "pip" and subcommand in {"install", "sync"})
+        or (operation == "tool" and subcommand in {"install", "upgrade"})
+        or uv_script_scope is not None
+        or uv_inline_dependencies
+    ):
+        kind = "Python package" if operation != "tool" else "Python tool"
+        python_environment = operation not in {"tool", "run"} and not explicit_python_destination
+    elif executable == "uvx" and "--offline" not in args:
+        kind = "Python tool"
+    elif javascript_acquisition:
+        kind = "JavaScript package"
+    elif executable == "playwright" and operation == "install":
+        kind = "browser runtime"
+    elif executable == "cargo" and operation == "install":
+        kind = "Rust package"
+    elif executable == "go" and operation == "install":
+        kind = "Go package"
+    elif executable in {"gem", "bundle"} and operation in {"install", "update"}:
+        kind = "Ruby package"
+    elif executable == "composer" and operation in {"install", "require", "update"}:
+        kind = "PHP package"
+    elif executable == "dotnet" and operation in {"add", "restore", "tool"}:
+        kind = ".NET package"
+    elif executable in {
+        "brew",
+        "apt",
+        "apt-get",
+        "dnf",
+        "yum",
+        "pacman",
+        "winget",
+        "choco",
+    } and operation in {
+        "add",
+        "install",
+        "upgrade",
+    }:
+        kind = "system package"
+    elif executable in {"hf", "huggingface-cli"} and operation == "download":
+        kind = "model or dataset"
+    elif executable in {"ollama", "docker", "podman"} and operation == "pull":
+        kind = "model or container image"
+    if not kind:
+        return None
+
+    normalized = " ".join(tokens)
+    scope = uv_script_scope or f"software:{executable}:{hashlib.sha256(normalized.encode()).hexdigest()[:16]}"
+    launcher = (
+        ((token_offset + index,),)
+        if python_environment and python_invocation and Path(executable_token).is_absolute()
+        else ()
+    )
+    return _SoftwareAcquisition(scope, kind, python_environment, launcher)
+
+
+_OPTIONS_WITH_VALUES = {
+    "pip": {"--cache-dir", "--cert", "--client-cert", "--proxy", "--python", "--retries", "--timeout"},
+    "uv": {"--cache-dir", "--color", "--config-file", "--directory", "--project", "--python"},
+    "npm": {"--cache", "--prefix", "--registry", "--userconfig", "--workspace"},
+    "pnpm": {"--config-dir", "--dir", "--global-dir", "--store-dir", "--workspace-dir"},
+    "yarn": {"--cwd"},
+    "bun": {"--cwd"},
+}
+
+
+def _positional_args(executable: str, args: list[str]) -> list[str]:
+    """Command words after global options, without mistaking an option value for an operation."""
+    out: list[str] = []
+    values = _OPTIONS_WITH_VALUES.get(executable, set())
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            out.extend(value.lower() for value in args[index + 1 :])
+            break
+        name = arg.partition("=")[0]
+        if name in values:
+            index += 1 if "=" in arg else 2
+            continue
+        if arg.startswith("-"):
+            index += 1
+            continue
+        out.append(arg.lower())
+        index += 1
+    return out
+
+
+def _uv_script_dependency_scope(args: list[str], cwd: Path | None = None) -> str | None:
+    """Stable approval scope when `uv run` may resolve a script's declared packages."""
+    if "run" not in args or {"--offline", "--no-sync"} & set(args):
+        return None
+    run = args.index("run")
+    script_cwd = cwd
+    for index, arg in enumerate(args[:run]):
+        directory = arg.partition("=")[2] if arg.startswith("--directory=") else None
+        if arg == "--directory" and index + 1 < run:
+            directory = args[index + 1]
+        if directory is None:
+            continue
+        if any(char in directory for char in "$`*"):
+            script_cwd = None
+            break
+        selected = Path(directory).expanduser()
+        if not selected.is_absolute():
+            if script_cwd is None:
+                break
+            selected = script_cwd / selected
+        script_cwd = selected.resolve()
+    for value in args[run + 1 :]:
+        if not value.lower().endswith(".py"):
+            continue
+        try:
+            path = Path(value).expanduser()
+            if not path.is_absolute():
+                if script_cwd is None:
+                    raise OSError("the script's working directory is unknown")
+                path = script_cwd / path
+            header = path.read_text(errors="replace")[:65_536]
+        except OSError:
+            # The child shell may resolve a variable or change directory before running
+            # uv. If the harness cannot inspect a Python script, fail closed: otherwise
+            # `cd sub && uv run tool.py` can install PEP 723 dependencies without the
+            # software-acquisition approval. The scope stays stable for this expression.
+            digest = hashlib.sha256(value.encode()).hexdigest()[:16]
+            return f"software:uv-script:{digest}"
+        if not (
+            re.search(r"(?m)^#\s*///\s*script\s*$", header)
+            and re.search(r"(?m)^#\s*dependencies\s*=", header)
+        ):
+            return None
+        fingerprint = f"{path.resolve()}\0{header}"
+        digest = hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
+        return f"software:uv-script:{digest}"
+    return None
+
+
+def _shell_token_spans(command: str) -> list[tuple[str, int, int]]:
+    """Shell words and operators with their source spans, matching the detector's lexer."""
+    out: list[tuple[str, int, int]] = []
+    index = 0
+    while index < len(command):
+        if command[index] in " \t\r":
+            index += 1
+            continue
+        if command[index] == "#":
+            newline = command.find("\n", index)
+            index = len(command) if newline < 0 else newline
+            continue
+        start = index
+        if command[index] in _SHELL_OPERATORS:
+            while index < len(command) and command[index] in _SHELL_OPERATORS:
+                index += 1
+            out.append((command[start:index], start, index))
+            continue
+        quote = ""
+        while index < len(command):
+            char = command[index]
+            if quote:
+                if char == quote:
+                    quote = ""
+                elif char == "\\" and quote == '"' and index + 1 < len(command):
+                    index += 1
+                index += 1
+                continue
+            if char in "'\"":
+                quote = char
+                index += 1
+            elif char == "\\" and index + 1 < len(command):
+                index += 2
+            elif char in " \t\r" or char in _SHELL_OPERATORS:
+                break
+            else:
+                index += 1
+        raw = command[start:index]
+        parsed = shlex.split(raw, comments=False, posix=True)
+        if quote or len(parsed) != 1:
+            raise ValueError("cannot safely locate the parsed shell token")
+        out.append((parsed[0], start, index))
+    return out
+
+
+def _rewrite_python_launchers(command: str, locations: tuple[tuple[int, ...], ...], replacement: Path) -> str:
+    """Replace only parsed installer executable tokens, recursively through shell arguments."""
+    if not locations:
+        return command
+    spans = _shell_token_spans(command)
+    by_token: dict[int, list[tuple[int, ...]]] = {}
+    for location in locations:
+        by_token.setdefault(location[0], []).append(location[1:])
+    changes: list[tuple[int, int, str]] = []
+    for located_index, tails in by_token.items():
+        inline_env = located_index < 0
+        token_index = -located_index - 1 if inline_env else located_index
+        if token_index >= len(spans):
+            raise RuntimeError("cannot safely locate the approved Python installation invocation")
+        value, start, end = spans[token_index]
+        if inline_env:
+            option, equals, nested = value.partition("=")
+            if not equals:
+                raise RuntimeError("cannot safely locate env's split-string command")
+            changed = f"{option}={_rewrite_python_launchers(nested, tuple(tails), replacement)}"
+        elif all(not tail for tail in tails):
+            changed = str(replacement)
+        elif any(not tail for tail in tails):
+            raise RuntimeError("ambiguous Python installation invocation")
+        else:
+            changed = _rewrite_python_launchers(value, tuple(tails), replacement)
+        changes.append((start, end, shlex.quote(changed)))
+    for start, end, changed in reversed(changes):
+        command = command[:start] + changed + command[end:]
+    return command
+
+
+def _python_install_environment(
+    command: str, policy: SandboxPolicy
+) -> tuple[str, dict[str, str], Path | None]:
+    """Prepare an approved Python install for a writable environment, creating one if needed."""
+    project = (policy.project_roots or policy.write_roots)[0].resolve()
+    acquisition = _software_acquisition(command, project)
+    if acquisition is None or not acquisition.needs_python_environment:
+        return command, {}, None
+    roots = tuple(path.resolve() for path in policy.write_roots)
+    project = (policy.project_roots or policy.write_roots)[0].resolve()
+    candidates = [
+        *(
+            Path(value).expanduser()
+            for name in ("VIRTUAL_ENV", "CONDA_PREFIX")
+            if (value := os.environ.get(name))
+        ),
+        project / ".venv",
+        project / "venv",
+        project / ".conda",
+    ]
+    environment = next(
+        (path.resolve() for path in candidates if _environment_python(path) and _inside(path, roots)),
+        None,
+    )
+    if environment is None:
+        environment = next(
+            (
+                candidate
+                for candidate in (project / ".venv", project / ".tinyharness-venv")
+                if _inside(candidate, roots)
+            ),
+            None,
+        )
+    if environment is None:
+        raise RuntimeError("no safe project-local path is available for a Python environment")
+    python = _environment_python(environment)
+    create = python is None
+    scripts = environment / ("Scripts" if sys.platform == "win32" else "bin")
+    selected_python = python or scripts / ("python.exe" if sys.platform == "win32" else "python")
+    env = {
+        "VIRTUAL_ENV": str(environment),
+        "PATH": str(scripts) + os.pathsep + os.environ.get("PATH", ""),
+    }
+    command = _rewrite_python_launchers(command, acquisition.python_launchers, selected_python)
+    if create:
+        launcher = "python" if sys.platform == "win32" else shlex.quote(sys.executable)
+        command = f"{launcher} -m venv {shlex.quote(str(environment))} && {command}"
+    return command, env, environment
+
+
+def _environment_python(environment: Path) -> Path | None:
+    for relative in ("bin/python", "Scripts/python.exe", "python.exe"):
+        candidate = environment / relative
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _inside(path: Path, roots: tuple[Path, ...]) -> bool:
+    resolved = path.resolve()
+    return any(resolved == root or resolved.is_relative_to(root) for root in roots)
+
 
 class BashInput(ToolInput):
     command: str = Field(description="The shell command to run")
     timeout: int = Field(default=120, ge=1, le=600, description="Seconds before the command is killed")
     description: str = Field(default="", description="What the command does, in 5-10 words")
-    sandbox: bool = Field(
-        default=True,
-        description="false runs the command outside the sandbox. Only when it needs what the "
-        "sandbox blocks (the network, e.g. installing packages; writes outside the project). "
-        "The user must approve every such command.",
+    network_host: str = Field(
+        default="",
+        description="One exact hostname this sandboxed command needs. Use 'localhost' when a "
+        "test, preview, or development server needs loopback; use other hosts after the sandbox "
+        "reports that destination as blocked. Approval never removes containment.",
     )
+
+    @field_validator("network_host")
+    @classmethod
+    def _exact_hostname(cls, value: str) -> str:
+        host = value.lower().rstrip(".")
+        if not host:
+            return ""
+        if (
+            len(host) > 253
+            or "://" in host
+            or any(char in host for char in "/*:@[]")
+            or any(char.isspace() for char in host)
+            or not all(
+                len(part) <= 63 and re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", part)
+                for part in host.split(".")
+            )
+        ):
+            raise ValueError("network_host must be one exact hostname, such as cdn.example.com")
+        return host
 
 
 @dataclass
@@ -99,24 +613,29 @@ class BashTool(Tool[BashInput]):
         policy: SandboxPolicy,
         shell: str | None = None,
         proxy: AllowlistProxy | None = None,
+        session_hosts: set[str] | None = None,
     ) -> None:
         self.sandbox = sandbox
         self.policy = policy
         self.shell = shell or default_shell()
         self.proxy = proxy if sandbox is not None else None
+        self.session_hosts = session_hosts if session_hosts is not None else set()
         network = (
             "network only to package registries (PyPI, npm), GitHub and common CDNs, through a "
             "proxy (/sandbox lists them)"
-            if self.proxy
+            if self.proxy or (sandbox and getattr(sandbox, "manages_network", False) and policy.allowed_hosts)
             else "no network access"
         )
         limits = (
-            "It runs in a sandbox: it can write only inside the working directory, scratch and temp "
-            f"directories, can't read credential files, and has {network}"
+            "It runs in a sandbox: it can write only inside the working directory and private "
+            f"scratch/cache directories, can't read credential files, and has {network}"
             + (" (and localhost)" if policy.allow_localhost else "")
             + ". API key variables are stripped, and apps (`open`, browsers like Chrome.app) can't "
-            "start. A command that needs any of these (a download, an API call, a browser, a "
-            "write elsewhere) needs sandbox=false: the user approves each such command."
+            "start. When a download names a blocked destination, retry once with network_host set "
+            "to that exact hostname; approval keeps the command sandboxed. Use structured file/Open "
+            "tools for host actions; Bash never drops containment. Explicit software acquisition "
+            "asks first; run an already-installed executable directly to reuse it without another prompt. "
+            "A bare Python install uses a writable active environment or a project-local .venv."
             if sandbox
             else "It runs without a sandbox, so the user approves every command."
         )
@@ -130,32 +649,78 @@ class BashTool(Tool[BashInput]):
 
     def describe(self, args: BashInput) -> str:
         command = args.command if len(args.command) <= 80 else args.command[:79] + "…"
-        return f"Bash({'unsandboxed: ' if self._unsandboxed(args) else ''}{command})"
+        network = f"; network: {args.network_host}" if args.network_host else ""
+        return f"Bash({command}{network})"
+
+    def target_host(self, args: BashInput) -> str | None:
+        return args.network_host or None
+
+    def approval_boundary(self, args: BashInput) -> ApprovalBoundary | None:
+        project = (self.policy.project_roots or self.policy.write_roots)[0].resolve()
+        acquisition = _software_acquisition(args.command, project)
+        if acquisition is None:
+            return None
+        if acquisition.needs_python_environment:
+            _, _, environment = _python_install_environment(args.command, self.policy)
+            location = f"the writable environment at {environment}"
+        else:
+            location = (
+                "the private tinyharness cache or another permitted root" if self.sandbox else "the host"
+            )
+        return ApprovalBoundary(
+            acquisition.scope,
+            f"this command can download and execute new {acquisition.kind} code; "
+            f"it will write only to {location}",
+            f"allow this {acquisition.kind} acquisition for this session",
+        )
 
     def writes(self, args: BashInput) -> bool:
         return not only_reads(args.command)
 
     def contained(self, args: dict[str, Any]) -> bool:
-        return self.sandbox is not None and not self._unsandboxed(args)
+        return self.sandbox is not None
+
+    def can_send_out(self, args: dict[str, Any]) -> bool:
+        """The sandbox's allowlist is still an outbound channel for readable project data."""
+        return self.sandbox is None or bool(
+            self.policy.allowed_hosts or self.session_hosts or self._network_host(args)
+        )
 
     def escapes(self, args: dict[str, Any]) -> str | None:
-        if not self._unsandboxed(args):
-            return None
-        return "this command runs outside the sandbox: it can use the network and change any of your files"
-
-    def _unsandboxed(self, args: BashInput | dict[str, Any]) -> bool:
-        """A sandbox exists and the model asked to skip it. The gate sees raw arguments,
-        so read them the way the tool will ("false" as a string counts)."""
         if self.sandbox is None:
-            return False
+            return (
+                "no sandbox backend is active: this command can use the network and change any of your files"
+            )
+        host = self._network_host(args)
+        if host and not self._host_is_allowed(host):
+            return (
+                f"this keeps the command sandboxed but lets it connect to {host}; "
+                "that destination can receive any non-secret project data the command can read"
+            )
+        return None
+
+    def rememberable_escape(self, args: dict[str, Any]) -> bool:
+        host = self._network_host(args)
+        return bool(self.sandbox is not None and host and not self._host_is_allowed(host))
+
+    def _host_is_allowed(self, host: str) -> bool:
+        if host == "localhost":
+            return self.policy.allow_localhost or host in self.session_hosts
+        return host_allowed(host, (*self.policy.allowed_hosts, *self.session_hosts))
+
+    def _network_host(self, args: BashInput | dict[str, Any]) -> str:
         if isinstance(args, dict):
             try:
                 args = BashInput.model_validate(args)
             except ValidationError:
-                return False  # the loop rejects the call before it runs
-        return not args.sandbox
+                return ""
+        return args.network_host
 
     def risk(self, args: dict[str, Any], path: Path | None) -> str | None:
+        command = str(args.get("command", ""))
+        for pattern, reason in _DESTRUCTIVE_COMMANDS:
+            if pattern.search(command):
+                return reason
         return None if self.sandbox else "runs a shell command without a sandbox"
 
     async def run(self, args: BashInput, ctx: ToolContext) -> str:
@@ -166,25 +731,58 @@ class BashTool(Tool[BashInput]):
 
     async def execute(self, args: BashInput, ctx: ToolContext) -> Execution:
         """Run the command; what it printed and how it ended, before any notes are added."""
-        argv = [self.shell, "-c", args.command]
-        sandboxed = self.sandbox is not None and args.sandbox
+        command, install_env, _ = _python_install_environment(args.command, self.policy)
+        argv = shell_argv(self.shell, command)
+        sandboxed = self.sandbox is not None
         policy, denied_before, reached_before = self.policy, 0, 0
-        if sandboxed and self.proxy is not None:
-            port = await self.proxy.start()
-            policy = replace(policy, proxy_port=port, env={**policy.env, **self.proxy.env()})
-            denied_before, reached_before = len(self.proxy.denied), len(self.proxy.reached)
-        if sandboxed:
-            assert self.sandbox is not None
-            argv = self.sandbox.wrap(argv, policy)
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=ctx.workspace.root,
-            env=command_env(policy.env if sandboxed else {}),
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=True,  # its own process group, so we can kill all of it
-        )
+        active_proxy = self.proxy
+        temporary_proxy = False
+        added_hosts = (*sorted(self.session_hosts), *((args.network_host,) if args.network_host else ()))
+        if sandboxed and added_hosts:
+            localhost = "localhost" in added_hosts
+            remote_hosts = tuple(host for host in added_hosts if host != "localhost")
+            policy = replace(
+                policy,
+                allow_localhost=policy.allow_localhost or localhost,
+                allowed_hosts=tuple(dict.fromkeys((*policy.allowed_hosts, *remote_hosts))),
+            )
+            if (
+                remote_hosts
+                and not getattr(self.sandbox, "manages_network", False)
+                and (
+                    active_proxy is None
+                    or any(not host_allowed(host, active_proxy.allowed) for host in remote_hosts)
+                )
+            ):
+                active_proxy = AllowlistProxy(policy.allowed_hosts)
+                temporary_proxy = True
+        try:
+            if sandboxed and active_proxy is not None:
+                port = await active_proxy.start()
+                policy = replace(policy, proxy_port=port, env={**policy.env, **active_proxy.env()})
+                denied_before, reached_before = len(active_proxy.denied), len(active_proxy.reached)
+            if sandboxed:
+                assert self.sandbox is not None
+                argv = self.sandbox.wrap(argv, policy)
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=ctx.workspace.root,
+                env=command_env(
+                    {
+                        **(self.sandbox.environment(policy) if sandboxed and self.sandbox else {}),
+                        **install_env,
+                    }
+                ),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                # SRT owns the child job on Windows; elsewhere tinyharness owns a POSIX group.
+                start_new_session=sys.platform != "win32",
+            )
+        except BaseException:
+            if temporary_proxy and active_proxy is not None:
+                active_proxy.close()
+            raise
         spill = ctx.scratch.dir / f"bash-{uuid.uuid4().hex[:8]}.log" if ctx.scratch else None
         output = _Capture(spill)
         timed_out = False
@@ -195,15 +793,25 @@ class BashTool(Tool[BashInput]):
             await proc.wait()  # inside the timeout: it may have closed its output and kept running
 
         try:
-            await asyncio.wait_for(finish(), args.timeout)
-        except TimeoutError:
-            timed_out = True
-            await kill_group(proc)
-        except BaseException:  # Ctrl-C: don't leave the command running
-            await kill_group(proc)
-            raise
-        blocked = list(dict.fromkeys(self.proxy.denied[denied_before:])) if sandboxed and self.proxy else []
-        reached = list(dict.fromkeys(self.proxy.reached[reached_before:])) if sandboxed and self.proxy else []
+            try:
+                await asyncio.wait_for(finish(), args.timeout)
+            except TimeoutError:
+                timed_out = True
+                await kill_group(proc)
+            except BaseException:  # Ctrl-C: don't leave the command running
+                await kill_group(proc)
+                raise
+            blocked = (
+                list(dict.fromkeys(active_proxy.denied[denied_before:])) if sandboxed and active_proxy else []
+            )
+            reached = (
+                list(dict.fromkeys(active_proxy.reached[reached_before:]))
+                if sandboxed and active_proxy
+                else []
+            )
+        finally:
+            if temporary_proxy and active_proxy is not None:
+                active_proxy.close()
         code = None if timed_out else proc.returncode
         return Execution(output.text(), code, timed_out, sandboxed, blocked, reached)
 
@@ -219,13 +827,30 @@ class BashTool(Tool[BashInput]):
         text = text.rstrip() or "(no output)"
         if blocked:
             text += (
-                f"\n(note: the sandbox blocked {', '.join(blocked[:5])}: not in the allowed hosts. "
-                "Run the command with sandbox=false if it needs them.)"
+                f"\n[tinyharness:network_destination_denied host={blocked[0]}] "
+                "The command stayed sandboxed. If this destination is required and trusted, "
+                f"retry with network_host={blocked[0]!r}; do not change the command's containment."
             )
         # Sandbox failures don't say "sandbox": a blocked write says "Operation not permitted",
         # and a macOS app (which needs LaunchServices) dies with "Abort trap: 6".
-        if sandboxed and ("Operation not permitted" in text or (code and ".app/" in args.command)):
-            text += "\n(note: this ran in the sandbox, which may be why; see the Bash tool's limits)"
+        denied = "Operation not permitted" in text or "Permission denied" in text
+        if sandboxed and code and ".app/" in args.command:
+            text += (
+                "\n[tinyharness:host_application_blocked] This command stayed sandboxed. "
+                "Use a structured host-application tool if the user needs to see the result."
+            )
+        elif sandboxed and denied and _looks_like_localhost_denial(text):
+            text += (
+                "\n[tinyharness:localhost_denied] This command stayed sandboxed. If it needs a "
+                "local test, preview, or development server, retry with network_host='localhost'; "
+                "do not change the command's containment."
+            )
+        elif sandboxed and denied:
+            text += (
+                "\n[tinyharness:filesystem_or_process_denied] This command stayed sandboxed. "
+                "Use the working directory, $TMPDIR, or an explicitly configured writable root; "
+                "do not retry outside containment."
+            )
         # The outcome goes last: the CLI reads it from the final line (a failed test run
         # showed as passing when this note came after it).
         if timed_out:
@@ -233,6 +858,11 @@ class BashTool(Tool[BashInput]):
         elif code:
             text += f"\n(exit code {code})"
         return text
+
+
+def _looks_like_localhost_denial(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in ("127.0.0.1", "localhost", "bind on address"))
 
 
 def only_reads(command: str) -> bool:
@@ -262,6 +892,14 @@ def only_reads(command: str) -> bool:
 
 def default_shell() -> str:
     return shutil.which("bash") or shutil.which("sh") or "/bin/sh"
+
+
+def shell_argv(shell: str, command: str) -> list[str]:
+    """Run command chains fail-fast, including failures hidden in pipelines."""
+    name = Path(shell).name.lower()
+    if name in {"bash", "zsh"} or name.startswith("bash"):
+        return [shell, "-e", "-o", "pipefail", "-c", command]
+    return [shell, "-e", "-c", command]
 
 
 class _Capture:

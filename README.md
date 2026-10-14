@@ -30,11 +30,13 @@ framework underneath, so you can read the whole thing in an afternoon.
 - **Robust with small models.** Cut-off replies, empty replies, tool calls written as
   text, malformed arguments and repeated failures are handled by the harness, so mid-size
   open models get work done too. [How](https://github.com/anujdutt9/tinyharness/blob/main/docs/features.md#reliability).
-- **Safe without the friction.** Commands run in an OS sandbox that reaches only package
-  registries, GitHub and CDNs; routine work inside it doesn't ask, anything beyond it
-  does, and API keys never reach the model. Once outside content (a web page, a download)
-  is in the conversation, anything that could send data out asks a person first.
-- **Small and fast.** Six core tools and a short prompt (about 3k tokens before your
+- **Safe without the friction.** Commands run with filesystem and network isolation;
+  routine contained work doesn't ask, while a newly required exact host can be approved
+  without dropping containment. Downloading new executable code asks once; cached tools
+  then run normally, and bare Python installs use a project `.venv`. API keys never reach
+  the model. Once outside content is
+  in the conversation, anything that could send data out asks a person first.
+- **Small and fast.** Seven core tools and a short prompt (about 3k tokens before your
   instructions) that stays the same from call to call, so the provider's cache hits.
 - **Extensible.** One Python file with `setup(th)` adds tools, prompt sections, commands
   and hooks. Web search, PDFs, subagents and parallel teams are built-in extensions you
@@ -60,12 +62,12 @@ In the session, type `/` to autocomplete commands. The ones you'll use most:
 | `/model` | pick a model from any provider you have a key for |
 | `/mode` | change the permission mode (or press Shift+Tab) |
 | `/effort` | how hard the model reasons, `low` … `max`, the same for every model |
-| `/skills`, `/<skill>` | list or run skills |
+| `/skills`, `/<skill>` | find or run skills |
 | `/extensions` | what's on and what it costs per request; `/extensions on web` |
 | `/sandbox` | what commands can write, read and reach |
 | `/btw <question>` | a quick side question, even while the agent works; not added to the conversation |
-| `/context`, `/clear` | context usage, or a fresh conversation |
-| `/key [provider]` | add or replace a provider's API key |
+| `/sessions`, `/context`, `/clear` | switch conversations, inspect context, or start fresh |
+| `/key [provider]` | add or replace a provider key saved in `auth.json` |
 
 Useful flags: `-c` (continue the latest conversation), `-r` (pick one), `-p "prompt"`
 (run one prompt and exit), `--model provider:model`, `--mode ask`, `--cwd <dir>`.
@@ -99,23 +101,25 @@ The CLI and the SDK consume the same typed event stream. For headless runs, pass
 code (`SessionOptions(extensions=[...])`) and tested against a scripted model
 (`tinyharness.testing`). Subagents can be defined in
 code (`AgentSpec`) or Markdown, each on any provider's model, and conversations can be
-resumed from code (`SessionOptions(resume="latest")`). See [`examples/`](https://github.com/anujdutt9/tinyharness/tree/main/examples) for a
+resumed from code (`SessionOptions(resume="latest")`). Post-turn evaluators can be passed
+with `SessionOptions(evaluators=[...], evaluator_timeout=30.0)`; their bounded results are
+appended to the versioned trace without changing the completed conversation. See [`examples/`](https://github.com/anujdutt9/tinyharness/tree/main/examples) for a
 one-shot query, a multi-turn session, resuming, a custom tool, a permission policy with
-hooks, skills, subagents on different models, and an extension.
+hooks, skills, subagents on different models, an extension, and a post-turn evaluator.
 
 ## What's inside
 
 | | |
 |---|---|
 | **Agent loop** | Streaming, parallel read-only tools, argument validation and repair, recovery from cut-off and empty replies, retries with backoff |
-| **Tools** | Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash`. Built-in extensions you turn on: `web` (WebSearch, WebFetch), `pdf`, `open`, `todo`, `agents` (Agent, Team) |
+| **Tools** | Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash` `Open`. Built-in extensions you turn on: `web` (WebSearch, WebFetch), `pdf`, `todo`, `agents` (Agent, Team) |
 | **Extensions** | One Python file with `setup(th)` adds tools, prompt sections, slash commands and event handlers ([docs/extension-api.md](docs/extension-api.md)); `/extensions on|off` |
 | **Permissions** | Routine work in the project and the sandbox doesn't ask; anything beyond it asks, with a diff for edits. Modes `default`, `auto` (an LLM classifier for unclear cases), `plan`, `ask` (every edit and command) and `bypassPermissions`; persistent allow/deny rules |
-| **Sandbox** | Seatbelt on macOS: commands write only inside the project, can't read credential files, and reach only an allowlist of hosts (package registries, GitHub, CDNs) through a local proxy; `/sandbox` shows it |
+| **Sandbox** | Native Seatbelt on macOS; optional Sandbox Runtime on Linux, Windows and as a fallback. Commands have narrow writes, blocked credential reads (SRT covers the home and project neighborhoods) and allowlisted network access; `/sandbox` shows it |
 | **Context** | Cap oversized messages, stub old tool output, then summarize, without rebuilding the prompt cache every turn |
-| **Subagents and teams** | Isolated contexts on any model; `Team` runs a dependency graph of tasks, up to 4 teammates at once |
-| **Skills, hooks, plugins** | `SKILL.md` skills (compatible with Claude Code's), shell or Python hooks on 5 events, plugins that bundle them |
-| **Resume** | Lossless JSONL logs outside your repo; on resume, the agent is told what changed while you were away |
+| **Subagents and teams** | Isolated contexts on any model; `Team` runs a dependency graph of tasks; the model picks the team's size, up to 20 subagents at once (`max_parallel_agents`) |
+| **Skills, hooks, plugins** | Portable `SKILL.md` skills, shell or Python hooks on 5 events, and plugins that bundle them |
+| **Resume & traces** | Lossless, schema-versioned JSONL logs outside your repo with correlated main-loop model/tool decisions and latency; on resume, the agent is told what changed while you were away |
 
 Each of these in detail: [docs/features.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/features.md).
 
@@ -175,7 +179,7 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy
 uv build && uv run python scripts/check_dist.py   # build and smoke-test the package
 ```
 
-Releasing: bump `__version__` in `tinyharness/__init__.py`, add a
+Releasing: bump `__version__` in `tinyharness/version.py`, add a
 [CHANGELOG](https://github.com/anujdutt9/tinyharness/blob/main/CHANGELOG.md) entry, then push a matching tag (`git tag v0.2.0 && git push --tags`).
 The release workflow tests, builds and publishes to PyPI.
 

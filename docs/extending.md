@@ -2,7 +2,7 @@
 
 The main way to add anything is an **extension**: one Python file with a `setup(th)`
 function that adds tools, prompt sections, slash commands and event handlers. The
-built-in features (web, pdf, open, todo, agents) are extensions too. The full contract is
+built-in features (web, pdf, todo, agents) are extensions too. The full contract is
 in [extension-api.md](extension-api.md); this page shows the common cases.
 
 Besides extensions there are hooks, subagents, plugins and skills (see
@@ -127,6 +127,22 @@ def guard(event, payload):
 
 
 SessionOptions(hooks=[Hook(event="PreToolUse", type="python", callable=guard)])
+```
+
+## Post-turn evaluators
+
+SDK hosts can attach observational evaluators. They run after the agent loop has completed
+but before the final `Done` event reaches the SDK consumer. Each receives a deep-copied
+message snapshot and writes its return value to the session JSONL as an `evaluation` event.
+Each evaluator has a 30-second default timeout; a failure or timeout is logged and never
+changes the task's answer or history. Set a shorter bound with `evaluator_timeout`.
+
+```python
+async def tests_passed(ctx):
+    return {"passed": (ctx.working_dir / ".tests-passed").exists()}
+
+
+SessionOptions(evaluators=[tests_passed], evaluator_timeout=10.0)
 ```
 
 ## Subagents

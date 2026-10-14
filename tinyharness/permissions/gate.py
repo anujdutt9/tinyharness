@@ -5,11 +5,12 @@ Layers are checked in order and the first one with an opinion wins:
     1. tool     bookkeeping tools (TodoWrite) never need permission
     2. path     the target path must resolve
     3. hooks    PreToolUse hooks can allow or deny
-    4. rules    config rules and "don't ask again" answers (deny beats allow)
-       escape   a call that leaves its sandbox (Bash with sandbox=false), or that
-                changes a file that runs code outside it (hooks, plugins, git hooks,
-                settings), skips allow rules and steps 5-6: it always asks, and can't
-                be remembered
+    4. boundary contained acquisition capabilities ask before execution; a matching
+                session approval may cover the exact operation
+       rules    config rules and "don't ask again" answers (deny beats allow)
+       escape   a call that crosses a hard boundary, or changes a file that runs code
+                outside it (hooks, plugins, git hooks, settings), skips allow rules and
+                always asks
     5. mode     plan / bypass / reads-are-free / project edits / sandboxed commands /
                 auto (see `_auto`)
     6. scratch  the agent's own scratch directory
@@ -30,12 +31,12 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from tinyharness.permissions.modes import PermissionMode
-from tinyharness.permissions.rules import DOMAIN, PermissionRules, Rule
+from tinyharness.permissions.rules import CAPABILITY, DOMAIN, PermissionRules, Rule
 
 if TYPE_CHECKING:
     from tinyharness.hooks import HookRunner
     from tinyharness.permissions.classifier import AutoModeClassifier
-    from tinyharness.tools.base import Tool
+    from tinyharness.tools.base import ApprovalBoundary, Tool
     from tinyharness.workspace import Scratch, Workspace
 
 
@@ -55,6 +56,8 @@ class PermissionRequest:
 
 @dataclass
 class Decision:
+    """Describe the permission gate's decision for one tool call."""
+
     allow: bool
     reason: str = ""
     source: str = ""  # tool | path | hook | rule | mode | classifier | prompt | policy ...
@@ -98,6 +101,13 @@ class PermissionGate:
     # While there is any, calls that can send data out ask a person ("Rule of Two").
     outside: Callable[[], list[str]] = field(default=lambda: [], repr=False)
     callback: PermissionCallback | None = None
+    # Bash and the gate share this set. Remembering a host must expand the sandbox's
+    # actual policy too; remembering only the prompt decision leaves later commands blocked.
+    session_network_hosts: set[str] = field(default_factory=set, repr=False)
+    # An explicitly invoked skill may declare a reviewed set of exact destinations. The
+    # first host still asks; choosing the session option grants that finite set, so a
+    # redirect chain or multi-source workflow does not turn into one prompt per host.
+    network_bundles: dict[str, tuple[str, ...]] = field(default_factory=dict, repr=False)
     scratch: Scratch | None = None
     protected: tuple[Path, ...] = ()  # changing anything under these always asks (see `_protected`)
     agent: str = ""  # a subagent's gate: whose (shown when it asks)
@@ -127,6 +137,7 @@ class PermissionGate:
         target_path: str | None,
         *,
         target_host: str | None = None,
+        approval_boundary: ApprovalBoundary | None = None,
         summary: str = "",
         history_tail: str = "",
     ) -> Decision:
@@ -137,7 +148,7 @@ class PermissionGate:
             path = self.workspace.resolve(target_path)  # the one resolution: see Decision.path
             if path is None:
                 return Decision(False, f"invalid path: {target_path}", "path")
-        decision = await self._decide(tool, args, path, target_host, summary, history_tail)
+        decision = await self._decide(tool, args, path, target_host, approval_boundary, summary, history_tail)
         if decision.allow and path is not None:
             decision.path = path
         return decision
@@ -148,40 +159,94 @@ class PermissionGate:
         args: dict[str, Any],
         path: Path | None,
         target_host: str | None,
+        approval_boundary: ApprovalBoundary | None,
         summary: str,
         history_tail: str,
     ) -> Decision:
         trusted = path is not None and self.workspace.is_trusted(path)
 
+        site = f"{DOMAIN}{target_host.lower()}" if target_host else None
+        sandbox_escape = tool.escapes(args)
+        protected_escape = self._protected(tool, path)
+        persistent_escape = self._persists_outside(tool)
+        escape = sandbox_escape or protected_escape or persistent_escape
+        scoped_escape = escape is not None and tool.rememberable_escape(args)
         if self.hooks is not None:
             verdict = await self.hooks.fire("PreToolUse", {"tool": tool.name, "args": args})
             if verdict and verdict.get("decision") in ("allow", "deny"):
                 allow = verdict["decision"] == "allow"
-                return Decision(allow, verdict.get("reason", f"hook {verdict['decision']}"), "hook")
+                # Hooks may deny anything, but an allow hook cannot weaken containment or
+                # approve code/config that will execute later outside it.
+                if not allow or (escape is None and approval_boundary is None):
+                    return Decision(allow, verdict.get("reason", f"hook {verdict['decision']}"), "hook")
 
-        site = f"{DOMAIN}{target_host.lower()}" if target_host else None
-        escape = tool.escapes(args) or self._protected(tool, path) or self._persists_outside(tool)
+        separate_boundary = approval_boundary is not None and (escape is None or scoped_escape)
+        if separate_boundary:
+            assert approval_boundary is not None
+            capability = CAPABILITY + approval_boundary.key
+            capability_verdict = self.rules.check(tool.name, capability)
+            if capability_verdict == "deny":
+                return Decision(False, "blocked by a deny rule", "rule")
+            remembered = Rule(tool.name, capability) in self.rules.allow
+            if not remembered:
+                if self.mode == PermissionMode.PLAN:
+                    return Decision(False, "plan mode blocks software acquisition", "mode")
+                request = PermissionRequest(
+                    agent=self.agent,
+                    tool=tool.name,
+                    args=args,
+                    summary=summary or tool.name,
+                    path=str(path) if path else None,
+                    remember_label=approval_boundary.remember_label,
+                    warning=approval_boundary.warning + self._outside_warning(),
+                )
+                answer = await self._ask(request)
+                if not answer.allow:
+                    return answer
+                if answer.remember:
+                    self.rules.add_allow(Rule(tool.name, capability))
         match self.rules.check(tool.name, str(path) if path else site):
             case "deny":
                 return Decision(False, "blocked by a deny rule", "rule")
-            case "allow" if escape is None:  # rules were written with the sandbox in place
+            case "allow" if escape is None:
                 return Decision(True, "matches an allow rule", "rule")
+            case "allow" if scoped_escape:
+                # The remembered rule grants only this sandbox-enforced capability. The
+                # command still passes through mode and risk checks below.
+                if tool.name == "Bash" and site and site.startswith(DOMAIN):
+                    self.session_network_hosts.add(site.removeprefix(DOMAIN))
+                escape = None
 
         if escape is not None:
-            if self.mode == PermissionMode.BYPASS:
-                return Decision(True, "bypassPermissions mode", "mode")
             if self.mode == PermissionMode.PLAN:
                 return Decision(False, "plan mode blocks mutating tools", "mode")
+            risk = self._auto_risk(tool, args, path, trusted) if self.mode == PermissionMode.AUTO else None
             request = PermissionRequest(
                 agent=self.agent,
                 tool=tool.name,
                 args=args,
                 summary=summary or tool.name,
                 path=str(path) if path else None,
-                remember_label="",
-                warning=escape + self._outside_warning(),
+                remember_label=(
+                    self._remember_label(tool, path, trusted, target_host)
+                    if scoped_escape and risk is None
+                    else ""
+                ),
+                reason=risk or "",
+                warning=(
+                    (
+                        f"{approval_boundary.warning}; {escape}"
+                        if approval_boundary is not None and not separate_boundary
+                        else escape
+                    )
+                    + self._network_bundle_warning(tool, target_host)
+                    + self._outside_warning()
+                ),
             )
-            return await self._ask(request)
+            answer = await self._ask(request)
+            if answer.allow and answer.remember and request.remember_label:
+                self._remember(tool, path, trusted, site)
+            return answer
 
         risk = self._auto_risk(tool, args, path, trusted) if self.mode == PermissionMode.AUTO else None
         if risk is None and (decision := await self._check_mode(tool, args, path, trusted, history_tail)):
@@ -192,9 +257,9 @@ class PermissionGate:
         if self._in_scratch(path):
             return Decision(True, "agent scratch directory", "mode")
 
-        # Auto mode asks about a risky change to a file case by case: a "don't ask again"
-        # there would stop it judging the next one (and used to switch modes).
-        case_by_case = risk is not None and path is not None
+        # Auto mode asks about every risky action case by case: a "don't ask again"
+        # would stop it judging the next one (and used to switch modes).
+        case_by_case = risk is not None
         request = PermissionRequest(
             agent=self.agent,
             tool=tool.name,
@@ -203,7 +268,7 @@ class PermissionGate:
             path=str(path) if path else None,
             remember_label="" if case_by_case else self._remember_label(tool, path, trusted, target_host),
             reason=risk or "",
-            warning=self._outside_warning().removeprefix("; ") if tool.network else "",
+            warning=self._outside_warning().removeprefix("; ") if tool.can_send_out(args) else "",
         )
         decision = await self._ask(request)
         if decision.allow and decision.remember and request.remember_label:
@@ -250,6 +315,11 @@ class PermissionGate:
     async def _check_mode(
         self, tool: Tool[Any], args: dict[str, Any], path: Path | None, trusted: bool, history_tail: str
     ) -> Decision | None:
+        # A sandbox limits destinations, not what an allowed destination receives. Once
+        # outside text can steer the model, a person decides before any outbound-capable
+        # call, including Bash and bypass mode.
+        if self.outside() and tool.can_send_out(args):
+            return None
         if self.mode == PermissionMode.BYPASS:
             return Decision(True, "bypassPermissions mode", "mode")
         if self.mode == PermissionMode.PLAN and not tool.read_only:
@@ -263,9 +333,6 @@ class PermissionGate:
             return Decision(True, "default: inside the working directory", "mode")
         if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO) and tool.contained(args):
             return Decision(True, f"{self.mode.value}: runs in the sandbox", "mode")
-        # Reading a public page is routine; a URL with a query string could carry data out.
-        if tool.network and self.outside():
-            return None  # outside content could be steering this: a person decides (see check)
         if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO) and _public_read(tool, args):
             return Decision(True, f"{self.mode.value}: reading a public web page", "mode")
         if self.mode == PermissionMode.AUTO:
@@ -285,7 +352,7 @@ class PermissionGate:
         """Why auto mode must ask about this call, or None if it may decide itself."""
         if tool.read_only or not tool.needs_permission or self._in_scratch(path):
             return None
-        if path is not None and _GIT_INTERNALS.search(str(path)):
+        if path is not None and _GIT_INTERNALS.search(path.as_posix()):
             return "it changes version-control internals (.git)"
         if path is not None and not trusted:
             return "it changes a file outside the project"
@@ -315,6 +382,9 @@ class PermissionGate:
         self, tool: Tool[Any], path: Path | None, trusted: bool, host: str | None = None
     ) -> str:
         if host:
+            if bundle := self._network_bundle(tool, host):
+                name, hosts = bundle
+                return f"allow {len(hosts)} exact destinations declared by /{name} this session"
             return f"allow {tool.name} for {host} this session"
         if path is None:
             return f"don't ask again for {tool.name} this session"
@@ -326,17 +396,44 @@ class PermissionGate:
 
     def _remember(self, tool: Tool[Any], path: Path | None, trusted: bool, site: str | None = None) -> None:
         if site:
-            self.rules.add_allow(Rule(tool.name, site))
+            host = site.removeprefix(DOMAIN)
+            bundle = self._network_bundle(tool, host)
+            hosts = bundle[1] if bundle else (host,)
+            for allowed_host in hosts:
+                self.rules.add_allow(Rule(tool.name, f"{DOMAIN}{allowed_host}"))
+                if tool.name == "Bash":
+                    self.session_network_hosts.add(allowed_host)
         elif path is None:
             self.rules.add_allow(Rule(tool.name))
         elif trusted:
             self.set_mode(PermissionMode.DEFAULT)
         else:
-            folder = glob.escape(str(_directory(path)))
+            folder = glob.escape(_directory(path).as_posix())
             for name in _readers(tool):
                 self.rules.add_allow(Rule(name, f"{folder}/*"))
                 if name in READING_TOOLS:
                     self.rules.add_allow(Rule(name, folder))  # Grep or Glob on the folder itself
+
+    def add_network_bundle(self, name: str, hosts: tuple[str, ...]) -> None:
+        """Make a skill's finite destination set available to the session approval UI."""
+        if hosts:
+            self.network_bundles[name] = tuple(dict.fromkeys(hosts))
+
+    def _network_bundle(self, tool: Tool[Any], host: str) -> tuple[str, tuple[str, ...]] | None:
+        if tool.name != "Bash":
+            return None
+        lowered = host.lower()
+        return next(
+            ((name, hosts) for name, hosts in self.network_bundles.items() if lowered in hosts),
+            None,
+        )
+
+    def _network_bundle_warning(self, tool: Tool[Any], host: str | None) -> str:
+        bundle = self._network_bundle(tool, host) if host else None
+        if bundle is None:
+            return ""
+        name, hosts = bundle
+        return f"; /{name} declares this exact destination set: {', '.join(hosts)}"
 
 
 _GIT_INTERNALS = re.compile(r"(^|/)\.git(/|$)")

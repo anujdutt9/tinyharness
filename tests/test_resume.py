@@ -9,9 +9,12 @@ from conftest import ScriptedLLM
 from tinyharness import Session, SessionOptions
 from tinyharness.agent.history import Message, ToolCall
 from tinyharness.agent.sessionlog import replay
+from tinyharness.agent.transcript import SessionBusyError, Transcript
 from tinyharness.agent.world import STALE_MARK, UNFINISHED
-from tinyharness.paths import project_dir, state_dir
+from tinyharness.paths import move_legacy_state, project_dir, state_dir
 from tinyharness.session import list_sessions
+from tinyharness.tools.memory import MemoryTool, memory_history_path, read_history
+from tinyharness.tools.todo import format_todos
 
 
 @pytest.fixture
@@ -24,6 +27,17 @@ def work(tmp_path, monkeypatch):
 
 def options(work, **kw) -> SessionOptions:
     return SessionOptions(config_path=work.parent / "none.toml", working_dir=work, **kw)
+
+
+def test_a_session_log_has_only_one_live_writer(work):
+    """Two terminals may run at once, but never append to the same conversation."""
+    first = Transcript(work, "shared")
+    try:
+        with pytest.raises(SessionBusyError, match="another tinyharness window"):
+            Transcript(work, "shared")
+    finally:
+        first.close()
+    Transcript(work, "shared").close()  # the OS lock is released on close (and on process exit)
 
 
 def script(session: Session, *turns) -> ScriptedLLM:
@@ -67,6 +81,40 @@ async def test_a_resumed_conversation_is_the_same_conversation(work):
         assert llm.requests[0][-1].content == "continue"  # nothing changed: no note
     finally:
         resumed.close()
+
+
+async def test_repl_switch_keeps_current_session_until_target_is_available(work):
+    """A quick switch never steals a conversation from another live terminal."""
+    import io
+
+    from rich.console import Console
+
+    from tinyharness.cli.render import Renderer
+    from tinyharness.cli.repl import Repl
+    from tinyharness.cli.theme import THEME
+
+    target = Session(options(work))
+    await turn(target, "target conversation", "Target reply.")
+    target_id = target.id
+    current = Session(options(work))
+    await turn(current, "current conversation", "Current reply.")
+    current_id = current.id
+    console = Console(file=io.StringIO(), theme=THEME, color_system=None)
+    repl = Repl(current, console, Renderer(console))
+    try:
+        activity = {item.id: item.active for item in list_sessions(options(work))}
+        assert activity[target_id] and activity[current_id]
+        assert not repl.switch_session(target_id)
+        assert repl.session.id == current_id
+        assert "open in another tinyharness window" in console.file.getvalue()
+
+        target.close()
+        assert repl.switch_session(target_id)
+        assert repl.session.id == target_id
+        assert any(m.content == "target conversation" for m in repl.session.history.messages)
+    finally:
+        target.close()
+        repl.session.close()
 
 
 TODO = {"content": "Check", "status": "in_progress", "activeForm": "Checking"}
@@ -249,11 +297,11 @@ async def test_a_branch_switch_is_reported(repo):
 
 
 async def test_changed_instructions_are_reported_and_used(work):
-    (work / "AGENT.md").write_text("Use tabs.")
+    (work / "AGENTS.md").write_text("Use tabs.")
     first = Session(options(work))
     await turn(first, "hi", "hello")
     first.close()
-    (work / "AGENT.md").write_text("Use spaces.")
+    (work / "AGENTS.md").write_text("Use spaces.")
     resumed = Session(options(work, resume="latest"))
     try:
         assert resumed.resume_report.instructions_changed
@@ -338,16 +386,45 @@ def test_long_project_paths_get_short_unique_names(tmp_path):
     assert state_dir(a) != state_dir(b) and len(state_dir(a).name) <= 111
 
 
+def test_project_state_directory_has_a_readable_collision_resistant_name(tmp_path):
+    first, second = tmp_path / "one" / "app", tmp_path / "two" / "app"
+    assert state_dir(first).name.startswith("app-")
+    assert len(state_dir(first).name.removeprefix("app-")) == 16
+    assert state_dir(first) != state_dir(second)
+    assert str(tmp_path).replace("/", "-") not in state_dir(first).name
+
+
+def test_path_named_project_state_moves_to_the_readable_name(tmp_path):
+    from tinyharness.paths import _path_named_state_dir
+
+    work = tmp_path / "my app"
+    old = _path_named_state_dir(work)
+    (old / "sessions").mkdir(parents=True)
+    (old / "sessions" / "saved.jsonl").write_text("saved\n")
+
+    move_legacy_state(work)
+
+    assert not old.exists()
+    assert (state_dir(work) / "sessions" / "saved.jsonl").read_text() == "saved\n"
+
+
 # ---- /clear starts a new conversation ----
 
 
 async def test_clear_keeps_the_old_conversation_resumable(work):
-    """As in Claude Code: /clear moves on to a new conversation; the old one isn't lost."""
+    """The /clear command starts a new conversation without losing the old one."""
     first = Session(options(work))
     await turn(first, "build the deck", "Built it.")
     old_id, before = first.id, contents(first)
     first.clear()
     assert first.id != old_id and contents(first) == []
+    assert first.ctx.session_id == first.id and first.ctx.turn_id == ""
+    memory = MemoryTool(work)
+    await memory.run(
+        memory.parse({"action": "add", "scope": "project", "note": "Audit the new conversation"}),
+        first.ctx,
+    )
+    assert read_history(memory_history_path("project", work))[-1]["session"] == first.id
     await turn(first, "something else", "Sure.")
     first.close()
 
@@ -391,6 +468,22 @@ def test_clearing_an_empty_conversation_makes_no_new_one(work):
         assert session.id == before
     finally:
         session.close()
+
+
+async def test_resume_migrates_todos_saved_before_stable_ids(work):
+    """Seen live: formatting an old resumed todo list raised KeyError for its missing id."""
+    first = Session(options(work, todo_list=True))
+    await turn(first, "make a plan", "Planned.")
+    first.ctx.todos = [dict(TODO)]
+    first._sync()
+    first.close()
+
+    resumed = Session(options(work, resume="latest", todo_list=True))
+    try:
+        assert resumed.ctx.todos[0]["id"].startswith("task-")
+        assert "Checking" in format_todos(resumed.ctx.todos)
+    finally:
+        resumed.close()
 
 
 async def test_after_resume_a_file_changed_by_the_user_must_be_read_again(work):

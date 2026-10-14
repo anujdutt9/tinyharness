@@ -2,7 +2,7 @@
 
 An extension is one Python file with a `setup(th)` function. It can add tools, sections
 of the system prompt, slash commands and handlers for agent events. The built-in features
-(web, pdf, open, todo, agents) are extensions written against this same API, in
+(web, pdf, todo, agents) are extensions written against this same API, in
 [`tinyharness/extensions/`](../tinyharness/extensions); the API itself is
 [`tinyharness/ext.py`](../tinyharness/ext.py).
 
@@ -25,7 +25,10 @@ def setup(th: Extension) -> None:
     async def hello(name: str) -> str:
         """Greet someone by name.
 
-        name: who to greet
+        Parameters
+        ----------
+        name : str
+            Person to greet.
         """
         return f"{th.config.get('greeting', 'Hello')}, {name}."
 
@@ -88,8 +91,8 @@ th.remove_tool("Glob")  # take a core tool away
 
 - The decorator builds a tool from an async function: its name (or `name=`), the first
   paragraph of its docstring as the description, its type hints and defaults as the
-  schema, and `arg: description` lines in the docstring as the field descriptions. A
-  parameter named `ctx` receives the `ToolContext` (workspace, scratch folder, usage).
+  schema, and its numpydoc `Parameters` section as the field descriptions. A parameter
+  named `ctx` receives the `ToolContext` (workspace, scratch folder, usage).
 - `read_only=True`: no side effects. It never asks, may run alongside other read-only
   calls, and is offered in plan mode.
 - `network=True`: it reaches other machines, and the permission gate treats it like
@@ -199,10 +202,9 @@ NEEDS = ["network:api.github.com", "write:~/notes"]
   plus the extension's approved needs: its hosts through a proxy of its own, its folders
   writable. It returns a `RunResult` with `.code` (None if it timed out) and `.output`.
 
-An extension's own Python still runs in the harness's process with the harness's rights,
-as in pi, opencode and Claude Code: `NEEDS` governs its tools and the commands it runs
-through `th.run`, not arbitrary code in its module. Only load extensions you trust, as you
-would any package.
+An extension's own Python still runs in the harness's process with the harness's rights:
+`NEEDS` governs its tools and the commands it runs through `th.run`, not arbitrary code in
+its module. Only load extensions you trust, as you would any package.
 
 ## Built-in extensions
 
@@ -210,11 +212,10 @@ would any package.
 |---|---|---|
 | `web` | WebSearch, WebFetch, and when to cite pages | no web access beyond the sandbox's allowlist |
 | `pdf` | Pdf: pages, text and images of a PDF | the model reads PDFs with Bash (`pdftotext`, pypdf) |
-| `open` | Open: shows you a file or URL in its app | the model tells you the path |
 | `todo` | TodoWrite: a live checklist for multi-step work | `todo_list = true` turns it on too |
 | `agents` | Agent and Team, and how to brief a subagent | no subagents |
 
-None is on by default. Hooks (`hooks.toml`), plugins, skills and `SessionOptions(tools=...)`
+These specialist extensions are off by default. Hooks (`hooks.toml`), plugins, skills and `SessionOptions(tools=...)`
 work as before, alongside extensions.
 
 ## Skills

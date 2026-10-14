@@ -58,6 +58,21 @@ async def test_a_directory_swapped_for_a_symlink_after_approval_is_refused(proje
     assert (outside / "f.txt").read_text() == "not yours\n"
 
 
+@pytest.mark.parametrize("tool", [WriteTool(), EditTool()])
+async def test_windows_fallback_refuses_a_directory_swapped_after_approval(project, tool, monkeypatch):
+    """Seen live: the no-dir-fd fallback followed a swapped parent outside the project."""
+    root, outside = project
+    raw = {"path": "sub/f.txt", "content": "pwned\n", "old_string": "original", "new_string": "pwned"}
+    ctx = make_ctx(root)
+    ctx.read_paths.add(str(root / "sub" / "f.txt"))
+    args = await approve(root, tool, raw)
+    swap_for_link(root / "sub", outside)
+    monkeypatch.setattr(files, "_SUPPORTED", False)
+    with pytest.raises(ToolError, match=r"sub in .* is now a symlink or not a directory"):
+        await tool.run(args, ctx)
+    assert (outside / "f.txt").read_text() == "not yours\n"
+
+
 async def test_a_file_swapped_for_a_symlink_is_replaced_not_followed(project):
     root, outside = project
     ctx = make_ctx(root)
@@ -91,8 +106,27 @@ async def test_reads_refuse_a_path_that_became_a_symlink(project, tool, name, sw
         swap_for_link(root / "sub", outside)
     else:
         swap_for_link(root / "sub" / name, outside / name)
-    with pytest.raises(ToolError, match="is now a symlink"):
+    with pytest.raises(ToolError, match=r"is now a (?:symlink|reparse point)"):
         await tool.run(args, make_ctx(root))
+
+
+async def test_windows_fallback_read_refuses_a_swapped_parent(project, monkeypatch):
+    """The Windows path fallback must not read through a planted directory reparse point."""
+    root, outside = project
+    args = await approve(root, ReadTool(), {"path": "sub/f.txt"})
+    swap_for_link(root / "sub", outside)
+    monkeypatch.setattr(files, "_SUPPORTED", False)
+    with pytest.raises(ToolError, match=r"is now a (?:symlink|reparse point)"):
+        await ReadTool().run(args, make_ctx(root))
+
+
+async def test_windows_fallback_read_refuses_a_swapped_file(project, monkeypatch):
+    root, outside = project
+    args = await approve(root, ReadTool(), {"path": "sub/f.txt"})
+    swap_for_link(root / "sub" / "f.txt", outside / "f.txt")
+    monkeypatch.setattr(files, "_SUPPORTED", False)
+    with pytest.raises(ToolError, match=r"is now a (?:symlink|reparse point)"):
+        await ReadTool().run(args, make_ctx(root))
 
 
 async def test_read_still_reads_an_approved_file(project):
@@ -137,4 +171,6 @@ async def test_edit_keeps_the_files_permissions(project):
     ctx = make_ctx(root)
     ctx.read_paths.add(str(script))
     await call(EditTool(), {"path": "run.sh", "old_string": "old", "new_string": "new"}, ctx)
-    assert script.read_text() == "echo new\n" and stat.S_IMODE(script.stat().st_mode) == 0o750
+    assert script.read_text() == "echo new\n"
+    if os.name != "nt":
+        assert stat.S_IMODE(script.stat().st_mode) == 0o750

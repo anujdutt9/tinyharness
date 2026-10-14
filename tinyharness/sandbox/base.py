@@ -10,6 +10,9 @@ class Sandbox(ABC):
     """An OS mechanism that confines a command to a SandboxPolicy."""
 
     name: ClassVar[str]
+    # Native backends use tinyharness's localhost allowlist proxy. Sandbox Runtime
+    # applies the same domain policy itself.
+    manages_network: ClassVar[bool] = False
 
     @classmethod
     @abstractmethod
@@ -19,3 +22,7 @@ class Sandbox(ABC):
     @abstractmethod
     def wrap(self, argv: list[str], policy: SandboxPolicy) -> list[str]:
         """The command line that runs `argv` under `policy`."""
+
+    def environment(self, policy: SandboxPolicy) -> dict[str, str]:
+        """Environment additions for the outer sandbox process and its child."""
+        return policy.env

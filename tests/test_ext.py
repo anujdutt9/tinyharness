@@ -1,6 +1,7 @@
 """Extensions: one file with setup(th) adds tools, prompt sections, commands and event
 handlers, all registered at session start (docs/extension-api.md)."""
 
+import json
 import textwrap
 
 import pytest
@@ -23,7 +24,10 @@ def setup(th: Extension) -> None:
     async def hello(name: str, excited: bool = False) -> str:
         """Greet someone by name.
 
-        name: who to greet
+        Parameters
+        ----------
+        name : str
+            Person to greet.
         """
         return f"Hello, {name}{'!' if excited else '.'}"
 
@@ -66,16 +70,35 @@ async def test_a_function_becomes_a_tool_with_a_schema_from_its_signature(tmp_pa
     async def lookup(city: str, days: int = 3, ctx=None) -> str:
         """Look up the weather.
 
-        city: the city's name
+        Parameters
+        ----------
+        city : str
+            The city's name.
+        days : int, default=3
+            Number of forecast days.
         """
         return f"{city} for {days} days, {ctx is not None}"
 
     tool = function_tool(lookup, read_only=True)
     schema = tool.input_schema()
     assert tool.name == "lookup" and tool.description == "Look up the weather." and tool.read_only
-    assert schema["required"] == ["city"] and schema["properties"]["city"]["description"] == "the city's name"
+    assert schema["required"] == ["city"]
+    assert schema["properties"]["city"]["description"] == "The city's name."
+    assert schema["properties"]["days"]["description"] == "Number of forecast days."
     assert schema["properties"]["days"]["default"] == 3 and "ctx" not in schema["properties"]
     assert await tool.run(tool.parse({"city": "Oslo"}), make_ctx(tmp_path)) == "Oslo for 3 days, True"
+
+
+def test_function_tool_keeps_compact_parameter_docs_compatible():
+    async def lookup(city: str) -> str:
+        """Look up a city.
+
+        city: City name.
+        """
+        return city
+
+    schema = function_tool(lookup).input_schema()
+    assert schema["properties"]["city"]["description"] == "City name."
 
 
 def test_a_tool_must_be_async():
@@ -219,7 +242,6 @@ async def test_run_agent_names_the_agents_it_knows(tmp_path, monkeypatch):
     [
         ("web", ["WebSearch", "WebFetch"], "# Web"),
         ("pdf", ["Pdf"], None),
-        ("open", ["Open"], "# Showing things"),
         ("todo", ["TodoWrite"], "# Planning"),
     ],
 )
@@ -323,6 +345,11 @@ def setup(th):
 '''
 
 
+def needy_source(notes):
+    """Put a native path in generated Python without treating backslashes as escapes."""
+    return NEEDY.replace("{notes}", json.dumps(str(notes))[1:-1])
+
+
 def test_needs_must_be_hosts_or_folders(tmp_path, monkeypatch, isolated_home):
     write_ext(isolated_home, "bad", 'NEEDS = ["everything"]\ndef setup(th):\n    pass\n')
     session = make_session(tmp_path, monkeypatch, ["bad"])
@@ -341,7 +368,7 @@ async def test_an_extensions_needs_apply_only_once_approved_and_until_it_changes
     from tinyharness.permissions import Decision
 
     notes = tmp_path / "notes"
-    write_ext(isolated_home, "sync", NEEDY.replace("{notes}", str(notes)))
+    write_ext(isolated_home, "sync", needy_source(notes))
     asked = []
 
     async def user(request):
@@ -367,7 +394,7 @@ async def test_an_extensions_needs_apply_only_once_approved_and_until_it_changes
         assert again.extensions[0].granted  # remembered
     finally:
         again.close()
-    write_ext(isolated_home, "sync", NEEDY.replace("{notes}", str(notes)) + "\n# changed\n")
+    write_ext(isolated_home, "sync", needy_source(notes) + "\n# changed\n")
     changed = make_session(tmp_path, monkeypatch, ["sync"])
     try:
         assert not changed.extensions[0].granted  # its code changed: ask again
@@ -395,7 +422,7 @@ async def test_th_run_gets_the_extensions_folders_and_hosts_once_approved(
     from tinyharness.tools import bash
 
     notes = tmp_path / "notes"
-    write_ext(isolated_home, "sync", NEEDY.replace("{notes}", str(notes)))
+    write_ext(isolated_home, "sync", needy_source(notes))
     session = make_session(tmp_path, monkeypatch, ["sync"])
     seen = []
 

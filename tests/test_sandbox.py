@@ -1,20 +1,42 @@
-"""The OS sandbox: the policy, the Seatbelt profile, and (on macOS) that it really confines commands."""
+"""The OS sandbox: shared policy, platform backends, and real macOS confinement."""
 
+import json
+import os
+import re
+import shlex
 import sys
 from pathlib import Path
 
 import pytest
 
 from conftest import call, make_ctx
-from tinyharness.sandbox import SandboxPolicy, Seatbelt
+from tinyharness.sandbox import BACKENDS, SandboxPolicy, SandboxRuntime, Seatbelt, setup_hint
 from tinyharness.sandbox.seatbelt import profile
 from tinyharness.security import public_path_regexes, secret_path_regexes
 from tinyharness.tools.bash import BashTool
 
+not_windows = pytest.mark.skipif(sys.platform == "win32", reason="tests the macOS Seatbelt profile")
+
+
+def native_text(path: object) -> str:
+    return str(path).replace("\\", "/")
+
+
 # ---- the policy ----
 
 
-def test_project_policy_writes_to_project_scratch_temp_and_cache(tmp_path):
+def test_native_seatbelt_is_preferred_when_macos_has_both_backends():
+    assert (Seatbelt, SandboxRuntime) == BACKENDS
+
+
+def test_missing_sandbox_has_platform_specific_setup_help(monkeypatch):
+    monkeypatch.setattr("tinyharness.sandbox.sys.platform", "linux")
+    assert "bubblewrap" in setup_hint() and "sandbox-runtime" in setup_hint()
+    monkeypatch.setattr("tinyharness.sandbox.sys.platform", "win32")
+    assert "Git Bash" in setup_hint() and "windows-install" in setup_hint()
+
+
+def test_project_policy_uses_private_scratch_temp_and_tool_caches(tmp_path):
     root = tmp_path / "proj"
     scratch = root / ".tinyharness" / "tmp" / "s1"
     cache = tmp_path / "cache"
@@ -22,10 +44,144 @@ def test_project_policy_writes_to_project_scratch_temp_and_cache(tmp_path):
     real = root.resolve()
     assert real in policy.write_roots and scratch.resolve() in policy.write_roots
     assert cache.resolve() in policy.write_roots and cache.is_dir()
+    assert Path("/tmp").resolve() not in policy.write_roots
     assert set(policy.protected) == {real / ".tinyharness", real / ".git/hooks", real / ".git/config"}
     assert policy.reopened() == (scratch.resolve(),)  # scratch sits under the protected .tinyharness
     assert policy.env["UV_CACHE_DIR"] == str(cache.resolve() / "uv")
+    assert policy.env["PLAYWRIGHT_BROWSERS_PATH"] == str(cache.resolve() / "playwright")
+    assert policy.env["HF_HOME"] == str(cache.resolve() / "huggingface")
+    assert policy.env["TMPDIR"] == str(scratch.resolve() / "tmp")
+    assert (scratch / "tmp").is_dir()
+    fixture = scratch.resolve() / "tmp" / "pytest-of-user" / "pytest-0" / "test_auth" / "auth.json"
+    assert any(re.search(pattern, fixture.as_posix()) for pattern in policy.allow_read)
+    settings = SandboxRuntime(tmp_path / "settings")._settings(policy)
+    assert f"{scratch.resolve().as_posix()}/tmp/pytest-of-*/**" in [
+        native_text(path) for path in settings["filesystem"]["allowRead"]
+    ]
     assert not policy.allow_localhost
+
+
+def test_sandbox_runtime_translates_the_shared_policy(tmp_path, monkeypatch):
+    executable = tmp_path / "srt"
+    executable.touch()
+    monkeypatch.setattr("tinyharness.sandbox.srt.shutil.which", lambda name: str(executable))
+    root = tmp_path / "project"
+    protected = root / ".git/hooks"
+    policy = SandboxPolicy(
+        write_roots=(root,),
+        project_roots=(root,),
+        protected=(protected,),
+        deny_read=secret_path_regexes(),
+        allow_read=public_path_regexes(),
+        allowed_hosts=("assets.example.com",),
+        allow_localhost=True,
+    )
+    backend = SandboxRuntime(tmp_path / "settings")
+    wrapped = backend.wrap(["python", "build.py"], policy)
+    settings = json.loads(Path(wrapped[2]).read_text())
+
+    assert wrapped[:2] == [str(executable), "--settings"] and wrapped[3:5] == ["--", "python"]
+    assert settings["network"]["allowedDomains"] == ["assets.example.com"]
+    assert settings["network"]["allowLocalBinding"] is True
+    assert settings["filesystem"]["allowWrite"] == [str(root)]
+    assert settings["filesystem"]["denyWrite"] == [str(protected)]
+    denied = [native_text(path) for path in settings["filesystem"]["denyRead"]]
+    allowed = [native_text(path) for path in settings["filesystem"]["allowRead"]]
+    assert any(path.endswith("/.ssh") for path in denied)
+    assert f"{root.as_posix()}/**/.env" in denied
+    assert f"{root.parent.as_posix()}/**/id_ed25519" in denied
+    assert f"{root.parent.as_posix()}/**/.aws/**" in denied
+    assert f"{root.as_posix()}/**/.env.example" in allowed
+    if os.name != "nt":
+        assert (Path(wrapped[2]).stat().st_mode & 0o777) == 0o600
+
+
+def test_sandbox_runtime_refuses_an_untranslatable_read_rule(tmp_path):
+    policy = SandboxPolicy(write_roots=(tmp_path,), deny_read=(r"/custom-(secret|token)$",))
+    with pytest.raises(ValueError, match="cannot translate read policy regex"):
+        SandboxRuntime(tmp_path / "settings")._settings(policy)
+
+
+def test_sandbox_runtime_requires_a_posix_shell_on_windows(monkeypatch):
+    monkeypatch.setattr("tinyharness.sandbox.srt.sys.platform", "win32")
+    monkeypatch.setattr(
+        "tinyharness.sandbox.srt.shutil.which",
+        lambda name: "C:/npm/srt.cmd" if name == "srt" else None,
+    )
+    assert not SandboxRuntime.available()
+
+
+def test_sandbox_runtime_requires_its_linux_helpers(monkeypatch):
+    monkeypatch.setattr("tinyharness.sandbox.srt.sys.platform", "linux")
+    present = {"srt", "bwrap", "socat", "rg"}
+    monkeypatch.setattr(
+        "tinyharness.sandbox.srt.shutil.which",
+        lambda name: f"/usr/bin/{name}" if name in present else None,
+    )
+    assert SandboxRuntime.available()
+    present.remove("socat")
+    assert not SandboxRuntime.available()
+
+
+def test_sandbox_runtime_keeps_control_socket_temp_short(tmp_path, monkeypatch):
+    """Seen in CI: a long private TMPDIR exceeded Linux's Unix-socket path limit."""
+    executable = tmp_path / "srt"
+    executable.touch()
+    real_which = __import__("shutil").which
+    monkeypatch.setattr(
+        "tinyharness.sandbox.srt.shutil.which",
+        lambda name: str(executable) if name == "srt" else real_which(name),
+    )
+    scratch = tmp_path / ("long-session-name-" * 6)
+    policy = SandboxPolicy.for_project(tmp_path, scratch=scratch, cache_dir=tmp_path / "cache")
+    backend = SandboxRuntime(tmp_path / "settings")
+    wrapped = backend.wrap(["sh", "-c", "echo ok"], policy)
+    outer = backend.environment(policy)
+    assert not {"TMPDIR", "TMP", "TEMP"} & outer.keys()
+    assert outer["UV_CACHE_DIR"] == policy.env["UV_CACHE_DIR"]
+    after_separator = wrapped[wrapped.index("--") + 1 :]
+    assert any(value == f"TMPDIR={policy.env['TMPDIR']}" for value in after_separator)
+
+
+needs_srt = pytest.mark.skipif(not SandboxRuntime.available(), reason="needs Sandbox Runtime")
+
+
+@needs_srt
+async def test_sandbox_runtime_really_confines_files_and_credentials(tmp_path):
+    root = tmp_path / "project"
+    sibling = tmp_path / "other-project"
+    (root / ".aws").mkdir(parents=True)
+    sibling.mkdir()
+    secrets = {
+        root / ".env": "PROJECT_ENV_SECRET",
+        root / "id_ed25519": "PROJECT_SSH_SECRET",
+        root / ".aws/credentials": "PROJECT_AWS_SECRET",
+        sibling / ".env": "SIBLING_ENV_SECRET",
+    }
+    for path, value in secrets.items():
+        path.write_text(value)
+    tool = BashTool(
+        SandboxRuntime(tmp_path / "settings"),
+        SandboxPolicy.for_project(root),
+    )
+
+    assert await call(tool, {"command": "touch inside"}, make_ctx(root)) == "(no output)"
+    outside = tmp_path / "outside"
+    out = await call(tool, {"command": f"touch {shlex.quote(str(outside))}"}, make_ctx(root))
+    assert (root / "inside").exists() and not outside.exists() and "exit code" in out
+    for path, value in secrets.items():
+        out = await call(tool, {"command": f"cat {shlex.quote(str(path))}"}, make_ctx(root))
+        assert value not in out and "exit code" in out
+
+
+@needs_srt
+async def test_sandbox_runtime_really_blocks_unlisted_network(tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    script = "import socket; socket.create_connection(('1.1.1.1', 443), timeout=3); print('LEAKED')"
+    tool = BashTool(SandboxRuntime(tmp_path / "settings"), SandboxPolicy.for_project(root))
+    out = await call(tool, {"command": f'{sys.executable} -c "{script}"'}, make_ctx(root))
+    assert "LEAKED" not in out and "exit code" in out
 
 
 def test_extra_write_dirs_are_protected_like_the_project(tmp_path):
@@ -49,6 +205,7 @@ def _policy(root: Path, **kw) -> SandboxPolicy:
     return SandboxPolicy(write_roots=(root,), protected=(root / ".git/hooks",), **kw)
 
 
+@not_windows
 def test_profile_denies_network_and_writes_then_allows_the_roots(tmp_path):
     text = profile(_policy(tmp_path))
     assert text.index("(deny network*)") < text.index("(deny file-write*)")
@@ -57,16 +214,19 @@ def test_profile_denies_network_and_writes_then_allows_the_roots(tmp_path):
     assert "(deny appleevent-send)" in text and "launchservicesd" in text
 
 
+@not_windows
 def test_profile_protected_paths_come_after_the_roots_they_are_in(tmp_path):
     text = profile(_policy(tmp_path))
     allow = text.index(f'(subpath "{tmp_path.resolve()}")')
     assert text.index(f'(subpath "{tmp_path.resolve() / ".git/hooks"}")') > allow
 
 
+@not_windows
 def test_profile_localhost_is_opt_in(tmp_path):
     assert '(remote ip "localhost:*")' in profile(_policy(tmp_path, allow_localhost=True))
 
 
+@not_windows
 def test_profile_quotes_paths(tmp_path):
     odd = tmp_path / 'a "quoted" dir'
     assert r"a \"quoted\" dir" in profile(_policy(odd))
@@ -102,6 +262,33 @@ async def test_the_default_project_policy_is_a_valid_profile(tmp_path):
     )
     out = await call(BashTool(Seatbelt(), policy), {"command": "echo hi"}, make_ctx(tmp_path))
     assert out == "hi"
+
+
+@pytest.mark.parametrize("backend_name", ["seatbelt", "srt"])
+async def test_sandboxed_pytest_reads_fixtures_from_its_private_tmp(tmp_path, backend_name):
+    """Seen live: the child TMPDIR was absent from pytest's synthetic-secret exception."""
+    if backend_name == "seatbelt":
+        if not Seatbelt.available():
+            pytest.skip("needs macOS sandbox-exec")
+        backend = Seatbelt()
+    else:
+        if not SandboxRuntime.available():
+            pytest.skip("needs Sandbox Runtime")
+        backend = SandboxRuntime(tmp_path / "settings")
+    test_file = tmp_path / "test_fixture.py"
+    test_file.write_text(
+        "def test_fake_credentials(tmp_path):\n"
+        "    for name in ('.env', 'auth.json'):\n"
+        "        path = tmp_path / name\n"
+        "        path.write_text('synthetic-secret')\n"
+        "        assert path.read_text() == 'synthetic-secret'\n"
+    )
+    scratch = tmp_path / ".tinyharness" / "tmp" / "sandbox-test"
+    policy = SandboxPolicy.for_project(tmp_path, scratch=scratch, cache_dir=tmp_path / "cache")
+    tool = BashTool(backend, policy)
+    command = f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider {test_file.name}"
+    out = await call(tool, {"command": command, "timeout": 60}, make_ctx(tmp_path))
+    assert "1 passed" in out
 
 
 @needs_seatbelt
@@ -191,14 +378,17 @@ async def test_tests_can_read_their_own_fake_secrets_and_nothing_else(tmp_path):
     must read them back; the same names anywhere else stay unreadable."""
     import tempfile
 
-    (tmp_path / "auth.json").write_text('{"fake": "key-in-a-test"}')
+    scratch = tmp_path / ".tinyharness" / "tmp" / "sandbox-test"
+    fixture = scratch / "tmp" / "pytest-of-user" / "pytest-0" / "test_auth" / "auth.json"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text('{"fake": "key-in-a-test"}')
     elsewhere = Path(tempfile.mkdtemp(prefix="not-pytest-"))
     try:
         (elsewhere / "auth.json").write_text('{"real": "hunter2"}')
-        policy = SandboxPolicy.for_project(tmp_path, cache_dir=tmp_path / "c")
+        policy = SandboxPolicy.for_project(tmp_path, scratch=scratch, cache_dir=tmp_path / "c")
         out = await call(
             BashTool(Seatbelt(), policy),
-            {"command": f"cat {tmp_path / 'auth.json'}; cat {elsewhere / 'auth.json'}"},
+            {"command": f"cat {fixture}; cat {elsewhere / 'auth.json'}"},
             make_ctx(tmp_path),
         )
         assert "key-in-a-test" in out

@@ -10,7 +10,7 @@ exactly:
            the full list of message ids, in order
     todos  the todo list changed
     model  the session switched model ("provider:model")
-    world  git HEAD and the AGENT.md hash, at the end of each turn
+    world  git HEAD and the AGENTS.md hash, at the end of each turn
     files  file changes a resume found and reported, so the next resume doesn't again
 
 Replaying them in order gives back the history as it was at the last record. The log
@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from tinyharness.agent.history import History, Message
-from tinyharness.agent.transcript import Transcript
+from tinyharness.agent.transcript import Transcript, lock_is_held
 from tinyharness.paths import state_dir
 
 
@@ -43,14 +43,32 @@ class LogWriter(Protocol):
 
 @dataclass
 class SessionInfo:
+    """Summarize a saved session.
+
+    Attributes
+    ----------
+    id : str
+        Session identifier.
+    updated : datetime.datetime
+        Time of the latest record.
+    title : str
+        First user prompt.
+    messages : int
+        Number of saved messages.
+    model : str
+        Most recently selected model, when recorded.
+    """
+
     id: str
     updated: datetime
     title: str  # the first prompt
     messages: int
+    model: str = ""
+    active: bool = False
 
 
 class SessionStore(Protocol):
-    """Where session logs live."""
+    """Define storage for resumable session logs."""
 
     def writer(self, session_id: str) -> LogWriter:
         """Append to a session's log (creating it if needed)."""
@@ -66,7 +84,13 @@ class SessionStore(Protocol):
 
 
 class FileSessionStore:
-    """One JSONL file per session in ~/.tinyharness/projects/<project>/sessions/."""
+    """Store each session in one project-scoped JSONL file.
+
+    Parameters
+    ----------
+    working_dir : pathlib.Path
+        Project directory used to derive the state location.
+    """
 
     def __init__(self, working_dir: Path) -> None:
         self.working_dir = Path(working_dir)
@@ -132,7 +156,24 @@ def replay(records: list[dict[str, Any]]) -> Replayed:
             case "files":
                 out.reported.update(r.get("files", {}))
             case "world":
-                out.world = {k: v for k, v in r.items() if k not in ("ts", "event")}
+                out.world = {
+                    k: v
+                    for k, v in r.items()
+                    if k
+                    not in (
+                        "schema",
+                        "ts",
+                        "event",
+                        "session",
+                        "turn",
+                        "step",
+                        "agent",
+                        "model_call",
+                        "routing_decision",
+                        "tool_call",
+                        "harness_version",
+                    )
+                }
     out.history.messages = [messages[i] for i in order]
     return out
 
@@ -188,11 +229,15 @@ def _read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
 def _describe(path: Path) -> SessionInfo | None:
     """None for logs with nothing to resume: older logs, no prompt yet, or emptied by a
     /clear (logs from before /clear started a new conversation)."""
-    title, count = "", 0
+    title, model, count = "", "", 0
     records = list(_read_jsonl(path))
     if not replay(records).history.messages:
         return None
     for r in records:
+        if r.get("event") == "session_start":
+            model = str(r.get("model") or model)
+        elif r.get("event") == "model":
+            model = str(r.get("spec") or model)
         if r.get("event") == "msg":
             count += 1
             message = r.get("message", {})
@@ -200,4 +245,5 @@ def _describe(path: Path) -> SessionInfo | None:
                 title = " ".join(str(message.get("content") or "").split())[:80]
     if not title:
         return None
-    return SessionInfo(path.stem, datetime.fromtimestamp(path.stat().st_mtime), title, count)
+    active = lock_is_held(path.with_name(f".{path.stem}.lock"))
+    return SessionInfo(path.stem, datetime.fromtimestamp(path.stat().st_mtime), title, count, model, active)

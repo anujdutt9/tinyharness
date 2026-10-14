@@ -18,6 +18,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -43,7 +44,7 @@ Issues = "https://github.com/anujdutt9/tinyharness/issues"
 Changelog = "https://github.com/anujdutt9/tinyharness/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-tokens = ["tiktoken>=0.7"]
+tokens = ["tiktoken>=0.7", "tokenizers>=0.15"]
 
 [project.scripts]
 tinyharness = "tinyharness.cli:main"
@@ -59,7 +60,7 @@ dev = [
 ]
 
 [tool.hatch.version]
-path = "tinyharness/__init__.py"  # the single place the version lives
+path = "tinyharness/version.py"  # the single place the version lives
 
 [tool.hatch.build.targets.wheel]
 packages = ["tinyharness"]
@@ -96,6 +97,9 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["tinyharness"]  # don't infer it from which files exist
 
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
 [tool.mypy]
 python_version = "3.11"
 packages = ["tinyharness"]
@@ -107,5 +111,5 @@ disallow_untyped_defs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["tiktoken"]
+module = ["tiktoken", "tokenizers", "huggingface_hub"]
 ignore_missing_imports = true

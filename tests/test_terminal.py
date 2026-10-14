@@ -57,6 +57,24 @@ async def main():
 asyncio.run(main())
 """
 
+FILTER_PICKER = """
+import asyncio
+from tinyharness.cli.widgets import PaletteItem, palette
+
+async def main():
+    chosen = await palette(
+        "Choose a model",
+        [
+            PaletteItem("a", "Model Alpha"),
+            PaletteItem("b", "Model Beta"),
+            PaletteItem("c", "Model Cedar"),
+        ],
+    )
+    print(f"chosen: {chosen}")
+
+asyncio.run(main())
+"""
+
 
 def screen_of(
     answers_cursor: bool, done: Callable[[list[str]], bool], app: str = APP, timeout: float = 15
@@ -72,7 +90,8 @@ def screen_of(
     stream = pyte.ByteStream(screen)
     pid, fd = pty.fork()
     if pid == 0:  # the child: the app, in the pseudo-terminal
-        os.execv(sys.executable, [sys.executable, "-c", app])
+        env = {**os.environ, "TERM": "xterm-256color"}
+        os.execve(sys.executable, [sys.executable, "-c", app], env)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     if answers_cursor:
         screen.write_process_input = lambda data: os.write(fd, data.encode())
@@ -128,7 +147,8 @@ def frames_of(app: str, steps: list[tuple[Callable[[list[str]], bool], bytes]], 
     stream = pyte.ByteStream(screen)
     pid, fd = pty.fork()
     if pid == 0:
-        os.execv(sys.executable, [sys.executable, "-c", app])
+        env = {**os.environ, "TERM": "xterm-256color"}
+        os.execve(sys.executable, [sys.executable, "-c", app], env)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     screen.write_process_input = lambda data: os.write(fd, data.encode())
     frames: list[list[str]] = []
@@ -172,6 +192,18 @@ def test_a_picker_opens_right_under_the_output():
     lines = screen_of(answers_cursor=True, app=PICKER, done=lambda s: any("Model C" in line for line in s))
     assert lines[:3] == ["shell line 0", "shell line 1", "shell line 2"]
     assert "Choose a model" in lines[3] and "Model A" in lines[4]
+
+
+def test_a_picker_filters_before_choosing():
+    """The same quick switch UI searches models, sessions, providers and skills."""
+    frames = frames_of(
+        FILTER_PICKER,
+        [
+            (lambda s: any("Model Cedar" in line for line in s), b"cedar\r"),
+            (lambda s: any("chosen: c" in line for line in s), b""),
+        ],
+    )
+    assert any("chosen: c" in line for line in frames[-1])
 
 
 def test_the_box_never_jumps_or_flashes_between_requests():

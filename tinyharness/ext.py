@@ -8,7 +8,13 @@ sections, slash commands and event handlers. The built-in features (web, agents,
     def setup(th: Extension) -> None:
         @th.tool(read_only=True)
         async def hello(name: str) -> str:
-            \"\"\"Greet someone by name.\"\"\"
+            \"\"\"Greet someone by name.
+
+            Parameters
+            ----------
+            name : str
+                Person to greet.
+            \"\"\"
             return f"Hello, {name}!"
 
 Turned on in config: `[extensions] enabled = ["hello"]`.
@@ -60,34 +66,77 @@ EVENTS = {
 
 @dataclass
 class Block:
-    """Returned by a `tool_call` handler to stop the call, or a `turn_end` one to keep going."""
+    """Stop a tool call or keep a turn running.
+
+    Attributes
+    ----------
+    reason : str
+        Explanation shown to the model.
+    """
 
     reason: str
 
 
 @dataclass
 class Note:
-    """Returned by a `tool_result` handler (added to the result for the model) or a
-    `user_prompt` one (added to the user's message as context)."""
+    """Add context from an extension event handler.
+
+    Attributes
+    ----------
+    text : str
+        Context appended to the tool result or user prompt.
+    """
 
     text: str
 
 
 class Ctx:
-    """What an event handler gets besides the payload."""
+    """Create decisions returned by extension event handlers."""
 
     @staticmethod
     def block(reason: str) -> Block:
+        """Create a blocking decision.
+
+        Parameters
+        ----------
+        reason : str
+            Explanation shown to the model.
+
+        Returns
+        -------
+        Block
+            The event-handler decision.
+        """
         return Block(reason)
 
     @staticmethod
     def note(text: str) -> Note:
+        """Create an added-context decision.
+
+        Parameters
+        ----------
+        text : str
+            Context to append.
+
+        Returns
+        -------
+        Note
+            The event-handler decision.
+        """
         return Note(text)
 
 
 @dataclass
 class Call:
-    """A tool call, as a `tool_call` handler sees it."""
+    """Describe a tool call passed to an extension handler.
+
+    Attributes
+    ----------
+    tool : str
+        Tool name.
+    input : dict[str, Any]
+        Parsed tool arguments.
+    """
 
     tool: str
     input: dict[str, Any]
@@ -113,7 +162,15 @@ class CommandContext:
 
 @dataclass
 class RunResult:
-    """What `th.run` returns: the exit code (None if it timed out) and the combined output."""
+    """Contain the result of :meth:`Extension.run`.
+
+    Attributes
+    ----------
+    code : int, optional
+        Process exit code, or ``None`` after a timeout.
+    output : str
+        Combined standard output and standard error.
+    """
 
     code: int | None
     output: str
@@ -121,8 +178,11 @@ class RunResult:
 
 @dataclass
 class Extension:
-    """The `th` object an extension's `setup()` receives. Everything it registers belongs
-    to this extension, so it can be listed (with its token cost) and unloaded."""
+    """Register everything supplied by one extension.
+
+    An extension's ``setup(th)`` function receives this object. Registered tools, prompt
+    sections, hooks, and commands stay associated with the extension.
+    """
 
     name: str
     description: str = ""
@@ -167,8 +227,24 @@ class Extension:
         read_only: bool = False,
         network: bool = False,
     ) -> Any:
-        """Make a tool from an async function: its docstring is the description, its type
-        hints and defaults the schema. A parameter named `ctx` gets the ToolContext."""
+        """Create a tool decorator for an asynchronous function.
+
+        Parameters
+        ----------
+        fn : Callable[..., Any], optional
+            Function to register when the decorator is called directly.
+        name : str, optional
+            Tool name. Defaults to the function name.
+        read_only : bool, default=False
+            Whether the tool has no side effects.
+        network : bool, default=False
+            Whether the tool accesses a remote system.
+
+        Returns
+        -------
+        Any
+            The registered function, or a decorator waiting for one.
+        """
 
         def register(f: Callable[..., Any]) -> Callable[..., Any]:
             self.tools.append(function_tool(f, name=name, read_only=read_only, network=network))
@@ -216,8 +292,25 @@ class Extension:
     # ---- subagents
 
     async def run(self, command: str, *, timeout: float = 120) -> RunResult:
-        """Run a shell command in the sandbox, with this extension's needs applied (its
-        hosts reachable, its folders writable) once you've approved them."""
+        """Run a command with the extension's approved sandbox access.
+
+        Parameters
+        ----------
+        command : str
+            Shell command to execute.
+        timeout : float, default=120
+            Maximum runtime in seconds.
+
+        Returns
+        -------
+        RunResult
+            Exit code and combined output.
+
+        Raises
+        ------
+        RuntimeError
+            If the extension is not attached to a session.
+        """
         if self.session is None:
             raise RuntimeError("run needs a session")
         return await self.session.run_for_extension(self, command, timeout=timeout)
@@ -233,7 +326,35 @@ class Extension:
         inbox: Callable[[], list[str]] | None = None,
         ctx: ToolContext | None = None,
     ) -> str:
-        """Run a subagent to completion under this session's gate and sandbox; its answer."""
+        """Run a subagent under the current session's controls.
+
+        Parameters
+        ----------
+        task : str
+            Work assigned to the subagent.
+        agent : str, default="general-purpose"
+            Registered agent name.
+        model : str, optional
+            Model override for this run.
+        label : str, optional
+            Short display label.
+        extra_tools : list[Tool[Any]], optional
+            Additional tools available to the subagent.
+        inbox : Callable[[], list[str]], optional
+            Supplies messages received while the subagent runs.
+        ctx : ToolContext, optional
+            Tool context to reuse.
+
+        Returns
+        -------
+        str
+            Final subagent answer.
+
+        Raises
+        ------
+        RuntimeError
+            If the extension is not attached to a session.
+        """
         if self.session is None:
             raise RuntimeError("run_agent needs a session")
         return await self.session.run_agent(
@@ -263,17 +384,84 @@ def _as_hook(event: str, handler: Callable[..., Any]) -> Callable[[str, dict[str
 # ---------------------------------------------------------------------- function tools
 
 _ARG_DOC = re.compile(r"^\s*(\w+)\s*:\s*(.+)$")
+_NUMPY_PARAM = re.compile(r"^\s*([*\w][\w, *]*)\s*:\s*.+$")
+
+
+def _parameter_docs(doc: str) -> dict[str, str]:
+    """Extract parameter descriptions from a function docstring.
+
+    NumPy-style ``Parameters`` sections are preferred. The older compact
+    ``name: description`` form remains supported for existing extensions.
+
+    Parameters
+    ----------
+    doc : str
+        The cleaned function docstring.
+
+    Returns
+    -------
+    dict[str, str]
+        Parameter names mapped to single-line descriptions.
+    """
+    _, _, rest = doc.partition("\n\n")
+    lines = rest.splitlines()
+    descriptions: dict[str, str] = {}
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == "Parameters")
+    except StopIteration:
+        start = -1
+    if start >= 0 and start + 1 < len(lines) and set(lines[start + 1].strip()) == {"-"}:
+        current: list[str] = []
+        for line in lines[start + 2 :]:
+            if line and not line[0].isspace():
+                if set(line.strip()) == {"-"} or not _NUMPY_PARAM.match(line):
+                    break
+                match = _NUMPY_PARAM.match(line)
+                assert match is not None
+                current = [name.strip().lstrip("*") for name in match.group(1).split(",")]
+                continue
+            text = line.strip()
+            if text and current:
+                for name in current:
+                    descriptions[name] = " ".join((descriptions.get(name, ""), text)).strip()
+        return descriptions
+    return {match[1]: match[2].strip() for line in lines if (match := _ARG_DOC.match(line))}
 
 
 def function_tool(
     fn: Callable[..., Any], *, name: str | None = None, read_only: bool = False, network: bool = False
 ) -> Tool[Any]:
-    """A Tool built from a function's signature and docstring."""
+    """Build a tool from an asynchronous function.
+
+    The first docstring paragraph becomes the tool description. Parameter descriptions
+    come from a NumPy-style ``Parameters`` section.
+
+    Parameters
+    ----------
+    fn : Callable[..., Any]
+        Asynchronous function to expose as a tool.
+    name : str, optional
+        Tool name. Defaults to the function name.
+    read_only : bool, default=False
+        Whether the tool is free of side effects.
+    network : bool, default=False
+        Whether the tool accesses a remote system.
+
+    Returns
+    -------
+    Tool[Any]
+        A tool instance whose input model follows the function signature.
+
+    Raises
+    ------
+    TypeError
+        If ``fn`` is not asynchronous.
+    """
     if not inspect.iscoroutinefunction(fn):
         raise TypeError(f"{fn.__name__}: a tool must be an async function")
     doc = inspect.getdoc(fn) or ""
-    summary, _, rest = doc.partition("\n\n")
-    arg_docs = {m[1]: m[2].strip() for line in rest.splitlines() if (m := _ARG_DOC.match(line))}
+    summary, _, _ = doc.partition("\n\n")
+    arg_docs = _parameter_docs(doc)
     hints = get_type_hints(fn)
     fields: dict[str, Any] = {}
     wants_ctx = False

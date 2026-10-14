@@ -148,15 +148,34 @@ TODOS = [
 
 async def test_todo_write_stores_and_formats(ctx):
     out = await call(TodoWriteTool(), {"todos": TODOS}, ctx)
-    assert ctx.todos == TODOS
+    assert [{k: v for k, v in todo.items() if k != "id"} for todo in ctx.todos] == TODOS
+    assert all(todo["id"].startswith("task-") for todo in ctx.todos)
     assert "1/3 done" in out
     assert "Writing the parser" in out
     assert "✔" in out and "◐" in out and "○" in out
+    assert all(f"[{todo['id']}]" in out for todo in ctx.todos)
 
 
 def test_todo_rejects_bad_status():
     with pytest.raises(pydantic.ValidationError):
-        TodoWriteTool().parse({"todos": [{"content": "x", "activeForm": "y", "status": "blocked"}]})
+        TodoWriteTool().parse({"todos": [{"content": "x", "activeForm": "y", "status": "paused"}]})
+
+
+async def test_todo_ids_survive_updates_and_tasks_can_be_blocked(ctx):
+    """Stable task state survives full-list model updates and can explain why work stopped."""
+    await call(TodoWriteTool(), {"todos": TODOS}, ctx)
+    task_id = ctx.todos[1]["id"]
+    changed = [dict(todo) for todo in ctx.todos]
+    changed[1].update(status="blocked", result="Waiting for API access")
+    out = await call(TodoWriteTool(), {"todos": changed}, ctx)
+    assert ctx.todos[1]["id"] == task_id
+    assert "1 blocked" in out and "Waiting for API access" in out
+
+
+async def test_todo_rejects_more_than_one_active_task(ctx):
+    active = [dict(todo, status="in_progress") for todo in TODOS[:2]]
+    with pytest.raises(ToolError, match="At most one"):
+        await call(TodoWriteTool(), {"todos": active}, ctx)
 
 
 def test_todo_rejects_empty_content():
@@ -172,13 +191,13 @@ def test_format_todos_empty():
 
 
 def test_the_core_registry_is_the_file_tools():
-    """Everything else (web, pdf, open, todo, agents) is an extension you turn on."""
-    assert default_registry().names() == ["Read", "Write", "Edit", "Glob", "Grep"]
+    """Everyday artifact presentation is core; specialist capabilities are extensions."""
+    assert default_registry().names() == ["Read", "Write", "Edit", "Glob", "Grep", "Open"]
 
 
 def test_plan_mode_offers_only_read_only_tools():
     names = {t.name for t in default_registry().available(PermissionMode.PLAN)}
-    assert names == {"Read", "Grep", "Glob"}
+    assert names == {"Read", "Grep", "Glob", "Open"}
 
 
 async def test_todowrite_skips_the_gate(tmp_path):

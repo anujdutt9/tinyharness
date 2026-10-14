@@ -5,9 +5,10 @@ that's every edit and command, so the policy sees them all. (In the default mode
 inside the project and sandboxed commands run without asking.) The hook runs before
 *every* tool call and can veto it, even in bypass mode.
 
-A request with a `warning` is one the harness wants a person to see every time: a
-command asking to run outside the sandbox, or a change to files that run code later
-(.git/hooks, .tinyharness/). A policy with no person behind it should say no to those.
+A request with a `warning` is a meaningful trust boundary: acquiring software, adding a
+network destination, having no sandbox backend, a host-app action, or changing files that
+run code later (.git/hooks, .tinyharness/). An allow hook cannot cross these boundaries.
+A policy with no person behind it should say no to them.
 
     uv run python examples/04_permissions_and_hooks.py
 """

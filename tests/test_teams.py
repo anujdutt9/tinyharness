@@ -18,6 +18,7 @@ from tinyharness.events import SubagentUpdate, ToolResult
 from tinyharness.permissions import Decision, PermissionGate, PermissionMode, PermissionRequest
 from tinyharness.subagents import AgentSpec, parse_agent_md
 from tinyharness.subagents.runner import run_subagent
+from tinyharness.tools.agent import AgentSlots, AgentTool
 from tinyharness.tools.base import ToolError
 from tinyharness.tools.registry import ToolRegistry, default_registry
 from tinyharness.tools.team import Board, TaskState, TeamTool, report, run_team
@@ -261,6 +262,62 @@ async def test_a_team_runs_in_dependency_order_with_independent_tasks_in_paralle
     assert started[-1] == "sum"
     assert "result of w1" in prompts["sum"] and "result of r3" in prompts["sum"]
     assert out.startswith("Team finished (6 done)")
+
+
+async def test_teammates_past_the_subagent_limit_wait_their_turn(tmp_path):
+    running, most = 0, 0
+
+    async def spawner(spec, prompt, ctx, /, *, label, extra_tools, inbox):
+        nonlocal running, most
+        running += 1
+        most = max(most, running)
+        await asyncio.sleep(0.02)
+        running -= 1
+        return "ok"
+
+    tool = TeamTool(AGENTS, spawner, is_read_only, AgentSlots(2))
+    args = tool.parse(plan(*((f"r{i}", "reader", []) for i in range(5))))
+    out = await tool.run(args, make_ctx(tmp_path))
+    assert most == 2
+    assert out.startswith("Team finished (5 done)")
+
+
+async def test_an_agent_call_past_the_limit_fails_and_shares_it_with_the_team(tmp_path):
+    """Agent calls and teammates share one ceiling; a full Agent call fails immediately."""
+    slots = AgentSlots(1)
+    release = asyncio.Event()
+
+    async def spawner(spec, prompt, ctx, /, **kwargs):
+        await release.wait()
+        return "ok"
+
+    agent = AgentTool(AGENTS, spawner, is_read_only, slots)
+    team = TeamTool(AGENTS, spawner, is_read_only, slots)
+    ctx = make_ctx(tmp_path)
+    first = asyncio.create_task(agent.run(agent.parse({"subagent_type": "reader", "prompt": "x"}), ctx))
+    await asyncio.sleep(0.01)
+    with pytest.raises(ToolError, match="concurrent subagent limit reached"):
+        await agent.run(agent.parse({"subagent_type": "reader", "prompt": "y"}), ctx)
+    teamwork = asyncio.create_task(team.run(team.parse(plan(("a", "reader", []), ("b", "reader", []))), ctx))
+    await asyncio.sleep(0.01)
+    assert not teamwork.done()  # waiting for the Agent call's slot
+    release.set()
+    assert await first == "ok"
+    assert (await teamwork).startswith("Team finished (2 done)")
+
+
+def test_the_session_limit_reaches_both_tools(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    config = tmp_path / "config.toml"
+    config.write_text('max_parallel_agents = 7\n[extensions]\nenabled = ["agents"]\n')
+    s = Session(SessionOptions(config_path=config, working_dir=tmp_path / "work"))
+    try:
+        agent, team = s.tools.get("Agent"), s.tools.get("Team")
+        assert agent.slots is team.slots and agent.slots.limit == 7
+        assert "Up to 7 run at once" in team.description
+    finally:
+        s.close()
 
 
 async def test_a_failed_teammate_is_retried_once_then_its_dependents_get_what_finished(tmp_path):
@@ -894,3 +951,102 @@ async def test_a_long_result_is_handed_on_whole_through_a_file(tmp_path):
     assert path and Path(path).read_text().endswith("LAST LINE")
     assert f"the whole result is in {path}" in seen["b: B"]
     assert path in report(board)
+
+
+async def test_a_subagent_compacts_at_the_configured_threshold(tmp_path, monkeypatch):
+    """auto_compact_threshold applies to subagents too, not only the lead: on a 64K model with an
+    8K-16K answer reservation the default 90% sits past the point where the engine refuses."""
+    seen = {}
+
+    async def fake_loop(task, history, deps):
+        seen["threshold"] = deps.compactor.threshold
+        return
+        yield
+
+    monkeypatch.setattr("tinyharness.subagents.runner.run_agent_loop", fake_loop)
+    from tinyharness.config import Config
+    from tinyharness.tools.base import ToolContext
+
+    ctx = ToolContext(
+        workspace=Workspace(tmp_path), config=Config(working_dir=tmp_path, auto_compact_threshold=0.7)
+    )
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
+    await run_subagent(READER, "x", ctx=ctx, llm=ScriptedLLM([]), tools=default_registry(), gate=gate)
+    assert seen["threshold"] == 0.7
+
+
+async def test_a_subagent_uses_compaction_role_legacy_and_active_model_fallbacks(tmp_path, monkeypatch):
+    seen = []
+
+    async def fake_loop(task, history, deps):
+        seen.append(deps.compactor.model)
+        return
+        yield
+
+    monkeypatch.setattr("tinyharness.subagents.runner.run_agent_loop", fake_loop)
+    from tinyharness.config import Config
+    from tinyharness.tools.base import ToolContext
+
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
+    cases = [("summary-role", None), (None, "legacy"), (None, None)]
+    for role, legacy in cases:
+        ctx = ToolContext(
+            workspace=Workspace(tmp_path),
+            config=Config(
+                working_dir=tmp_path,
+                model="lead-model",
+                compaction_model=legacy,
+                models={"roles": {"compaction": role}},
+            ),
+        )
+        await run_subagent(
+            READER, "x", ctx=ctx, llm=ScriptedLLM([]), tools=default_registry(), gate=gate, model="small-9b"
+        )
+    assert seen == ["summary-role", "legacy", "lead-model"]
+
+
+async def test_every_member_result_is_saved_and_named_short_ones_too(tmp_path):
+    """Seen live: three long results were named by path and one short one was shown whole with
+    no file; the lead guessed a path for it, found nothing, and ran that task again."""
+    from tinyharness.workspace.scratch import Scratch
+
+    async def spawner(spec, prompt, ctx, /, *, label, extra_tools, inbox):
+        return "short finding"
+
+    board = Board("goal", {"a": TaskState("a", "A", "analyze", "general-purpose", [])})
+    ctx = make_ctx(tmp_path)
+    ctx.scratch = Scratch(tmp_path, "s1")
+    await run_team(board, {"general-purpose": AgentSpec("general-purpose", "x")}, spawner, ctx)
+    path = board.tasks["a"].result_file
+    assert path and Path(path).read_text() == "short finding"
+    assert f"short finding\n[the whole result, above; also in {path}]" in report(board)
+
+
+async def test_a_subagent_transcript_names_the_session_that_started_it(tmp_path):
+    """With several sessions running at once, a sidechain can't be matched to its session by
+    time; it records the session, its own agent id and its parent's."""
+    import json
+
+    from tinyharness.config import Config
+    from tinyharness.llm import identity
+    from tinyharness.tools.base import ToolContext
+
+    ctx = ToolContext(workspace=Workspace(tmp_path), config=Config(working_dir=tmp_path))
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
+    lead = identity.for_session("s1")
+    token = identity.CURRENT.set(identity.child(lead, "reader"))
+    try:
+        await run_subagent(
+            READER, "x", ctx=ctx, llm=ScriptedLLM(["done"]), tools=default_registry(), gate=gate
+        )
+    finally:
+        identity.CURRENT.reset(token)
+    from tinyharness.paths import state_dir
+
+    (log,) = state_dir(tmp_path).joinpath("sidechains").glob("*.jsonl")
+    start = json.loads(log.read_text().splitlines()[0])
+    assert (
+        start["session"] == "s1"
+        and start["parent"] == "s1-lead"
+        and start["agent_id"].startswith("s1-reader-")
+    )

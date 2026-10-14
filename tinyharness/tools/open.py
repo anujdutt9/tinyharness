@@ -1,27 +1,25 @@
-"""Open: show the user a file or web page in their default app (browser, PDF viewer...).
+"""Open: present an artifact safely, or explicitly launch it in another application.
 
-This is the one sanctioned way out of the Bash sandbox, which blocks `open` and
-`xdg-open` because `open evil.command` would run a script outside it. So Open only
-takes documents (not programs), and it asks every time: no allow rule, mode or "don't
-ask again" approves it (only bypassPermissions or a hook). A page opened in a browser
-can reach the network, which the sandbox can't, so a model that wrote one could send
-out what it has read. Deny rules still apply, to the file's path or the URL's site.
+Preview is the normal path: it emits a typed artifact event for the UI and has no side
+effect. External mode is the sanctioned way out of the Bash sandbox, which blocks
+`open` and `xdg-open`; it accepts documents only and asks every time.
 """
 
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field
 
 from tinyharness.security import is_secret_path, sanitized_env
-from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
+from tinyharness.tools.base import ArtifactRef, Tool, ToolContext, ToolError, ToolInput, ToolOutput
 
 # Documents only. Anything that could run code when opened (.command, .app, .sh,
 # .terminal, .webloc, .scpt, installers...) is refused.
@@ -35,19 +33,29 @@ class OpenInput(ToolInput):
     target: str = Field(
         description="A file path (absolute, or relative to the working directory) or an http(s) URL"
     )
+    mode: Literal["preview", "external"] = Field(
+        description=(
+            "Required. Use 'external' when the user explicitly asks to open or launch the "
+            "artifact in a browser or viewer; it requires approval. Use 'preview' only to "
+            "present a clickable artifact link without rendering or opening it."
+        ),
+    )
 
 
 class OpenTool(Tool[OpenInput]):
     name = "Open"
     Input = OpenInput
     description = (
-        "Open a file or web page for the user in their default app: an HTML report or chart in "
-        "the browser, a PDF, an image. Use it only when the user wants to see something. Files "
-        f"must be documents ({', '.join(sorted(VIEWABLE))}); the user approves each one."
+        "Present or open a file or web page for the user. Choose the mode explicitly. If the "
+        "user says open, launch, browser, viewer, or otherwise asks to actually see it, use "
+        "'external'; that always asks before launching the host application. Use 'preview' only "
+        "when a clickable link is sufficient; preview does not render or open the artifact. "
+        f"Files must be documents ({', '.join(sorted(VIEWABLE))})."
     )
+    read_only = True
 
     def describe(self, args: OpenInput) -> str:
-        return f"Open({args.target})"
+        return f"Open({args.mode}: {args.target})"
 
     def target_path(self, args: OpenInput) -> str | None:
         # Safe to report (so path deny rules and protected paths apply): `escapes` makes
@@ -58,6 +66,8 @@ class OpenTool(Tool[OpenInput]):
         return urlsplit(args.target).hostname if _is_url(args.target) else None
 
     def escapes(self, args: dict[str, Any]) -> str | None:
+        if args.get("mode") != "external":
+            return None
         target = str(args.get("target", ""))
         if _is_url(target):
             return "it opens a web page in your browser, which can reach the network outside the sandbox"
@@ -68,10 +78,25 @@ class OpenTool(Tool[OpenInput]):
         return "it opens a file in another app, outside the sandbox"
 
     def risk(self, args: dict[str, Any], path: Path | None) -> str | None:
-        return "it opens something in another app, outside the sandbox"
+        if args.get("mode") == "external":
+            return "it opens something in another app, outside the sandbox"
+        return None
 
-    async def run(self, args: OpenInput, ctx: ToolContext) -> str:
+    def is_read_only(self, args: OpenInput) -> bool:
+        return args.mode == "preview"
+
+    async def run(self, args: OpenInput, ctx: ToolContext) -> str | ToolOutput:
         target = _check(args.target, ctx)
+        if args.mode == "preview":
+            media_type = "text/html" if target.lower().endswith((".html", ".htm")) else ""
+            if not media_type and not _is_url(target):
+                media_type = mimetypes.guess_type(target)[0] or ""
+            return ToolOutput(
+                f"linked {target} for the user; it was not rendered or opened",
+                artifacts=[
+                    ArtifactRef(target, media_type, Path(target).name if not _is_url(target) else target)
+                ],
+            )
         opener = _opener()
         if opener is None:
             if sys.platform == "win32":

@@ -64,7 +64,7 @@ def test_a_broken_image_is_an_error():
 
 
 def test_the_providers_image_error_is_recognized():
-    """What OpenRouter passed back from Claude (Vertex, then Anthropic)."""
+    """A routed provider response containing an oversized image error."""
     body = (
         '{"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\\"type\\":\\"error\\",'
         '\\"error\\":{\\"type\\":\\"invalid_request_error\\",\\"message\\":\\"messages.12.content.1.image.source.'
@@ -132,3 +132,36 @@ async def test_images_are_dropped_when_shrinking_cant_help(tmp_path):
     await run_with(tmp_path, RejectsAnyImage(["ok"]), history)
     assert history.messages[1].images == []
     assert "[removed: shot.png; the model rejected it as too large]" in history.messages[1].content
+
+
+async def test_a_model_that_takes_no_images_is_asked_again_with_notes(tmp_path):
+    """vLLM serving a model text-only refuses any image ("At most 0 image(s)"): the loop marks the
+    model, and from then on its requests carry a note in place of each image (Exp-1A attempt 3:
+    the lead's screenshot of its own HTML report ended the turn)."""
+    from tinyharness.agent.history import without_images
+    from tinyharness.llm.types import ImagesUnsupportedError
+
+    class TextOnly(ScriptedLLM):
+        def __init__(self, turns):
+            super().__init__(turns)
+            self.no_images = set()
+
+        async def stream(self, messages, tools=None, **kw):
+            if self.model in self.no_images:
+                messages = without_images(messages)
+            if any(m.images for m in messages):
+                raise ImagesUnsupportedError("At most 0 image(s) may be provided in one prompt.")
+            async for chunk in super().stream(messages, tools, **kw):
+                yield chunk
+
+    history = History(
+        [
+            Message(role="system", content="s"),
+            Message(role="user", content="check it", images=[as_image(png(10, 10))]),
+        ]
+    )
+    llm = TextOnly(["I can't see images; the HTML validates."])
+    events = await run_with(tmp_path, llm, history)
+    assert any(getattr(e, "text", "") == "I can't see images; the HTML validates." for e in events)
+    assert llm.no_images == {"fake"}
+    assert "Cannot read shot.png" in llm.requests[-1][1].content

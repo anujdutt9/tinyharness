@@ -204,7 +204,7 @@ MODE_HINT = {
     PermissionMode.DEFAULT: "works in this project and the sandbox; asks before anything else",
     PermissionMode.PLAN: "read-only: looks, doesn't touch",
     PermissionMode.AUTO: "works on its own; asks before risky actions",
-    PermissionMode.BYPASS: "never asks",
+    PermissionMode.BYPASS: "routine prompts off; hard boundaries still ask",
 }
 
 # -- prompt_toolkit -------------------------------------------------------------
@@ -232,7 +232,9 @@ PT_STYLE = Style.from_dict(
         "completion-menu.completion fuzzymatch.inside": f"{BRAND_2} bold",
         "completion-menu.completion.current fuzzymatch.outside": ON_BRAND,
         "completion-menu.completion.current fuzzymatch.inside": f"{ON_BRAND} bold",
-        # The approval prompt (ChoiceInput).
+        # Shared searchable pickers and approval prompts.
+        "palette.selected": f"{BRAND} bold",
+        "palette.detail": SUBTLE,
         "selected-option": f"{BRAND} bold",
         "number": SUBTLE,
     }

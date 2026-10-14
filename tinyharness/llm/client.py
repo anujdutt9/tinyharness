@@ -19,7 +19,8 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from tinyharness.agent.history import Message, ReasoningState, ToolCall, well_formed
+from tinyharness.agent.history import Message, ReasoningState, ToolCall, well_formed, without_images
+from tinyharness.llm import identity
 from tinyharness.llm.adapters import ADAPTERS
 from tinyharness.llm.calibration import CalibrationStore, ToolFormat, as_text, probe, tools_section
 from tinyharness.llm.models import ModelDirectory
@@ -27,6 +28,7 @@ from tinyharness.llm.types import (
     DEFAULT_OPT_IN_EFFORT,
     ContextOverflowError,
     Effort,
+    ImagesUnsupportedError,
     ImageTooLargeError,
     LLMError,
     ModelInfo,
@@ -46,6 +48,7 @@ __all__ = [
     "CompletedTurn",
     "ContextOverflowError",
     "ImageTooLargeError",
+    "ImagesUnsupportedError",
     "LLMClient",
     "LLMError",
     "ProviderConnectionError",
@@ -59,6 +62,16 @@ log = logging.getLogger(__name__)
 _OVERFLOW = re.compile(
     r"context_length_exceeded|prompt is too long|context (length|window)|maximum context"
     r"|too many (input )?tokens|input token count|exceeds? the (maximum|model'?s?)",
+    re.IGNORECASE,
+)
+
+
+# How providers word "this model takes no images" (vLLM serving a model text-only: "At most 0
+# image(s) may be provided in one prompt").
+_NO_IMAGES = re.compile(
+    r"at most 0 images?\b|at most 0 image\(s\)|does(n't| not) support (image|vision)"
+    r"|(image|vision) (input|inputs|content) (is |are )?not supported|not a multimodal model"
+    r"|images? (is|are) not supported|model does not accept images?",
     re.IGNORECASE,
 )
 
@@ -231,6 +244,7 @@ class LLMClient:
         self.tool_calls = tool_calls
         self.calibration = calibration
         self._formats: dict[str, ToolFormat] = {}  # probed this session, by model
+        self.no_images: set[str] = set()  # models that refused an image this session
         self._tried_listing = False
 
     def _timeouts(self) -> httpx.Timeout:
@@ -245,13 +259,25 @@ class LLMClient:
         return self.provider.base_url.rstrip("/") + self.adapter.request_path
 
     def _headers(self) -> dict[str, str]:
-        return {
+        headers = {
             "Content-Type": "application/json",
             **self.adapter.headers(self.api_key),
             **self.provider.extra_headers,
         }
+        if self.provider.send_ids and (who := identity.CURRENT.get()) is not None:
+            headers.update(who.headers())
+        return headers
 
     # -- models -------------------------------------------------------------------
+
+    def takes_images(self, model: str | None = None) -> bool | None:
+        """Whether `model` takes image input: False once it refused one this session, else
+        what the config or the provider's model list says (None: not known)."""
+        model = model or self.model
+        if model in self.no_images:
+            return False
+        info = self.model_info(model)
+        return info.images if info is not None else None
 
     def model_info(self, model: str | None = None) -> ModelInfo | None:
         """What we know about a model: from the config, else from the provider's cached list."""
@@ -303,11 +329,14 @@ class LLMClient:
         model: str | None = None,
         web_search: bool = False,
         probing: bool = False,
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream one reply. The last chunk carries `state` when the provider needs data back next turn."""
         await self._ensure_model_list()
         model = model or self.model
         owner = f"{self.provider.name}:{model}"
+        if self.takes_images(model) is False:
+            messages = without_images(messages)
         messages, _ = well_formed(messages, valid_id=re.compile(self.provider.tool_id_pattern), owner=owner)
         system = "\n\n".join(m.content or "" for m in messages if m.role == "system")
         conversation = [m for m in messages if m.role != "system"]
@@ -326,6 +355,7 @@ class LLMClient:
             owner=owner,
             web_search=web_search,
             show_reasoning=self.show_reasoning,
+            max_tokens=max_tokens,
         )
         payload = _merge(self.adapter.payload(request), self.provider.extra_body)
         log.debug(
@@ -442,12 +472,15 @@ class LLMClient:
         *,
         model: str | None = None,
         web_search: bool = False,
+        max_tokens: int | None = None,
     ) -> CompletedTurn:
         """Non-streaming convenience: run `stream` to completion."""
         text: list[str] = []
         calls = ToolCallAccumulator()
         finish: str | None = None
-        async for chunk in self.stream(messages, tools, model=model, web_search=web_search):
+        async for chunk in self.stream(
+            messages, tools, model=model, web_search=web_search, max_tokens=max_tokens
+        ):
             text.append(chunk.text)
             if chunk.tool_call_delta:
                 calls.add(chunk.tool_call_delta)
@@ -480,11 +513,17 @@ class LLMClient:
         return fmt
 
     async def one_shot(
-        self, prompt: str, *, system: str | None = None, model: str | None = None, web_search: bool = False
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        model: str | None = None,
+        web_search: bool = False,
+        max_tokens: int | None = None,
     ) -> str:
         messages = [Message(role="system", content=system)] if system else []
         messages.append(Message(role="user", content=prompt))
-        return (await self.collect(messages, model=model, web_search=web_search)).text
+        return (await self.collect(messages, model=model, web_search=web_search, max_tokens=max_tokens)).text
 
     @property
     def small_model(self) -> str:
@@ -492,11 +531,15 @@ class LLMClient:
         return self.provider.small_model or self.model
 
     async def one_shot_small(
-        self, prompt: str, *, system: str | None = None, web_search: bool = False
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        web_search: bool = False,
+        model: str | None = None,
     ) -> str:
-        """`one_shot` on the small model. If the small model refuses the request (too long for
-        its window, a tool it lacks, rate limited), the main model answers instead."""
-        small = self.small_model
+        """`one_shot` on a background model. If it refuses, the main model answers instead."""
+        small = model or self.small_model
         if small != self.model:
             try:
                 return await self.one_shot(prompt, system=system, model=small, web_search=web_search)
@@ -566,6 +609,8 @@ def _http_error(status: int, body: str, endpoint: str) -> LLMError:
         return LLMError(
             f"auth error {status} from {endpoint}; check that your API key is set and valid. Response: {body[:500]}"
         )
+    if status in (400, 422) and _NO_IMAGES.search(body):
+        return ImagesUnsupportedError(f"this model takes no images: {body[:300]}")
     if status in (400, 413, 422) and _IMAGE_TOO_LARGE.search(body):
         return ImageTooLargeError(f"an image is too large for this model: {body[:300]}")
     if status in (400, 413, 422) and _OVERFLOW.search(body):
@@ -576,6 +621,8 @@ def _http_error(status: int, body: str, endpoint: str) -> LLMError:
 def _classify(e: LLMError) -> LLMError:
     """An error reported inside the stream, as the specific kind the loop can recover from."""
     text = str(e)
+    if _NO_IMAGES.search(text):
+        return ImagesUnsupportedError(text)
     if _IMAGE_TOO_LARGE.search(text):
         return ImageTooLargeError(text)
     return ContextOverflowError(text) if _OVERFLOW.search(text) else e

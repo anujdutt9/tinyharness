@@ -6,7 +6,8 @@ A task starts as soon as every task it depends on has finished, and gets their
 results in its prompt. Teammates are subagents with two more tools: TeamBoard (every
 task's status and result so far, and the team's messages) and TeamMessage (tell
 one teammate, by task id, or everyone). A message reaches a running teammate
-before its next step. Up to 4 teammates run side by side, writers included: their
+before its next step. Every task that's ready runs at once, up to the session's
+subagent limit (max_parallel_agents; the rest wait their turn), writers included: their
 calls that change things take turns, so two never write at once, while their model
 calls overlap. A teammate that fails (stuck, a provider error) is started once more;
 a task whose dependencies partly failed still runs, told what's missing, and is
@@ -25,10 +26,10 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field
 
 from tinyharness.subagents import AgentSpec
+from tinyharness.tools.agent import AgentSlots
 from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
 
-MAX_TASKS = 12
-MAX_PARALLEL = 4
+MAX_TASKS = 20
 MAX_ATTEMPTS = 2  # a teammate that fails (stuck, a provider error) is started once more
 BOARD_WAIT_SECONDS = 60  # TeamBoard with nothing new waits this long for news
 RESULT_CHARS_IN_PROMPT = 4_000  # a dependency's result, as passed to the next teammate
@@ -231,10 +232,12 @@ class TeamTool(Tool[TeamInput]):
         agents: dict[str, AgentSpec],
         spawner: TeammateSpawner,
         agent_is_read_only: Callable[[AgentSpec], bool],
+        slots: AgentSlots | None = None,
     ) -> None:
         self.agents = agents
         self.spawner = spawner
         self.agent_is_read_only = agent_is_read_only
+        self.slots = slots or AgentSlots()
         listing = "\n".join(f"- {name}: {spec.description}" for name, spec in agents.items())
         self.description = (
             "Run a team of subagents on a goal that splits into several parts, some of which can "
@@ -245,7 +248,10 @@ class TeamTool(Tool[TeamInput]):
             "type and the ids of tasks it needs first; a task gets those tasks' results. Tasks "
             "without dependencies between them run in parallel, and teammates can message each "
             "other. You get one report with every result. For a single self-contained job, use "
-            f"the Agent tool instead.\n\nAgent types:\n{listing or '(none)'}"
+            "the Agent tool instead.\n\nYou decide the team's size: 3-5 teammates suit most "
+            "goals, since each costs a full agent run and adds coordination; go wider only "
+            f"when that many parts are truly independent. Up to {self.slots.limit} run at once; "
+            f"the rest wait their turn.\n\nAgent types:\n{listing or '(none)'}"
         )
 
     def describe(self, args: TeamInput) -> str:
@@ -264,7 +270,7 @@ class TeamTool(Tool[TeamInput]):
         board = self._board(args)
         board.request = ctx.request
         board.context = args.context.strip()
-        await run_team(board, self.agents, self.spawner, ctx)
+        await run_team(board, self.agents, self.spawner, ctx, slots=self.slots)
         return report(board)
 
     def _board(self, args: TeamInput) -> Board:
@@ -304,18 +310,19 @@ async def run_team(
     spawner: TeammateSpawner,
     ctx: ToolContext,
     *,
-    max_parallel: int = MAX_PARALLEL,
+    slots: AgentSlots | None = None,
 ) -> None:
     """Run every task as its dependencies finish; update the board as they end."""
-    slots = asyncio.Semaphore(max_parallel)
+    slots = slots or AgentSlots()
     running: dict[asyncio.Task[str], TaskState] = {}
 
     async def work(task: TaskState) -> str:
-        # Up to max_parallel teammates at once, writers included: their model calls overlap,
-        # and their writing calls take turns on the session's write lock (agent/loop.py).
+        # As many teammates at once as the session's subagent limit allows, writers
+        # included: their model calls overlap, and their writing calls take turns on the
+        # session's write lock (agent/loop.py). The rest wait for a free slot.
         spec = agents[task.agent]
         tools: list[Tool[Any]] = [TeamBoardTool(board), TeamMessageTool(board, task.id)]
-        async with slots:
+        async with slots.hold(wait=True):
             return await _spawn(task, spec, tools)
 
     def _spawn(task: TaskState, spec: AgentSpec, tools: list[Tool[Any]]) -> Awaitable[str]:
@@ -434,9 +441,11 @@ def report(board: Board) -> str:
 
 
 def _keep_whole(task: TaskState, ctx: ToolContext) -> None:
-    """Save a result too long for the prompts it goes into, so nothing is silently lost:
-    the next task and the lead get the start of it and the path to the rest."""
-    if len(task.result) <= RESULT_CHARS_IN_PROMPT or ctx.scratch is None:
+    """Save every result, so nothing is silently lost when one is too long for the prompts it
+    goes into (the next task and the lead get the start of it and the path to the rest). Short
+    ones too: seen live, a lead given three paths and one whole result went looking for a
+    fourth file, guessed its name, and ran that task again."""
+    if ctx.scratch is None:
         return
     path = ctx.scratch.dir / f"team-{uuid.uuid4().hex[:6]}-{task.id}.md"
     try:
@@ -450,7 +459,7 @@ def _handed_off(task: TaskState, limit: int) -> str:
     """A task's result as passed on: whole, or its start and where the rest is."""
     text = task.result.strip()
     if len(text) <= limit:
-        return text
+        return f"{text}\n[the whole result, above; also in {task.result_file}]" if task.result_file else text
     rest = f"{len(text) - limit:,} more characters"
     where = (
         f"; the whole result is in {task.result_file}: Read it before you use it" if task.result_file else ""

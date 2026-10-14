@@ -1,7 +1,13 @@
+import pytest
+
 from conftest import ScriptedLLM
-from tinyharness.agent.compaction import SUMMARY_MARK, Compactor
+from tinyharness.agent.compaction import CHECKPOINT_CONTINUATION, SUMMARY_MARK, Compactor
 from tinyharness.agent.history import History, Message, ToolCall
 from tinyharness.llm.tokens import count_tokens
+
+
+def _is_checkpoint(m) -> bool:
+    return m.role == "user" and m.content == CHECKPOINT_CONTINUATION
 
 
 def history(*messages: Message) -> History:
@@ -230,8 +236,10 @@ async def test_one_long_task_can_be_summarized():
     assert await c.summarize(h)
     after = h.messages
     assert after[1].content.startswith(SUMMARY_MARK)
-    # The kept part starts with the request, word for word, and never with a tool result.
-    assert after[2].role == "user" and after[2].content.endswith("build the report from data.db")
+    # The kept part starts with harness state, not a fresh copy of the original request,
+    # and never with a tool result.
+    assert _is_checkpoint(after[2])
+    assert "build the report from data.db" not in after[2].content
     assert after[3].role == "assistant"
     calls = {c.id for m in after for c in m.tool_calls}
     assert calls == {m.tool_call_id for m in after if m.role == "tool"}
@@ -315,15 +323,58 @@ async def test_the_summary_sees_tool_calls_files_todos_and_the_earlier_summary()
     assert "[result of Edit] edited" in prompt and "/w/page.html" in prompt and "Run tests" in prompt
 
 
-async def test_a_second_summary_still_keeps_the_request():
+async def test_a_second_summary_keeps_checkpoint_state_without_reissuing_the_request():
     h = one_long_task(40)
     c = Compactor(ScriptedLLM([]), context_window=100_000, keep_tail_messages=12)
     assert await c.summarize(h)
     for i in range(40, 60):
         h.messages += [assistant("", f"c{i}"), tool(f"c{i}", BIG)]
     assert await c.summarize(h)
-    request = next(m for m in h.messages if m.role == "user")
-    assert request.content.endswith("build the report from data.db")
+    checkpoint = next(m for m in h.messages if m.role == "user")
+    assert _is_checkpoint(checkpoint)
+    assert "build the report from data.db" not in checkpoint.content
+
+
+async def test_completed_team_is_not_reissued_as_the_newest_user_instruction():
+    """Regression: a long run created the requested eight-agent team again after each
+    compaction because the original request became the newest user message."""
+
+    class TeamSummary(ScriptedLLM):
+        async def one_shot(self, prompt, **_):
+            assert "[assistant called] Team(" in prompt
+            assert "8 agents completed" in prompt
+            return """## Objective
+Write a report using eight analysts.
+## Hard Constraints
+(none)
+## Execution State
+### Completed — Do Not Repeat
+Team of eight analysts completed; reuse its results.
+### Active
+Synthesizing the report.
+### Pending
+(none)
+## Findings and Decisions
+All analyses are available.
+## Artifacts and Files
+(none)
+## Verification
+Eight agent results returned.
+## Next Action
+Finish synthesizing the report."""
+
+    h = history(
+        Message(role="system", content="sys"),
+        user("Run a team of 8 analysts, then write the report."),
+        assistant("", "team-1", name="Team"),
+        tool("team-1", "8 agents completed; all results attached"),
+        assistant("I am now synthesizing the report."),
+    )
+    assert await Compactor(TeamSummary([])).summarize(h, keep_tail=1)
+    assert [m.role for m in h.messages] == ["system", "system", "user", "assistant"]
+    assert _is_checkpoint(h.messages[2])
+    assert "Run a team of 8 analysts" not in h.messages[2].content
+    assert "do not recreate completed Agent or Team calls" in h.messages[2].content
 
 
 def test_microcompact_leaves_arguments_it_cannot_shorten():
@@ -336,3 +387,388 @@ def test_microcompact_leaves_arguments_it_cannot_shorten():
     )
     h = history(user("go"), write, tool("w", "ok"), user("p1"), user("p2"))
     assert c.microcompact(h) == 0 and c.microcompact(h) == 0
+
+
+async def test_an_empty_summary_keeps_the_history():
+    """A reasoning model can spend its whole output thinking and return no text; replacing the
+    history with that would silently lose the agent's work."""
+
+    class Thinker(ScriptedLLM):
+        async def one_shot(self, prompt, **_):
+            return ""
+
+    h = history(
+        Message(role="system", content="sys"),
+        user("a " * 3000),
+        assistant("b " * 3000),
+        user("go on"),
+        assistant("ok"),
+    )
+    before = list(h.messages)
+    assert not await Compactor(Thinker([])).summarize(h, keep_tail=1)
+    assert h.messages == before
+
+
+async def test_the_summary_runs_on_the_compaction_model_as_role_compaction():
+    from tinyharness.llm import identity
+
+    seen = {}
+
+    class Client(ScriptedLLM):
+        async def one_shot(self, prompt, *, model=None, **_):
+            seen["role"], seen["model"] = identity.CURRENT.get().role, model
+            return "summary"
+
+    token = identity.CURRENT.set(identity.for_session("s1"))
+    try:
+        h = history(
+            Message(role="system", content="sys"),
+            user("a " * 3000),
+            assistant("b " * 3000),
+            user("go on"),
+            assistant("ok"),
+        )
+        assert await Compactor(Client([]), model="qwen-9b").summarize(h, keep_tail=1)
+        assert identity.CURRENT.get().role == "lead"  # restored after the call
+    finally:
+        identity.CURRENT.reset(token)
+    assert seen == {"role": "compaction", "model": "qwen-9b"}
+
+
+# ---- when to summarize and how much to keep: sized from the model ----
+
+
+def test_usable_is_the_window_less_the_models_output():
+    assert compactor(context_window=200_000, max_output=8_192).usable == 200_000 - 8_192
+    assert (
+        compactor(context_window=200_000, max_output=128_000).usable == 200_000 - 32_000
+    )  # at most 32K held back
+    assert compactor(context_window=200_000).usable == 200_000 - 32_000  # unknown output: 32K
+    assert (
+        compactor(context_window=65_536, max_output=lambda: 8_192).usable == 65_536 - 8_192
+    )  # read when asked
+    assert compactor(context_window=65_536, reserved=17_000).usable == 65_536 - 17_000  # the config's own
+
+
+def test_a_small_window_holds_back_at_most_half():
+    """Model lists often give the output limit as the whole window; held back in full, every
+    call would summarize."""
+    assert compactor(context_window=32_768, max_output=32_768).usable == 16_384
+    assert compactor(context_window=16_384).usable == 8_192  # unknown output
+
+
+def test_summarizes_at_usable_unless_a_threshold_is_set():
+    h = history(user("x"))
+    c = compactor(context_window=100_000, max_output=20_000)
+    c._baseline = (1, h.messages[0].id, 79_000)
+    assert not c.needs_summary(h)
+    c._baseline = (1, h.messages[0].id, 80_000)
+    assert c.needs_summary(h)
+    c.threshold = 0.9  # the old fraction still overrides
+    assert not c.needs_summary(h)
+
+
+def test_the_tail_budget_scales_with_the_window():
+    assert compactor(context_window=65_536, max_output=32_768).tail_budget == int((65_536 - 32_000) * 0.25)
+    assert compactor(context_window=8_000).tail_budget == 2_000  # floor
+    assert compactor(context_window=1_000_000).tail_budget == 15_000  # cap
+    assert compactor(preserve_recent_tokens=500).tail_budget == 500
+
+
+def big_turns(n: int, words: int) -> History:
+    """n user turns, each a Read whose result is `words` words."""
+    out = [Message(role="system", content="sys")]
+    for i in range(n):
+        out += [user(f"q{i}"), assistant("", f"r{i}"), tool(f"r{i}", "word " * words), assistant(f"a{i}")]
+    return history(*out)
+
+
+async def test_the_kept_tail_is_a_token_budget_not_a_message_count():
+    """Exp-1A: the last 12 messages were large tool results, so the summary saved ~2K tokens."""
+    h = big_turns(12, 4_000)
+    c = compactor(preserve_recent_tokens=10_000)
+    assert await c.summarize(h)
+    kept = [m for m in h.messages if not (m.content or "").startswith((SUMMARY_MARK, "sys"))]
+    from tinyharness.llm.tokens import estimate_tokens
+
+    assert estimate_tokens(kept) <= 10_000
+    assert kept[0].role == "user"  # whole turns: this one fit
+    calls = {c.id for m in kept for c in m.tool_calls}
+    assert calls == {m.tool_call_id for m in kept if m.role == "tool"}  # no call without its result
+
+
+async def test_a_turn_too_big_to_keep_whole_keeps_its_latest_steps():
+    h = one_long_task(30, "word " * 2_000)
+    assert await compactor(preserve_recent_tokens=6_000).summarize(h)  # each result ~2,500 tokens: two fit
+    after = h.messages
+    assert _is_checkpoint(after[2])
+    assert after[3].role == "assistant"  # never a tool result first
+    assert sum(m.role == "tool" for m in after) == 2
+
+
+async def test_when_not_even_the_last_step_fits_everything_is_summarized():
+    h = one_long_task(3, "word " * 20_000)
+    assert await compactor(preserve_recent_tokens=1_000).summarize(h)
+    assert [m.role for m in h.messages] == ["system", "system", "user"]  # sys, summary, checkpoint
+    assert _is_checkpoint(h.messages[2])
+
+
+async def test_a_lone_request_is_not_summarized():
+    assert not await compactor(preserve_recent_tokens=0).summarize(
+        history(Message(role="system", content="s"), user("go"))
+    )
+
+
+async def test_after_a_summary_it_waits_for_new_history_before_summarizing_again():
+    """A small window where the system prompt, tools, summary and tail alone sit past the limit:
+    summarizing again each step would only shrink the summary."""
+    from tinyharness.llm.usage import Usage
+
+    c = compactor(context_window=20_000, preserve_recent_tokens=2_000)  # usable 10,000
+    h = big_turns(6, 1_500)
+    assert c.needs_summary(h) and await c.summarize(h)
+    c.observe(h, Usage(input=11_000, output=100))  # the provider: still over, after the summary
+    assert not c.needs_summary(h)
+    h.messages += [assistant("", "z"), tool("z", "word " * 2_500)]  # a tail's worth more
+    assert c.needs_summary(h)
+
+
+async def test_the_summary_request_separates_history_prior_summary_and_instructions():
+    """The history in <conversation> tags with the instructions after it, and the system prompt
+    saying not to continue: with the instructions only in the system prompt and the history
+    ending in the agent's words, the 27B continued the conversation (a 37-token "summary")."""
+    seen = {}
+
+    class Client(ScriptedLLM):
+        async def one_shot(self, prompt, *, system=None, **_):
+            seen["prompt"], seen["system"] = prompt, system
+            return "summary"
+
+    h = history(
+        Message(role="system", content="sys"),
+        Message(role="system", content=f"{SUMMARY_MARK}\nrevenue fell 12% in July"),
+        user("a " * 3000),
+        assistant("I'll continue with the next query"),
+        user("go on"),
+        assistant("ok"),
+    )
+    assert await Compactor(Client([])).summarize(h, keep_tail=1)
+    prompt = seen["prompt"]
+    assert prompt.startswith("Here is the conversation so far:\n\n<conversation>\n")
+    assert (
+        prompt.index("</conversation>")
+        < prompt.index("<prior-summary>")
+        < prompt.index("Summarize the conversation")
+    )
+    assert "revenue fell 12% in July" in prompt.split("<prior-summary>")[1]
+    assert "[earlier summary]" not in prompt  # the prior summary is its own block, not part of the history
+    assert "### Completed — Do Not Repeat" in prompt
+    assert 'write "Report completion."' in prompt
+    assert "Completed Agent or Team calls remain completed" in prompt
+    assert "Do not continue the conversation" in seen["system"]
+
+
+# ---- counting tokens like the model does ----
+
+
+def test_a_models_own_tokenizer_is_used_when_given():
+    h = history(user("word " * 100))
+    assert compactor().estimate(h.messages) < compactor(counter=lambda: lambda t: len(t)).estimate(h.messages)
+
+
+def test_reasoning_sent_back_with_a_reply_is_counted():
+    from tinyharness.agent.history import ReasoningState
+
+    reply = assistant("ok")
+    plain = compactor().estimate([reply])
+    reply.state = ReasoningState("gw:qwen-27b", {"reasoning": "think " * 400})
+    assert compactor().estimate([reply]) > plain + 300
+
+
+def test_the_estimate_is_calibrated_against_the_providers_counts():
+    """Exp-1A attempt 3: ~4 chars a token, where the 27B's tokenizer gave 1.2-2.1x that on SQL
+    output, so the kept tail was far over its budget. The provider counts both prompts exactly;
+    their difference covers exactly the messages added between the two requests."""
+    from tinyharness.llm.usage import Usage
+
+    c = compactor()
+    h = history(Message(role="system", content="sys"), user("go"), assistant("", "a"))
+    c.observe(h, Usage(input=5_000, output=50))  # request 1: system + "go"
+    h.messages += [tool("a", "| 1 | 2 | 3 |\n" * 400), assistant("", "b")]
+    added = estimate_of(h.messages[2:4])
+    c.observe(h, Usage(input=5_000 + 2 * added, output=50))  # the provider counted twice our estimate
+    assert c.ratio == pytest.approx(2.0, rel=0.01)
+    assert c.estimate(h.messages[3:4]) == pytest.approx(2 * estimate_of(h.messages[3:4]), rel=0.01)
+
+
+def test_calibration_ignores_a_rewritten_history():
+    from tinyharness.llm.usage import Usage
+
+    c = compactor(
+        stub_tool_results_over=100, keep_tail_messages=1, protect_tool_tokens=0, min_savings=0, cache_ttl=0
+    )
+    h = history(user("go"), assistant("", "a"))
+    c.observe(h, Usage(input=100, output=10))
+    h.messages += [tool("a", BIG), assistant("", "b")]
+    c.microcompact(h)  # rewrites the result: the counts no longer match the history
+    c.observe(h, Usage(input=99_999, output=10))
+    assert c.ratio == 1.0
+
+
+def estimate_of(messages):
+    from tinyharness.llm.tokens import estimate_tokens
+
+    return estimate_tokens(messages)
+
+
+# ---- limits sized from the model ----
+
+
+def test_tier_limits_scale_with_a_small_window():
+    """Seen live (a vLLM server at a 64K window): 40K tokens of tool output were always protected, more
+    than the 33.5K `usable` itself, so old results were never stubbed and every long run
+    went straight to a summary."""
+    small = compactor(context_window=65_536)
+    assert small.usable == 33_536
+    assert small.protect_tool_tokens == int(33_536 * 0.30) < small.usable
+    # A whole ~10K-token file still fits in one read (seen live: 10-K excerpts of 9-10K tokens were
+    # cut at 25% of usable, and the agents paged through them instead).
+    assert small.max_message_tokens == 16_000
+    assert compactor(context_window=32_768).max_message_tokens == int(16_384 * 0.5)
+    large = compactor(context_window=200_000)
+    assert (large.protect_tool_tokens, large.max_message_tokens) == (40_000, 16_000)
+    assert compactor(context_window=65_536, protect_tool_tokens=7).protect_tool_tokens == 7
+
+
+def test_the_reply_asks_for_the_room_the_trigger_keeps():
+    assert compactor(context_window=200_000).reply_tokens is None  # output limit unknown: no guess
+    assert compactor(context_window=200_000, max_output=64_000).reply_tokens == 32_000
+    assert compactor(context_window=32_768, max_output=32_768).reply_tokens == 16_384
+    assert compactor(context_window=65_536, max_output=lambda: 8_192).reply_tokens == 8_192
+    configured = compactor(context_window=65_536, reserved=12_288)
+    assert (configured.reply_tokens, configured.usable) == (12_288, 65_536 - 12_288)
+
+
+def test_budget_cap_keeps_the_start_and_the_end_and_saves_the_rest(tmp_path):
+    """A test run's verdict is in its last lines: cutting the end lost it."""
+    output = "START " + "line of output\n" * 5000 + " 3 failed, 212 passed"
+    h = history(user("run the tests"), assistant("", "b1", name="Bash"), tool("b1", output))
+    assert compactor(max_message_tokens=500).budget_cap(h, tmp_path) == 1
+    content = h.messages[2].content
+    assert content.startswith("[truncated:") and "START" in content and content.endswith("212 passed")
+    saved = tmp_path / "compacted-b1.txt"
+    assert str(saved) in content and saved.read_text() == output
+
+
+def test_a_stubbed_result_says_where_the_whole_of_it_is(tmp_path):
+    h = history(user("hi"), assistant("", "1"), tool("1", BIG), *(user(f"p{i}") for i in range(4)))
+    c = compactor(stub_tool_results_over=100, keep_tail_messages=4, protect_tool_tokens=0)
+    assert c.microcompact(h, tmp_path) == 1
+    assert (
+        h.messages[2].content.startswith("[trimmed:")
+        and str(tmp_path / "compacted-1.txt") in h.messages[2].content
+    )
+    assert (tmp_path / "compacted-1.txt").read_text() == BIG
+    # With nowhere to save it, the stub is as before.
+    h = history(user("hi"), assistant("", "1"), tool("1", BIG), *(user(f"p{i}") for i in range(4)))
+    c.microcompact(h)
+    assert "Read" not in h.messages[2].content
+
+
+async def test_the_summary_has_its_own_output_limit():
+    """A reasoning model given its whole output limit can spend it all thinking and return
+    an empty summary; a summary needs a few thousand tokens."""
+    from tinyharness.agent.compaction import SUMMARY_MAX_TOKENS
+
+    asked = []
+
+    class Recording(ScriptedLLM):
+        async def one_shot(self, prompt, **kwargs):
+            asked.append(kwargs.get("max_tokens"))
+            return "summary"
+
+    h = history(user("a"), assistant("b"), user("c"), assistant("d"))
+    assert await Compactor(Recording([])).summarize(h, keep_tail=1)
+    assert await Compactor(Recording([]), model="small").summarize(
+        history(user("a"), assistant("b"), user("c"), assistant("d")), keep_tail=1
+    )
+    assert asked == [SUMMARY_MAX_TOKENS, SUMMARY_MAX_TOKENS]
+
+
+async def test_a_smaller_tail_can_be_asked_for():
+    turns = [
+        m for i in range(10) for m in (user(f"q{i} " + "word " * 400), assistant(f"a{i} " + "word " * 400))
+    ]
+    c = Compactor(ScriptedLLM([]), context_window=200_000)
+    h = history(*turns)
+    assert await c.summarize(h, tail_tokens=2_000)
+    assert c.estimate(h.messages[1:]) <= 2_000 + 100  # the summary, then at most the asked-for tail
+
+
+def test_a_cached_tokenizer_is_loaded_without_asking_the_hub(monkeypatch, tmp_path):
+    """Seen live: with the tokenizer already downloaded, every session still asked the Hub
+    for a newer revision, printing its warning about unauthenticated requests."""
+    import sys
+    import types
+
+    from tinyharness.llm import tokens
+
+    asked = []
+
+    class Tokenizer:
+        def __init__(self, source):
+            self.source = source
+
+        @classmethod
+        def from_file(cls, path):
+            return cls(path)
+
+        @classmethod
+        def from_pretrained(cls, repo):
+            asked.append(repo)
+            return cls(repo)
+
+        def encode(self, text, add_special_tokens=False):
+            return types.SimpleNamespace(ids=text.split())
+
+    cache = {"org/cached": str(tmp_path / "tokenizer.json")}
+
+    def hf_hub_download(repo, filename, local_files_only=False):
+        assert local_files_only and filename == "tokenizer.json"
+        if repo not in cache:
+            raise FileNotFoundError(repo)
+        return cache[repo]
+
+    monkeypatch.setitem(sys.modules, "tokenizers", types.SimpleNamespace(Tokenizer=Tokenizer))
+    monkeypatch.setitem(
+        sys.modules, "huggingface_hub", types.SimpleNamespace(hf_hub_download=hf_hub_download)
+    )
+    tokens.model_counter.cache_clear()
+    try:
+        assert tokens.model_counter("org/cached")("a b c") == 3
+        assert asked == []  # from the cache: no request
+        assert tokens.model_counter("org/new")("a b") == 2
+        assert asked == ["org/new"]  # not cached yet: downloaded
+    finally:
+        tokens.model_counter.cache_clear()
+
+
+def test_a_64k_analyst_clears_old_sql_results_before_it_needs_a_summary():
+    """Seen live (SQL analysts on a 64K vLLM window): every analyst went straight to a summary.
+    Its SQL results were 1-2K tokens each, under the fixed 6K per-result floor, and the 60%-
+    of-the-window warm threshold (39.3K) was past the 33.5K summary trigger."""
+    row = "| 2026-03 | Helix Genomics | enterprise | 422,118.40 | churned |\n"
+    result = row * 80
+    per = count_tokens(result)
+    assert 1_000 < per < 2_500
+    c = Compactor(ScriptedLLM([]), context_window=65_536, clock=Clock())
+    c.mark_call()  # warm cache
+    out: list[Message] = [user("analyze revenue")]
+    i = 0
+    while c.used(History(out)) < c.usable * 0.85:  # past the warm threshold, short of the summary
+        out += [assistant("", f"q{i}", name="Bash"), tool(f"q{i}", result)]
+        i += 1
+    h = History(out)
+    assert not c.needs_summary(h)
+    assert c.microcompact(h) > 0
+    assert c.used(h) < c.usable * 0.75  # room again, without a summary

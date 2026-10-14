@@ -32,6 +32,11 @@ class ImageTooLargeError(LLMError):
     """The provider rejected an image in the request as too large (pixels or bytes)."""
 
 
+class ImagesUnsupportedError(LLMError):
+    """The model takes no image input at all (a text-only model, or one served without its
+    vision encoder)."""
+
+
 class ProviderConnectionError(LLMError):
     """The provider couldn't be reached, or the connection failed mid-reply."""
 
@@ -109,6 +114,8 @@ class ModelInfo:
     efforts: frozenset[str] | None = None  # supported reasoning efforts
     reasoning: bool | None = None  # reasoning can be switched on per request, and is off unless it is
     price: Price | None = None  # when the model list says (OpenRouter's does)
+    images: bool | None = None  # takes image input; None = not known (found out on the first refusal)
+    tokenizer: str | None = None  # Hugging Face repo with its tokenizer, for exact token counts
 
     @property
     def display(self) -> str:
@@ -128,6 +135,7 @@ class Request:
     owner: str = ""  # "provider:model"; saved reasoning is only sent back to its owner
     web_search: bool = False  # let the model search the web with the provider's own search tool
     show_reasoning: bool = False  # ask for readable reasoning where that's opt-in (OpenAI summaries)
+    max_tokens: int | None = None  # the reply's output limit; None: the API's default
 
     def echo(self, message: Message) -> Any:
         """The saved provider data for `message`, if it came from this same model."""

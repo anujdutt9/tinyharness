@@ -91,6 +91,15 @@ def test_tls_failures_give_the_reason():
     )
 
 
+def test_winsock_connection_codes_use_portable_names(monkeypatch):
+    """Seen in CI: Windows reported WSAECONNRESET with an unknown-error message."""
+    winsock_reset = 10054
+    monkeypatch.setitem(errno.errorcode, winsock_reset, "WSAECONNRESET")
+    described = failure(fail(httpx.ConnectError, cause=OSError(winsock_reset, "reset")))
+    assert described.code == "ECONNRESET"
+    assert described.message.endswith("connection reset by peer (ECONNRESET)")
+
+
 def test_a_slow_reply_is_told_apart_from_a_network_problem():
     slow = failure(fail(httpx.ReadTimeout), timeout=120)
     assert (

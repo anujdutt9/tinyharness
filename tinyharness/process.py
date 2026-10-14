@@ -21,7 +21,23 @@ _POLL = 0.05
 async def kill_group(proc: asyncio.subprocess.Process, grace: float | None = None) -> None:
     """SIGTERM the process's group, wait up to `grace` for every member to exit, then
     SIGKILL what's left. Returns once the process itself has been reaped."""
-    if not hasattr(os, "killpg"):  # Windows: no process groups
+    if os.name == "nt":
+        # Shell hooks can start children before they time out. taskkill is the native
+        # process-tree operation; killing only the shell leaves those children alive.
+        killer = await asyncio.create_subprocess_exec(
+            "taskkill",
+            "/PID",
+            str(proc.pid),
+            "/T",
+            "/F",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await killer.wait()
+        with contextlib.suppress(ProcessLookupError):
+            await proc.wait()
+        return
+    if not hasattr(os, "killpg"):
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
         await proc.wait()

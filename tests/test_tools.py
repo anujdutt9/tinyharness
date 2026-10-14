@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -80,7 +81,7 @@ def agent_tool(**agents):
 
 
 async def test_agent_without_subagent_type_runs_general_purpose(tmp_path):
-    """Models often leave it out (other harnesses default it); that used to fail the call."""
+    """Models often leave the type out; that used to fail the call."""
     from conftest import make_ctx
 
     tool, ran = agent_tool()
@@ -381,7 +382,9 @@ async def test_bash_is_non_interactive_and_keeps_omitted_output(ctx, tmp_path):
     env = await call(bash, {"command": "echo $PAGER $GIT_PAGER $GIT_TERMINAL_PROMPT"}, ctx)
     assert env.splitlines()[0] == "cat cat 0"
     out = await call(bash, {"command": "seq 1 20000"}, ctx)
-    path = out.split("all of it is in ", 1)[1].split(":", 1)[0]
+    match = re.search(r"all of it is in (.*): Read or Grep", out)
+    assert match is not None
+    path = match.group(1)
     assert Path(path).read_text().splitlines()[9999] == "10000"  # the omitted middle is there
 
 
