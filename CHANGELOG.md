@@ -467,7 +467,7 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
 - A new identity, "Field Notes": ink blue on paper, with a highlighter for what matters.
   The CLI's palette follows it in both themes, and the wordmark is "tiny" under the
   highlighter.
-- Meet Pip, the tinyharness pony. He's on the README's notebook-page banner, and in the
+- Meet Scout, the tinyharness pony. He's on the README's notebook-page banner, and in the
   terminal he greets you beside the session details as pixel art (only in color
   terminals wide enough for him).
 - Tool rows lead from the target to the result with dot leaders; the turn summary starts with a rule; a passing test run shows

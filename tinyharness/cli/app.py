@@ -19,7 +19,7 @@ from rich.text import Text
 
 from tinyharness import SessionInfo, __version__
 from tinyharness.agent.history import Message
-from tinyharness.cli import pip
+from tinyharness.cli import scout
 from tinyharness.cli.render import Renderer
 from tinyharness.cli.repl import Repl, report_error
 from tinyharness.cli.setup import print_key_guide, run_setup
@@ -95,12 +95,12 @@ KEYS = (
 
 
 def print_banner(console: Console, session: Session, *, compact: bool = False) -> None:
-    """Pip beside the session's details: all of them the first time, after that the model,
+    """Scout beside the session's details: all of them the first time, after that the model,
     project and mode (plus anything that needs attention). Without room or real colors for
-    Pip, the later launches get one line."""
+    Scout, the later launches get one line."""
     cfg = session.config
     mode = session.mode
-    if compact and pip.fits(console):
+    if compact and scout.fits(console):
         details = Table.grid(padding=(0, 2))
         details.add_column(style="muted")
         details.add_column()
@@ -180,7 +180,7 @@ def print_banner(console: Console, session: Session, *, compact: bool = False) -
         details,
     )
     console.print()
-    if pip.fits(console):
+    if scout.fits(console):
         _with_pip(console, body)
     else:
         console.print(Padding(body, (0, 0, 0, 2)))
@@ -189,11 +189,11 @@ def print_banner(console: Console, session: Session, *, compact: bool = False) -
 
 
 def _with_pip(console: Console, body: Group) -> None:
-    """Pip beside `body`, like the README's notebook page."""
+    """Scout beside `body`, like the README's notebook page."""
     card = Table.grid(padding=(0, 3))
     card.add_column(vertical="middle")
     card.add_column(vertical="middle")
-    card.add_row(pip.portrait(), body)
+    card.add_row(scout.portrait(), body)
     console.print(Padding(card, (0, 0, 0, 2)))
 
 
