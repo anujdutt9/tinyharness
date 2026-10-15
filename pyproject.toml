@@ -3,7 +3,7 @@ requires = ["hatchling>=1.27"]  # PEP 639 license metadata
 build-backend = "hatchling.build"
 
 [project]
-name = "tinyharness"
+name = "tinyharness-lm"
 dynamic = ["version"]
 description = "A small, readable coding agent for your terminal, and a Python SDK to build your own: tools, permissions, skills, subagents and context management, for any major model provider."
 readme = "README.md"
