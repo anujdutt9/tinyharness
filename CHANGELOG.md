@@ -7,6 +7,14 @@ the SDK, and every break is listed here.
 
 ## Unreleased
 
+## 0.1.0 (2026-10-14)
+
+First release.
+
+Release validation is summarized in
+[`docs/releases/v0.1.0-smoke.md`](docs/releases/v0.1.0-smoke.md). Raw session traces are
+intentionally excluded because they can contain prompts, filesystem paths and project context.
+
 ### Changed
 - Switched the project license from MIT to Apache License 2.0.
 
@@ -50,14 +58,6 @@ the SDK, and every break is listed here.
   cover write confinement, project and sibling credentials, and blocked network access.
 - Publishing waits for the same lint, type, platform-matrix, minimum-dependency, package,
   and real Linux Sandbox Runtime checks as ordinary CI.
-
-## 0.1.0 (2026-10-13)
-
-First release.
-
-Release validation is summarized in
-[`docs/releases/v0.1.0-smoke.md`](docs/releases/v0.1.0-smoke.md). Raw session traces are
-intentionally excluded because they can contain prompts, filesystem paths and project context.
 
 ### Added
 - The core Open tool now presents files and URLs as typed, clickable artifacts
@@ -467,7 +467,7 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
 - A new identity, "Field Notes": ink blue on paper, with a highlighter for what matters.
   The CLI's palette follows it in both themes, and the wordmark is "tiny" under the
   highlighter.
-- Meet Pip, the tinyharness pony. He's on the README's notebook-page banner, and in the
+- Meet Scout, the tinyharness pony. He's on the README's notebook-page banner, and in the
   terminal he greets you beside the session details as pixel art (only in color
   terminals wide enough for him).
 - Tool rows lead from the target to the result with dot leaders; the turn summary starts with a rule; a passing test run shows

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/banner.png" alt="tinyharness: an agent harness you can read in an afternoon. Pip, the tinyharness pony, wears a yellow work harness with a notebook pouch." width="880">
+  <img src="docs/assets/banner.png" alt="tinyharness: an agent harness you can read in an afternoon. Scout, the tinyharness pony, wears a yellow work harness with a notebook pouch." width="880">
 </p>
 
 <p align="center">
@@ -17,7 +17,7 @@ framework underneath, so you can read the whole thing in an afternoon.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/session-dark.svg">
-  <img src="docs/assets/session-light.svg" alt="A tinyharness session: Pip greets you beside the model, project and sandbox; the agent runs the failing tests, reads invoice.py, fixes the discount bug with a one-line edit, and the tests pass.">
+  <img src="docs/assets/session-light.svg" alt="A tinyharness session: Scout greets you beside the model, project and sandbox; the agent runs the failing tests, reads invoice.py, fixes the discount bug with a one-line edit, and the tests pass.">
 </picture>
 
 ## Why tinyharness
@@ -154,7 +154,7 @@ Suggested reading order:
 | 7 | [`llm/adapters/`](https://github.com/anujdutt9/tinyharness/tree/main/tinyharness/llm/adapters) | One small adapter per provider API; the rest of the code never sees a provider's format |
 | 8 | [`ext.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/ext.py), [`extensions/`](https://github.com/anujdutt9/tinyharness/tree/main/tinyharness/extensions) | How a feature plugs in: the built-in extensions use the same API as yours |
 | 9 | [`subagents/runner.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/subagents/runner.py) | Subagents are the same loop with a fresh history |
-| 10 | [`cli/`](https://github.com/anujdutt9/tinyharness/tree/main/tinyharness/cli) | Rendering events (`render.py`), the REPL, slash commands; colors in `theme.py`, Pip in `pip.py` |
+| 10 | [`cli/`](https://github.com/anujdutt9/tinyharness/tree/main/tinyharness/cli) | Rendering events (`render.py`), the REPL, slash commands; colors in `theme.py`, Scout in `scout.py` |
 
 Every prompt sent to the model is a Markdown file in [`tinyharness/prompts/`](https://github.com/anujdutt9/tinyharness/tree/main/tinyharness/prompts).
 

@@ -263,10 +263,10 @@ def test_pip_greets_you_on_every_launch_when_the_terminal_can_show_him(tmp_path,
             file=io.StringIO(), force_terminal=True, color_system="truecolor", width=100, theme=THEME
         )
         print_banner(color, session, compact=compact)
-        assert "▀" in color.file.getvalue()  # Pip, in half-blocks
+        assert "▀" in color.file.getvalue()  # Scout, in half-blocks
         plain = Console(file=io.StringIO(), width=100, color_system=None, theme=THEME)
         print_banner(plain, session, compact=compact)
-        assert "▀" not in plain.file.getvalue()  # no colors, no Pip
+        assert "▀" not in plain.file.getvalue()  # no colors, no Scout
     finally:
         session.close()
 
