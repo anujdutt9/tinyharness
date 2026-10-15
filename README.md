@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/tinyharness/"><img src="https://img.shields.io/pypi/v/tinyharness?color=1f5f99" alt="PyPI"></a>
-  <a href="https://pypi.org/project/tinyharness/"><img src="https://img.shields.io/pypi/pyversions/tinyharness?color=1f5f99" alt="Python versions"></a>
+  <a href="https://pypi.org/project/tinyharness-lm/"><img src="https://img.shields.io/pypi/v/tinyharness-lm?color=1f5f99" alt="PyPI"></a>
+  <a href="https://pypi.org/project/tinyharness-lm/"><img src="https://img.shields.io/pypi/pyversions/tinyharness-lm?color=1f5f99" alt="Python versions"></a>
   <a href="https://github.com/anujdutt9/tinyharness/actions/workflows/ci.yml"><img src="https://github.com/anujdutt9/tinyharness/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/anujdutt9/tinyharness/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-1f5f99" alt="Apache 2.0 license"></a>
 </p>
@@ -48,12 +48,12 @@ Requires Python 3.11+. Install the command with [uv](https://docs.astral.sh/uv/)
 [pipx](https://pipx.pypa.io)):
 
 ```bash
-uv tool install tinyharness        # or: pipx install tinyharness
+uv tool install tinyharness-lm     # or: pipx install tinyharness-lm
 cd your-project && tinyharness
 ```
 
 The first run asks which provider to use and for its API key; one key for any supported
-provider is enough. `uv tool upgrade tinyharness` updates it.
+provider is enough. `uv tool upgrade tinyharness-lm` updates it.
 
 In the session, type `/` to autocomplete commands. The ones you'll use most:
 
@@ -75,7 +75,7 @@ Useful flags: `-c` (continue the latest conversation), `-r` (pick one), `-p "pro
 ## Use it from Python
 
 ```bash
-uv add tinyharness                 # or: pip install tinyharness
+uv add tinyharness-lm              # or: pip install tinyharness-lm
 ```
 
 ```python

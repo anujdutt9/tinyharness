@@ -16,6 +16,8 @@ Release validation is summarized in
 intentionally excluded because they can contain prompts, filesystem paths and project context.
 
 ### Changed
+- Published the package on PyPI as `tinyharness-lm`; the `tinyharness` command,
+  Python import, and project name stay the same.
 - Switched the project license from MIT to Apache License 2.0.
 
 ### Fixed

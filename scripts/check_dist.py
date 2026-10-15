@@ -26,9 +26,9 @@ REQUIRED = [
 
 def wheel_for_version(version: str, directory: Path = Path("dist")) -> Path:
     """Pick the wheel for the source version, never a stale artifact from another build."""
-    wheels = sorted(directory.glob(f"tinyharness-{version}-*.whl"))
+    wheels = sorted(directory.glob(f"tinyharness_lm-{version}-*.whl"))
     if not wheels:
-        sys.exit(f"no tinyharness {version} wheel in {directory}/; run `uv build` first")
+        sys.exit(f"no tinyharness-lm {version} wheel in {directory}/; run `uv build` first")
     return wheels[-1]
 
 

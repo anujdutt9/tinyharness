@@ -1098,7 +1098,7 @@ wheels = [
 ]
 
 [[package]]
-name = "tinyharness"
+name = "tinyharness-lm"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
