@@ -120,6 +120,12 @@ def _new_id() -> str:
 class MissingAPIKeyError(RuntimeError):
     def __init__(self, provider: Provider) -> None:
         self.provider = provider
+        if provider.auth_refresh == "chatgpt":
+            super().__init__(
+                "ChatGPT plan is not connected. Run /connect chatgpt (or `tinyharness --setup`) "
+                "and choose Continue with ChatGPT."
+            )
+            return
         super().__init__(
             f"No API key for {provider.label}. Add one with /key {provider.name} (or run "
             f"`tinyharness --setup`), or set {provider.api_key_env} in your shell."
@@ -466,7 +472,7 @@ class Session:
         """(Re)build everything that depends on the provider/model."""
         cfg = self.config
         api_key = cfg.resolve_api_key()
-        if not api_key and cfg.provider_info.needs_key:
+        if not api_key and not cfg.provider_info.has_key:
             raise MissingAPIKeyError(cfg.provider_info)
         self.llm = LLMClient(
             cfg.provider_info,

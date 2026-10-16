@@ -5,13 +5,18 @@ import pytest
 
 from tinyharness.config import (
     Config,
+    chatgpt_profiles,
+    ensure_chatgpt_host_id,
     forget_model,
     load_config,
     load_dotenv_files,
     parse_dotenv,
     read_auth,
+    read_chatgpt_profile,
     recent_models,
     remember_model,
+    save_chatgpt_profile,
+    save_chatgpt_registration,
     save_key,
 )
 from tinyharness.llm.providers import load_catalog
@@ -262,6 +267,12 @@ def test_every_builtin_provider_uses_a_known_api():
     assert {p.api for p in load_catalog().values()} <= set(ADAPTERS)
 
 
+def test_an_auth_entry_for_an_uninstalled_provider_is_ignored(tmp_path):
+    write_auth({"old-plugin": {"api_key": "secret"}})
+    cfg = load_config(write_config(tmp_path))
+    assert "old-plugin" not in cfg.providers
+
+
 # ---- key file ----
 
 
@@ -297,6 +308,37 @@ def test_keys_in_auth_json_are_found(no_keys, tmp_path):
     cfg = load_config(write_config(tmp_path))
     assert cfg.provider == "groq" and cfg.resolve_api_key() == "gk"
     assert cfg.api_key_source == "auth.json"
+
+
+def test_chatgpt_profiles_keep_one_host_and_separate_registrations(no_keys, tmp_path):
+    host_id = ensure_chatgpt_host_id()
+    assert host_id.startswith("urn:uuid:") and ensure_chatgpt_host_id() == host_id
+    save_chatgpt_registration(host_id, "oaiapp_one")
+    first = {
+        "client_id": "oaiapp_one",
+        "ext_agent_host_id": host_id,
+        "email": "one@example.com",
+        "access_token": "access-one",
+        "refresh_token": "refresh-one",
+    }
+    save_chatgpt_profile(first)
+    save_chatgpt_registration(host_id, "oaiapp_two")
+    second = {
+        "client_id": "oaiapp_two",
+        "ext_agent_host_id": host_id,
+        "email": "two@example.com",
+        "access_token": "access-two",
+        "refresh_token": "refresh-two",
+    }
+    save_chatgpt_profile(second)
+
+    assert [profile["client_id"] for profile in chatgpt_profiles()] == ["oaiapp_two", "oaiapp_one"]
+    assert read_chatgpt_profile() == second and read_chatgpt_profile("oaiapp_one") == first
+    assert read_auth() == {}  # OAuth tokens are not exposed as pasted API keys.
+
+    cfg = load_config(write_config(tmp_path, 'provider = "chatgpt"\nmodel = "gpt-live"\n'))
+    assert cfg.has_key("chatgpt") and cfg.resolve_api_key() == "access-two"
+    assert cfg.providers["chatgpt"].auth_data["refresh_token"] == "refresh-two"
 
 
 def test_a_key_in_your_shell_beats_auth_json(no_keys, tmp_path, monkeypatch):

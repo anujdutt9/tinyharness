@@ -35,6 +35,7 @@ dependencies = [
     "prompt_toolkit>=3.0.52",  # ChoiceInput and input frames
     "rich>=13.8",  # 13.7 printed reasoning above its "∴ Thinking" header
     "pillow>=10.0",
+    "pyjwt[crypto]>=2.10",
 ]
 
 [project.urls]

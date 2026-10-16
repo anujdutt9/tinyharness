@@ -321,6 +321,7 @@ def test_the_status_bar_says_what_matters(repl):
     repl.session.ctx.usage.add(Usage(input=12_000, output=300, cost=0.42))
     repl.context_used = 0.38
     bar = text(repl._status(200))
+    assert "OpenAI · GPT / gpt-6-sol" in bar
     assert "⎇ main" in bar and "38% context" in bar and "300 out" in bar and "$0.42" in bar
     # "no sandbox" when there's none (as when tinyharness itself runs in one: they don't nest)
     assert ("no sandbox" in bar) == (repl.session.sandbox is None)

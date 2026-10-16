@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--cwd", type=Path, help="working directory (default: current directory)")
     p.add_argument("--config", type=Path, help="config file (default: ~/.tinyharness/config.toml)")
-    p.add_argument("--setup", action="store_true", help="choose a provider and add or replace its API key")
+    p.add_argument("--setup", action="store_true", help="choose and connect a model provider")
     p.add_argument(
         "--no-skill-tool", action="store_true", help="don't list skills to the model (run them with /name)"
     )
@@ -105,9 +105,10 @@ def print_banner(console: Console, session: Session, *, compact: bool = False) -
         details.add_column(style="muted")
         details.add_column()
         details.add_row(
-            "model",
-            Text.assemble((session.model_label, "bold"), (f"  via {cfg.provider_info.label}", "muted")),
+            "provider",
+            Text.assemble((cfg.provider_info.label, "bold"), (f"  ({cfg.provider})", "muted")),
         )
+        details.add_row("model", Text(session.model_label, style="bold"))
         details.add_row("project", pretty_path(cfg.working_dir, limit=60))
         details.add_row("mode", Text(MODE_LABEL[mode], style=f"bold {MODE_STYLE[mode]}"))
         body = Group(
@@ -128,8 +129,9 @@ def print_banner(console: Console, session: Session, *, compact: bool = False) -
             wordmark(),
             (f" v{__version__}", "subtle"),
             ("  ·  ", "subtle"),
+            (cfg.provider_info.label, "bold"),
+            (" / ", "subtle"),
             (session.model_label, "bold"),
-            (f" via {cfg.provider_info.label}", "muted"),
             ("  ·  ", "subtle"),
             (pretty_path(cfg.working_dir, limit=40), "muted"),
             ("  ·  ", "subtle"),
@@ -146,9 +148,10 @@ def print_banner(console: Console, session: Session, *, compact: bool = False) -
     details.add_column(style="muted")
     details.add_column()
     details.add_row(
-        "model",
-        Text.assemble((session.model_label, "bold"), (f"  via {cfg.provider_info.label}", "muted")),
+        "provider",
+        Text.assemble((cfg.provider_info.label, "bold"), (f"  ({cfg.provider})", "muted")),
     )
+    details.add_row("model", Text(session.model_label, style="bold"))
     details.add_row("project", pretty_path(cfg.working_dir, limit=60))
     details.add_row(
         "mode",
@@ -418,13 +421,18 @@ def _ago(when: datetime) -> str:
 
 
 async def first_run_setup(options: SessionOptions, console: Console, *, force: bool = False) -> bool:
-    """For an installed copy, help a new user pick a provider and add its key, rather
-    than starting with whichever key happens to be set. A git checkout (development)
+    """For an installed copy, help a new user choose and connect a provider rather
+    than starting with whichever credential happens to be set. A git checkout (development)
     starts as before unless `force`. Returns False if the user backed out."""
     if not force and source_checkout() is not None:
         return True
     config = options.resolve_config()
-    if not (force or config.credential_selected or not config.has_key(config.provider)):
+    endpoint_needs_discovery = (
+        config.provider_info.local or config.provider_info.endpoint_setup
+    ) and not config.model
+    if not (
+        force or config.credential_selected or not config.has_key(config.provider) or endpoint_needs_discovery
+    ):
         return True
     name = await run_setup(console, config)
     if name is None:
@@ -436,12 +444,16 @@ async def first_run_setup(options: SessionOptions, console: Console, *, force: b
 
 
 def open_session(options: SessionOptions, console: Console, *, interactive: bool) -> Session | None:
-    """Start a session. With no API key at all, explain how to add one instead."""
+    """Start a session. With no provider connection, explain how to create one."""
     try:
         return Session(options)
     except MissingAPIKeyError:
         config = options.resolve_config()
-        if not interactive or any(config.has_key(name) for name in config.providers):
+        connected_hosted = any(
+            config.has_key(name) and not provider.local and not provider.endpoint_setup
+            for name, provider in config.providers.items()
+        )
+        if not interactive or connected_hosted:
             raise  # a key exists, just not for the chosen provider: the error says which
         print_key_guide(console, config)
         return None

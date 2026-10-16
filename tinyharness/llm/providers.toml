@@ -15,6 +15,9 @@
 #   base_url       API root; the adapter adds the path
 #   api_key_env    environment variable holding the key
 #   key_url        where to create a key (shown when no key is set)
+#   auth_methods   interactive ways to connect; api_key is inferred when omitted
+#   local          well-known local runtime; setup discovers the models it is serving
+#   endpoint_setup setup asks for an OpenAI-compatible gateway URL and optional key
 #   default_model  used until you pick one with /model
 #   small_model    cheap, fast model for background work (auto-mode classifier, WebSearch digests)
 #   extra_headers  sent with every request
@@ -25,7 +28,7 @@
 #                  that switches it on; leave out when the provider has none
 
 [anthropic]
-label = "Anthropic"
+label = "Anthropic · Claude"
 api = "anthropic"
 base_url = "https://api.anthropic.com/v1"
 api_key_env = "ANTHROPIC_API_KEY"
@@ -35,7 +38,7 @@ small_model = "claude-haiku-4-5"
 web_search = true
 
 [openai]
-label = "OpenAI"
+label = "OpenAI · GPT"
 api = "responses"
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
@@ -44,12 +47,23 @@ default_model = "gpt-6-sol"
 small_model = "gpt-6-luna"
 web_search = true
 
+[chatgpt]
+label = "ChatGPT plan"
+api = "responses"
+base_url = "https://api.openai.com/v1"
+auth_methods = ["chatgpt"]
+auth_refresh = "chatgpt"
+model_catalog = "chatgpt"
+request_profile = "chatgpt_plan"
+web_search = true
+
 [openrouter]
 label = "OpenRouter"
 api = "chat"
 base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 key_url = "https://openrouter.ai/settings/keys"
+auth_methods = ["openrouter", "api_key"]
 default_model = "anthropic/claude-sonnet-5"
 small_model = "anthropic/claude-haiku-4.5"
 effort_param = "reasoning.effort"
@@ -57,8 +71,26 @@ effort_param = "reasoning.effort"
 extra_body = { cache_control = { type = "ephemeral" }, usage = { include = true } }
 web_search = { plugins = [{ id = "web" }] }
 
+[github_copilot]
+label = "GitHub Copilot"
+api = "chat"
+base_url = "https://api.individual.githubcopilot.com"
+api_key_env = "COPILOT_GITHUB_TOKEN"
+auth_methods = ["github_copilot"]
+auth_refresh = "github_copilot"
+model_catalog = "github_copilot"
+request_headers = "github_copilot"
+default_model = "gpt-4.1"
+small_model = "gpt-4.1"
+
+[litellm]
+label = "LiteLLM Gateway"
+api = "chat"
+base_url = "http://127.0.0.1:4000/v1"
+endpoint_setup = true
+
 [gemini]
-label = "Google Gemini"
+label = "Google · Gemini"
 api = "gemini"
 base_url = "https://generativelanguage.googleapis.com/v1beta"
 api_key_env = "GEMINI_API_KEY"
@@ -104,3 +136,34 @@ api_key_env = "GROQ_API_KEY"
 key_url = "https://console.groq.com/keys"
 default_model = "openai/gpt-oss-120b"
 small_model = "openai/gpt-oss-20b"
+
+[ollama]
+label = "Ollama"
+api = "chat"
+base_url = "http://127.0.0.1:11434/v1"
+local = true
+model_catalog = "ollama"
+
+[lmstudio]
+label = "LM Studio"
+api = "chat"
+base_url = "http://127.0.0.1:1234/v1"
+local = true
+
+[llamacpp]
+label = "llama.cpp"
+api = "chat"
+base_url = "http://127.0.0.1:8080/v1"
+local = true
+
+[vllm]
+label = "vLLM"
+api = "chat"
+base_url = "http://127.0.0.1:8000/v1"
+local = true
+
+[sglang]
+label = "SGLang"
+api = "chat"
+base_url = "http://127.0.0.1:30000/v1"
+local = true
