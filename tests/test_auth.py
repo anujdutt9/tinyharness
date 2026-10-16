@@ -241,10 +241,15 @@ async def test_a_revoked_chatgpt_refresh_keeps_registration_but_stops_retrying(t
 
 
 async def test_openrouter_code_is_exchanged_for_a_key():
+    """The lowest supported HTTPX adds JSON whitespace; payload meaning stays the same."""
+
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/auth/keys"
-        assert b'"code":"one-use"' in request.content
-        assert b'"code_verifier":"secret"' in request.content
+        assert json.loads(request.content) == {
+            "code": "one-use",
+            "code_verifier": "secret",
+            "code_challenge_method": "S256",
+        }
         return httpx.Response(200, json={"key": "sk-or-v1-new"})
 
     key = await exchange_openrouter_code("one-use", "secret", transport=httpx.MockTransport(handler))
