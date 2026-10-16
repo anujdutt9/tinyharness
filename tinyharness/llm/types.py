@@ -115,7 +115,10 @@ class ModelInfo:
     reasoning: bool | None = None  # reasoning can be switched on per request, and is off unless it is
     price: Price | None = None  # when the model list says (OpenRouter's does)
     images: bool | None = None  # takes image input; None = not known (found out on the first refusal)
+    native_tools: bool | None = None  # accepts tool definitions through the API; None = not known
     tokenizer: str | None = None  # Hugging Face repo with its tokenizer, for exact token counts
+    api: str | None = None  # wire format, when a provider routes each model differently
+    routed: bool = False  # a router picks the real model per session (Copilot Auto)
 
     @property
     def display(self) -> str:

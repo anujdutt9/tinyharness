@@ -190,6 +190,23 @@ def test_only_a_slash_and_a_name_is_a_command(line, command):
     assert is_command(line) is command
 
 
+def test_effort_picker_uses_the_models_advertised_capabilities():
+    from tinyharness.cli.commands import _effort_options
+    from tinyharness.llm.types import ModelInfo
+
+    assert [value for value, _ in _effort_options(ModelInfo("limited", efforts=frozenset({"low"})))] == [
+        "default",
+        "none",
+        "low",
+    ]
+    assert [
+        value for value, _ in _effort_options(ModelInfo("plain", reasoning=False, efforts=frozenset()))
+    ] == ["default", "none"]
+    unknown = _effort_options(ModelInfo("self-hosted"))
+    assert [value for value, _ in unknown] == ["default", "none", "low", "medium", "high", "max"]
+    assert "support not advertised" in unknown[-1][1]
+
+
 # ---- attaching screenshots ----
 
 from conftest import png  # noqa: E402
@@ -267,6 +284,10 @@ def test_pip_greets_you_on_every_launch_when_the_terminal_can_show_him(tmp_path,
         plain = Console(file=io.StringIO(), width=100, color_system=None, theme=THEME)
         print_banner(plain, session, compact=compact)
         assert "▀" not in plain.file.getvalue()  # no colors, no Scout
+        banner = plain.file.getvalue()
+        assert "OpenAI · GPT" in banner and "gpt-6-sol" in banner
+        if not compact:
+            assert "provider" in banner and "model" in banner
     finally:
         session.close()
 

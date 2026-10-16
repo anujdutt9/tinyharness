@@ -234,6 +234,37 @@ async def test_responses_request_stream_and_echo():
     assert items[4] == {"type": "function_call_output", "call_id": "c1", "output": "print(1)"}
 
 
+async def test_chatgpt_plan_responses_omit_preview_unsupported_fields():
+    provider = load_catalog()["chatgpt"]
+    provider.set_auth_data(
+        {
+            "client_id": "oaiapp_tiny",
+            "access_token": "oauth-access",
+            "refresh_token": "oauth-refresh",
+            "expires_at": float("inf"),
+        }
+    )
+    provider.set_api_key("oauth-access", "auth.json")
+    server = Server(RESPONSES_STREAM)
+    llm = LLMClient(provider, provider.api_key, "gpt-plan", transport=httpx.MockTransport(server))
+
+    [chunk async for chunk in llm.stream(CONVERSATION, [READ], max_tokens=1234)]
+
+    body = server.requests[0]
+    assert body["store"] is False and body["stream"] is True
+    assert "max_output_tokens" not in body
+    [namespace] = body["tools"]
+    assert namespace["type"] == "namespace" and namespace["name"] == "tinyharness"
+    assert namespace["tools"][0]["name"] == "Read"
+    assert provider.api_key_env == ""  # this connection is separate from OPENAI_API_KEY
+    assert llm.adapter.ping_payload("gpt-plan") == {
+        "model": "gpt-plan",
+        "input": [{"role": "user", "content": "ping"}],
+        "stream": True,
+        "store": False,
+    }
+
+
 async def test_responses_accepts_arguments_that_arrive_whole():
     """xAI sends a function call's arguments in one piece, with no deltas."""
     stream = sse(
@@ -1018,6 +1049,12 @@ async def test_opt_in_reasoning_models_think_at_medium_by_default(tmp_path):
         None, {"data": [{"id": "g4", "supported_parameters": ["tools", "reasoning"]}, {"id": "plain"}]}
     )
     assert [m.reasoning for m in models] == [True, None]
+    models.extend(
+        [
+            ModelInfo("limited", reasoning=True, efforts=frozenset({"low"})),
+            ModelInfo("no-reasoning", reasoning=False, efforts=frozenset()),
+        ]
+    )
     directory = ModelDirectory(tmp_path)
     directory.store("openrouter", models)
 
@@ -1033,6 +1070,9 @@ async def test_opt_in_reasoning_models_think_at_medium_by_default(tmp_path):
         ("g4", "high", (READ,), "high"),  # the user's choice wins
         ("g4", "none", (READ,), None),  # and "none" turns it off
         ("plain", None, (READ,), None),  # models without the switch are left alone
+        ("limited", "high", (READ,), None),  # an advertised unsupported level is omitted
+        ("limited", "low", (READ,), "low"),
+        ("no-reasoning", "high", (READ,), None),
     ]:
         server, llm = sent(model, effort)
         await run(llm, CONVERSATION, tools=tools)
@@ -1047,6 +1087,40 @@ def test_an_older_model_cache_is_refetched(tmp_path):
     (tmp_path / "openrouter.json").write_text(json.dumps({"fetched_at": 9e12, "models": [{"id": "g4"}]}))
     directory = ModelDirectory(tmp_path)
     assert directory.info("openrouter", "g4") is not None and not directory.is_fresh("openrouter")
+
+
+async def test_ollama_model_discovery_reads_native_capabilities(tmp_path):
+    """Ollama's OpenAI-compatible model list omits the tool capability advertised by
+    its native show endpoint, so discovery combines the two responses."""
+    requests = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, json.loads(request.content or b"{}")))
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "gemma3:270m"}, {"id": "qwen3:8b"}]})
+        model = json.loads(request.content)["model"]
+        capabilities = ["completion"] if model == "gemma3:270m" else ["completion", "tools", "vision"]
+        return httpx.Response(200, json={"capabilities": capabilities})
+
+    provider = load_catalog()["ollama"]
+    llm = LLMClient(
+        provider,
+        "",
+        "gemma3:270m",
+        transport=httpx.MockTransport(answer),
+        models=ModelDirectory(tmp_path),
+    )
+    models = await llm.fetch_models()
+
+    assert [(model.id, model.native_tools, model.images) for model in models] == [
+        ("gemma3:270m", False, False),
+        ("qwen3:8b", True, True),
+    ]
+    assert requests == [
+        ("GET", "/v1/models", {}),
+        ("POST", "/api/show", {"model": "gemma3:270m"}),
+        ("POST", "/api/show", {"model": "qwen3:8b"}),
+    ]
 
 
 # ---- a model that takes no images (text-only, or served without its vision encoder) ----

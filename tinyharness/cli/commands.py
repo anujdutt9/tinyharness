@@ -12,7 +12,6 @@ without an argument.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -23,7 +22,7 @@ from rich.table import Table
 from rich.text import Text
 
 from tinyharness.cli.render import dollars, tokens
-from tinyharness.cli.setup import add_key
+from tinyharness.cli.setup import add_key, connect_provider
 from tinyharness.cli.theme import (
     LIGHT,
     MODE_HINT,
@@ -34,7 +33,8 @@ from tinyharness.cli.theme import (
     percent,
 )
 from tinyharness.cli.widgets import PaletteItem, ask, palette, pick
-from tinyharness.config import RECENT_MODELS, forget_model, recent_models, remember_model, save_theme
+from tinyharness.config import forget_model, remember_model, save_theme
+from tinyharness.llm.types import ModelInfo
 from tinyharness.paths import pretty_path
 from tinyharness.permissions import PermissionMode
 from tinyharness.sandbox import setup_hint
@@ -298,63 +298,49 @@ def cwd(repl: Repl, arg: str) -> None:
 # --------------------------------------------------------------------- model & provider
 
 
-_SEARCH = "__search__"
-
-
-@command(
-    "/model", "pick a model from any provider you have a key for", group="Model", usage="[provider:]model"
-)
+@command("/model", "pick a model from the current provider", group="Model", usage="[model]")
 async def model(repl: Repl, arg: str) -> None:
     repl.session.reload_keys()
     cfg = repl.session.config
-    current = f"{cfg.provider}:{cfg.model}"
-    recent = [current, *(r for r in recent_models() if r != current and cfg.has_key(r.partition(":")[0]))]
-    spec = arg
-    if not spec:
-        options = [(r, _model_label(repl, r)) for r in recent[:RECENT_MODELS]]
-        options.append((_SEARCH, "Search all models…"))
-        spec = (
-            await palette(
-                "Choose a model",
-                [PaletteItem(value, label) for value, label in options],
-                current,
+    if arg:
+        provider_name, requested = cfg.parse_model(arg)
+        if provider_name != cfg.provider:
+            _fail(
+                repl,
+                f"/model only shows {cfg.provider_info.label} models. "
+                f"Switch to {cfg.providers[provider_name].label} with /provider first.",
             )
-            or ""
-        )
-    if spec == _SEARCH:
-        spec = await _search_models(repl)
+            return
+        spec = requested
+    else:
+        spec = await _pick_current_provider_model(repl)
     if spec:
         await _switch(repl, spec)
 
 
-def _model_label(repl: Repl, spec: str) -> str:
-    provider, _, model_id = spec.partition(":")
-    info = repl.session.client_for(provider).model_info(model_id)
-    name = info.label if info and info.label else model_id
-    return f"{name}  [{repl.session.config.providers[provider].label}]"
-
-
-async def _search_models(repl: Repl) -> str:
-    """Every model of every provider with a key, fetched live (cached for a day)."""
+async def _pick_current_provider_model(repl: Repl) -> str:
+    """List models only from the selected provider."""
     cfg = repl.session.config
-    keyed = [name for name in cfg.providers if cfg.has_key(name)]
-    with repl.console.status("[muted]Loading model lists…[/]", spinner="dots"):
-        results = await asyncio.gather(
-            *(repl.session.client_for(name).list_models() for name in keyed), return_exceptions=True
+    label = cfg.provider_info.label
+    with repl.console.status(f"[muted]Loading {escape(label)} models…[/]", spinner="dots"):
+        try:
+            models = await repl.session.client_for(cfg.provider).list_models()
+        except Exception as error:
+            repl.console.print(f"  [warn]Couldn't list {escape(label)} models ({type(error).__name__}).[/]")
+            return await ask("Model", hint=cfg.model)
+    if not models:
+        repl.console.print(f"  [warn]{escape(label)} reports no models.[/]")
+        return await ask("Model", hint=cfg.model)
+    choices = [
+        PaletteItem(
+            item.id,
+            item.label or item.id,
+            f"{item.context // 1000:,}k context" if item.context else "",
+            keywords=item.id,
         )
-    specs: list[PaletteItem[str]] = []
-    for name, result in zip(keyed, results, strict=True):
-        label = cfg.providers[name].label
-        if isinstance(result, BaseException):
-            repl.console.print(f"  [warn]Couldn't list {label} models ({type(result).__name__}).[/]")
-            continue
-        for m in result:
-            context = f" · {m.context // 1000:,}k context" if m.context else ""
-            spec = f"{name}:{m.id}"
-            specs.append(PaletteItem(spec, m.label or m.id, f"{label}{context}", keywords=spec))
-    if not specs:
-        return await ask("Model", hint="provider:model, e.g. " + f"{cfg.provider}:{cfg.model}")
-    return await palette("Choose a model", specs, current=f"{cfg.provider}:{cfg.model}") or ""
+        for item in models
+    ]
+    return await palette(f"Choose a model · {label}", choices, current=cfg.model) or ""
 
 
 @command("/provider", "pick a provider (uses its default model)", group="Model", usage="[name]")
@@ -374,14 +360,24 @@ def _provider_options(repl: Repl) -> list[tuple[str, str]]:
     cfg = repl.session.config
     width = max(len(p.label) for p in cfg.providers.values())
     return [
-        (name, f"{p.label:<{width}}  " + ("✔ key set" if cfg.has_key(name) else "add a key"))
+        (
+            name,
+            f"{p.label:<{width}}  "
+            + (
+                "model endpoint"
+                if p.local or p.endpoint_setup
+                else "✔ connected"
+                if cfg.has_key(name)
+                else "connect"
+            ),
+        )
         for name, p in cfg.providers.items()
     ]
 
 
 async def _switch(repl: Repl, spec: str, *, asked_for_key: bool = False) -> None:
     """Check the model answers, then switch to it. `spec` is "provider:model" ("provider:" = its default).
-    A provider without a key asks for one first, rather than sending you to a file."""
+    A provider without credentials offers its supported connection methods first."""
     session = repl.session
     try:
         with repl.console.status("[muted]Checking the model…[/]", spinner="dots"):
@@ -393,7 +389,7 @@ async def _switch(repl: Repl, spec: str, *, asked_for_key: bool = False) -> None
             return
         session.set_model(spec)
     except MissingAPIKeyError as e:
-        if not asked_for_key and await _ask_for_key(repl, e.provider):
+        if not asked_for_key and await _ask_to_connect(repl, e.provider):
             await _switch(repl, spec, asked_for_key=True)
             return
         _fail(repl, str(e))
@@ -405,21 +401,45 @@ async def _switch(repl: Repl, spec: str, *, asked_for_key: bool = False) -> None
     repl._measure_context()  # the same conversation, measured against the new model's window
     window = f"{session.context_window // 1000:,}k context"
     label = escape(session.model_label)
-    _ok(repl, f"Using [bold]{label}[/] [muted]via {session.config.provider_info.label} · {window}[/]")
+    provider_label = escape(session.config.provider_info.label)
+    _ok(repl, f"Using [bold]{provider_label} / {label}[/] [muted]· {window}[/]")
     if not check.ok:  # inconclusive (timeout, server error, ...): switched, but say so
         repl.console.print(f"  [warn]Couldn't confirm it responds ({escape(check.message)}).[/]")
 
 
-async def _ask_for_key(repl: Repl, info: Provider) -> bool:
-    """Offer to add a provider's key here. True once a key is saved (or set in the shell)."""
-    repl.console.print(
-        f"\n  {info.label} needs an API key. [muted]Paste it below, or press Enter to skip.[/]"
-    )
-    check = await add_key(repl.console, info, repl.session.config.providers)
+async def _ask_to_connect(repl: Repl, info: Provider) -> bool:
+    """Offer the provider's supported connection methods without leaving the session."""
+    repl.console.print(f"\n  {info.label} is not connected. [muted]Press Esc to keep your current model.[/]")
+    check = await connect_provider(repl.console, info, repl.session.config.providers)
     if check is None:
         return False
     repl.session.reload_keys()
     return True
+
+
+@command("/connect", "connect or configure a model provider", group="Model", usage="[provider]")
+async def connect(repl: Repl, arg: str) -> None:
+    session = repl.session
+    session.reload_keys()
+    cfg = session.config
+    name = arg or await pick("Connect which provider?", _provider_options(repl), cfg.provider)
+    if not name:
+        return
+    if name not in cfg.providers:
+        _fail(repl, f"Unknown provider {name!r}. Choose one of: {', '.join(cfg.providers)}")
+        return
+    info = cfg.providers[name]
+    check = await connect_provider(repl.console, info, cfg.providers)
+    if check is None:
+        repl.console.print("  [muted]No change.[/]")
+        return
+    session.reload_keys()
+    if name == cfg.provider:
+        session.set_model(f"{cfg.provider}:{cfg.model}")
+    if check.ok:
+        _ok(repl, f"{info.label} is connected.")
+    else:
+        repl.console.print(f"  [warn]Connected, but couldn't confirm it works ({escape(check.message)}).[/]")
 
 
 @command("/key", "add or replace a provider key saved in auth.json", group="Model", usage="[provider]")
@@ -434,6 +454,9 @@ async def key(repl: Repl, arg: str) -> None:
         _fail(repl, f"Unknown provider {name!r}. Choose one of: {', '.join(cfg.providers)}")
         return
     info = cfg.providers[name]
+    if info.auth_refresh == "chatgpt":
+        _fail(repl, "ChatGPT plan uses browser sign-in; run /connect chatgpt instead.")
+        return
     if cfg.has_key(name):
         if info.api_key_source in ("environment", ".env"):
             repl.console.print(
@@ -511,17 +534,53 @@ _EFFORT_HELP = {
     aliases=("/think",),
 )
 async def effort(repl: Repl, arg: str) -> None:
+    try:
+        with repl.console.status("[muted]Checking model capabilities…[/]", spinner="dots"):
+            await repl.session.llm.list_models()
+    except Exception:
+        pass  # the model may still work even when its optional catalog does not
+    info = repl.session.llm.model_info()
+    options = _effort_options(info)
     current = repl.session.config.effort or "default"
-    choice = arg.lower() or await pick(
-        "Reasoning effort", [(k, f"{k:<8} {v}") for k, v in _EFFORT_HELP.items()], current
-    )
+    choice = arg.lower() or await pick("Reasoning effort", options, current)
     if not choice:
         return
     if choice not in _EFFORT_HELP:
         _fail(repl, f"usage: /effort {'|'.join(_EFFORT_HELP)}")
         return
+    allowed = {value for value, _ in options}
+    if choice not in allowed:
+        supported = ", ".join(value for value in allowed if value not in ("default", "none"))
+        detail = f" Supported levels: {supported}." if supported else " It reports no effort control."
+        _fail(repl, f"{escape(repl.session.model_label)} does not support {choice} effort.{detail}")
+        return
+    if choice not in ("default", "none") and _effort_unknown(info):
+        repl.console.print(
+            "  [warn]This endpoint does not advertise effort support; tinyharness will try "
+            f"[bold]{choice}[/] because you selected it.[/]"
+        )
     repl.session.set_effort(None if choice == "default" else choice)  # type: ignore[arg-type]
     _ok(repl, f"Reasoning effort set to [bold]{choice}[/]")
+
+
+def _effort_unknown(info: ModelInfo | None) -> bool:
+    return info is None or (info.reasoning is None and info.efforts is None)
+
+
+def _effort_options(info: ModelInfo | None) -> list[tuple[str, str]]:
+    levels: tuple[str, ...] = ("low", "medium", "high", "max")
+    if info is not None and (info.reasoning is False or info.efforts == frozenset()):
+        levels = ()
+    elif info is not None and info.efforts is not None:
+        levels = tuple(level for level in levels if level in info.efforts)
+    options = [("default", f"{'default':<8} {_EFFORT_HELP['default']}")]
+    options.append(("none", f"{'none':<8} {_EFFORT_HELP['none']}"))
+    for level in levels:
+        note = _EFFORT_HELP[level]
+        if _effort_unknown(info):
+            note += " · support not advertised; try only if you know the endpoint supports it"
+        options.append((level, f"{level:<8} {note}"))
+    return options
 
 
 @command("/theme", "light, dark, or follow the terminal", group="Model", usage="[system|light|dark]")

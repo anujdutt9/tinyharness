@@ -1,14 +1,51 @@
 # Configuration
 
-tinyharness needs an API key for at least one provider. The first run asks for one
-(with a link to where to get it), checks it with the provider and keeps it in
-`~/.tinyharness/auth.json`, one entry per provider, readable only by you and never by
-the agent's tools. Switching to a provider with no key (`/provider`, `/model`) asks
-for its key the same way, and `/key` adds or replaces a saved key. After that, everything is
-optional: `/model` switches models (and remembers your choice), and one file,
-`~/.tinyharness/config.toml`, holds any defaults you want.
+tinyharness needs a connection to at least one provider. The first run asks where your
+models come from, then offers the methods that provider supports. OpenRouter can open a
+PKCE-protected browser sign-in (or display a one-time-code flow for a remote machine);
+GitHub Copilot uses GitHub's device sign-in and the models included in that subscription.
+ChatGPT plan uses Continue with ChatGPT for eligible Plus and Pro accounts, with no OpenAI
+API key or API billing account required. OpenAI API is a separate provider choice. Other
+hosted providers can use an API key, and a local server may need no credential.
+Connections are checked before use and saved in `~/.tinyharness/auth.json`, readable only
+by you and never by the agent's tools. `/connect` adds or replaces a connection, while
+`/key` is the direct API-key path. `/provider` changes where models come from, then
+`/model` lists only that provider's models and remembers your choice;
+`~/.tinyharness/config.toml` holds any defaults you want.
 
-One key is resolved per provider. The precedence is an SDK `SessionOptions(api_key=...)`
+The hosted choices include Anthropic (Claude), OpenAI API (GPT), ChatGPT plan, Google
+(Gemini), OpenRouter, GitHub Copilot, xAI, DeepSeek, Mistral and Groq. A direct provider
+connection uses that provider's API account unless setup explicitly offers subscription sign-in.
+
+ChatGPT sign-in opens OpenAI in the system browser and returns to a loopback callback on
+`127.0.0.1`. tinyharness validates the signed OpenID identity and granted plan permission,
+then stores separate renewable profiles in `auth.json`; access, refresh and identity tokens
+never enter the model context. `/connect chatgpt` can reconnect a saved account or add a
+different account/workspace. Its model picker comes from that account's live plan catalog.
+
+LiteLLM appears as a first-class gateway choice for company cost tracking, routing and
+policy enforcement. Setup asks for the proxy's OpenAI-compatible `/v1` URL and optional
+key, then loads its live model list and saves the connection. It works with local and
+company-hosted LiteLLM Proxy deployments.
+
+No configuration file is needed for these connections. On first run—and again from
+`/connect`—local runtimes and gateways offer the standard or saved endpoint alongside an
+“enter another endpoint” option. Reconfiguration can keep, replace or remove a saved
+server key independently. The TOML examples below remain useful for reproducible team
+defaults and advanced overrides.
+
+Ollama, LM Studio, llama.cpp, vLLM and SGLang appear in setup with their standard localhost
+ports. tinyharness asks the server for its live model list, lets you choose a model, and
+checks it with a small request. When the standard endpoint cannot be reached, setup asks
+for a remote/custom URL and optional server key and remembers them in the protected
+`auth.json`. You can also set `base_url` in `[providers.<name>]`; explicit configuration
+wins over the remembered endpoint.
+
+For Ollama, discovery also reads `/api/show` for every installed model. Models that do not
+accept native API tools automatically use tinyharness's text-tool compatibility mode, and
+vision support is recorded from the same capability list.
+
+One credential is resolved per provider. For API keys, precedence is an SDK `SessionOptions(api_key=...)`
 override, the process environment, a development `.env`, then `auth.json`. `.env` is read
 only from a tinyharness source checkout; installed CLI and SDK users do not pick up project
 dotenv files. Saved and dotenv keys are not copied into `os.environ`. `/whoami` shows the
@@ -25,9 +62,21 @@ files are moved on the first run.) See
 | API format | Providers |
 |---|---|
 | Anthropic Messages | Anthropic |
-| OpenAI Responses | OpenAI, xAI |
+| OpenAI Responses | OpenAI API, ChatGPT plan, xAI |
 | Gemini Interactions | Google Gemini |
 | OpenAI Chat Completions | OpenRouter, DeepSeek, Mistral, Groq, and custom gateways |
+
+GitHub Copilot is mixed-format: its live catalog declares whether each available model
+uses Chat Completions, Responses or Anthropic Messages. LiteLLM uses its OpenAI-compatible
+Chat Completions interface.
+
+The Copilot connection follows the compatibility flow used by Pi and OpenCode: GitHub
+device authorization, a short-lived Copilot service token, and GitHub's live model
+catalog. Auto, the only choice on Free and Student plans, is not a model id: tinyharness
+asks GitHub which model Auto picks for the session (as VS Code's Copilot Chat does) and
+sends that model. It keeps tinyharness's own agent loop, but these service endpoints are not a
+documented standalone public model API and may require maintenance when GitHub changes
+its Copilot clients.
 
 [`llm/providers.toml`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/llm/providers.toml) holds only how to connect to
 each one. Models are listed live from the provider (cached for a day), and whatever
@@ -92,6 +141,13 @@ as `openai:`; cross-provider background roles are not supported in this release.
 Unset classifier and search roles fall back to the active provider's `small_model` for
 compatibility. An unset compaction role uses `compaction_model`, then the active model.
 The same resolved compaction role is used by the lead and subagents.
+
+`/effort` reads the active model's catalog metadata before showing its choices. When the
+provider advertises exact effort levels, only those levels can be selected. A model that
+advertises no reasoning control gets only `default` and `none`. Sparse self-hosted catalogs
+are treated as unknown rather than unsupported: the other levels remain visible with a
+warning and are sent only when the user deliberately selects one. Known-unsupported effort
+parameters are omitted from requests.
 
 | Location | Contents |
 |---|---|

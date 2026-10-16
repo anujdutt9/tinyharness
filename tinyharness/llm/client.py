@@ -12,18 +12,37 @@ import json
 import logging
 import random
 import re
+import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 from tinyharness.agent.history import Message, ReasoningState, ToolCall, well_formed, without_images
 from tinyharness.llm import identity
-from tinyharness.llm.adapters import ADAPTERS
+from tinyharness.llm.adapters import ADAPTERS, Adapter
+from tinyharness.llm.auth import (
+    COPILOT_API_VERSION,
+    COPILOT_HEADERS,
+    AuthenticationError,
+    ChatGPTReauthorizationRequired,
+    CopilotAutoSession,
+    chatgpt_refresh_lock,
+    exchange_github_copilot_token,
+    open_github_copilot_auto_session,
+    refresh_chatgpt_token,
+)
 from tinyharness.llm.calibration import CalibrationStore, ToolFormat, as_text, probe, tools_section
-from tinyharness.llm.models import ModelDirectory
+from tinyharness.llm.models import (
+    ModelDirectory,
+    github_copilot_catalog,
+    github_copilot_plan,
+    parse_chatgpt_models,
+    parse_github_copilot_models,
+)
 from tinyharness.llm.types import (
     DEFAULT_OPT_IN_EFFORT,
     ContextOverflowError,
@@ -246,6 +265,13 @@ class LLMClient:
         self._formats: dict[str, ToolFormat] = {}  # probed this session, by model
         self.no_images: set[str] = set()  # models that refused an image this session
         self._tried_listing = False
+        self._access_token = ""
+        self._access_expires_at = 0.0
+        self._base_url = provider.base_url
+        self._copilot_sku = ""
+        self._auto: CopilotAutoSession | None = None
+        self._auto_model = ""
+        self._routed: dict[str, ModelInfo] = {}  # models a router picked that the list doesn't show
 
     def _timeouts(self) -> httpx.Timeout:
         """`timeout` for connecting and sending; between pieces of a reply, no more than
@@ -256,14 +282,117 @@ class LLMClient:
 
     @property
     def endpoint(self) -> str:
-        return self.provider.base_url.rstrip("/") + self.adapter.request_path
+        return self._endpoint(self.model)
 
-    def _headers(self) -> dict[str, str]:
+    def _adapter(self, model: str | None = None) -> Adapter:
+        info = self.model_info(model or self.model)
+        api = info.api if info is not None and info.api else self.provider.api
+        return self.adapter if api == self.provider.api else ADAPTERS[api](self.provider)
+
+    def _endpoint(self, model: str) -> str:
+        adapter = self._adapter(model)
+        base = self._base_url.rstrip("/")
+        if self.provider.request_headers == "github_copilot" and adapter.name == "anthropic":
+            base += "/v1"
+        return base + adapter.request_path
+
+    async def _prepare_auth(self) -> None:
+        if self.provider.auth_refresh == "chatgpt":
+            await self._prepare_chatgpt_auth()
+            return
+        if self.provider.auth_refresh != "github_copilot":
+            return
+        if self._access_token and time.time() < self._access_expires_at - 300:
+            return
+        if not self.api_key:
+            raise AuthenticationError("GitHub Copilot is not connected")
+        credential = await exchange_github_copilot_token(self.api_key, transport=self.transport)
+        self._access_token = credential.token
+        self._access_expires_at = credential.expires_at
+        self._base_url = credential.base_url
+        self._copilot_sku = credential.sku
+
+    async def _prepare_chatgpt_auth(self) -> None:
+        """Refresh the selected ChatGPT profile once, including across concurrent processes."""
+        profile = self.provider.auth_data
+        if _chatgpt_token_is_fresh(profile):
+            self.api_key = str(profile["access_token"])
+            return
+        client_id = str(profile.get("client_id") or "")
+        if not client_id:
+            raise AuthenticationError("ChatGPT plan is not connected")
+        async with chatgpt_refresh_lock():
+            # Another tinyharness process may have rotated this single-use refresh token
+            # while we waited for the lock, so reload it before deciding to refresh.
+            from tinyharness.config import (
+                clear_chatgpt_tokens,
+                read_chatgpt_profile,
+                save_chatgpt_profile,
+            )
+
+            latest = read_chatgpt_profile(client_id) or profile
+            if not _chatgpt_token_is_fresh(latest):
+                try:
+                    latest = await refresh_chatgpt_token(latest, transport=self.transport)
+                except ChatGPTReauthorizationRequired:
+                    clear_chatgpt_tokens(client_id)
+                    self.provider.set_auth_data({})
+                    self.provider.set_api_key("", "")
+                    self.api_key = ""
+                    raise
+                save_chatgpt_profile(latest)
+            self.provider.set_auth_data(latest)
+            self.provider.set_api_key(str(latest["access_token"]), "auth.json")
+            self.api_key = str(latest["access_token"])
+
+    async def _route(self, model: str) -> tuple[str, dict[str, str]]:
+        """The model to send and the headers its router needs, for a routed entry like Copilot Auto."""
+        info = self.model_info(model)
+        if info is None or not info.routed or self.provider.auth_refresh != "github_copilot":
+            return model, {}
+        if self._auto is None or time.time() >= self._auto.expires_at - 300:
+            self._auto = await open_github_copilot_auto_session(
+                self._base_url, self._access_token, transport=self.transport
+            )
+            known = [m for m in self._auto.models if self.model_info(m) is not None]
+            if not known:  # Auto often offers models the picker hides; the full catalog has them
+                async with httpx.AsyncClient(timeout=30, transport=self.transport) as client:
+                    resp = await client.get(self._base_url.rstrip("/") + "/models", headers=self._headers())
+                    resp.raise_for_status()
+                self._routed.update(github_copilot_catalog(resp.json()))
+                known = [m for m in self._auto.models if self.model_info(m) is not None]
+            # Stay on the model already in use while Auto still offers it: switching
+            # models mid-conversation throws away the prompt cache.
+            self._auto_model = (
+                self._auto_model if self._auto_model in known else (known or list(self._auto.models))[0]
+            )
+            log.info("Copilot Auto chose %s (offered: %s)", self._auto_model, ", ".join(self._auto.models))
+        return self._auto_model, {"Copilot-Session-Token": self._auto.token}
+
+    @property
+    def copilot_plan(self) -> str:
+        """The account family GitHub reported, when it uses a recognized SKU."""
+        return github_copilot_plan(self._copilot_sku)
+
+    def _headers(self, model: str | None = None, messages: list[Message] | None = None) -> dict[str, str]:
+        adapter = self._adapter(model)
+        credential = self._access_token or self.api_key
         headers = {
             "Content-Type": "application/json",
-            **self.adapter.headers(self.api_key),
+            **adapter.headers(credential),
             **self.provider.extra_headers,
         }
+        if self.provider.request_headers == "github_copilot":
+            headers.pop("x-api-key", None)
+            headers["Authorization"] = f"Bearer {credential}"
+            headers.update(COPILOT_HEADERS)
+            headers["X-GitHub-Api-Version"] = COPILOT_API_VERSION
+            headers["Openai-Intent"] = "conversation-edits"
+            headers["X-Initiator"] = "agent" if messages and messages[-1].role != "user" else "user"
+            if adapter.name == "anthropic":
+                headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
+            if messages and any(message.images for message in messages):
+                headers["Copilot-Vision-Request"] = "true"
         if self.provider.send_ids and (who := identity.CURRENT.get()) is not None:
             headers.update(who.headers())
         return headers
@@ -284,7 +413,7 @@ class LLMClient:
         model = model or self.model
         configured = next((m for m in self.provider.models if m.id == model), None)
         listed = self.directory.info(self.provider.name, model) if self.directory else None
-        return configured or listed
+        return configured or listed or self._routed.get(model)
 
     async def list_models(self, *, refresh: bool = False) -> list[ModelInfo]:
         """The provider's model list (cached for a day), plus any models set in the config."""
@@ -296,17 +425,49 @@ class LLMClient:
         listed = [m for m in self.directory.models(self.provider.name) if m.id not in configured]
         return [*self.provider.models, *listed]
 
+    async def fetch_models(self) -> list[ModelInfo]:
+        """Fetch the provider's model catalog without requiring a cache directory."""
+        return await self._fetch_models()
+
     async def _fetch_models(self) -> list[ModelInfo]:
-        url = self.provider.base_url.rstrip("/") + self.adapter.models_path
+        await self._prepare_auth()
+        url = self._base_url.rstrip("/") + self.adapter.models_path
         params: dict[str, str] | None = {}
         found: list[ModelInfo] = []
         async with httpx.AsyncClient(timeout=30, transport=self.transport) as client:
             while params is not None:
                 resp = await client.get(url, headers=self._headers(), params=params)
                 resp.raise_for_status()
-                page, params = self.adapter.parse_models(resp.json())
+                if self.provider.model_catalog == "github_copilot":
+                    page, params = parse_github_copilot_models(resp.json(), sku=self._copilot_sku), None
+                elif self.provider.model_catalog == "chatgpt":
+                    page, params = parse_chatgpt_models(resp.json()), None
+                else:
+                    page, params = self.adapter.parse_models(resp.json())
                 found.extend(page)
+            if self.provider.model_catalog == "ollama":
+                await asyncio.gather(*(self._read_ollama_capabilities(client, model) for model in found))
         return found
+
+    async def _read_ollama_capabilities(self, client: httpx.AsyncClient, model: ModelInfo) -> None:
+        """Add metadata Ollama exposes through `/api/show` but not its `/v1/models`."""
+        parts = urlsplit(self._base_url)
+        path = parts.path.rstrip("/")
+        if path.endswith("/v1"):
+            path = path[:-3]
+        url = urlunsplit(parts._replace(path=f"{path}/api/show", query="", fragment=""))
+        try:
+            response = await client.post(url, json={"model": model.id}, headers=self._headers())
+            response.raise_for_status()
+            capabilities = response.json().get("capabilities")
+        except (httpx.HTTPError, ValueError, AttributeError) as error:
+            log.debug("could not read Ollama capabilities for %s: %s", model.id, error)
+            return
+        if not isinstance(capabilities, list):
+            return
+        names = {str(capability) for capability in capabilities}
+        model.native_tools = "tools" in names
+        model.images = "vision" in names
 
     async def _ensure_model_list(self) -> None:
         """Load the model list once per client, so requests can use what it says about the model."""
@@ -332,8 +493,11 @@ class LLMClient:
         max_tokens: int | None = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         """Stream one reply. The last chunk carries `state` when the provider needs data back next turn."""
+        await self._prepare_auth()
         await self._ensure_model_list()
-        model = model or self.model
+        model, route_headers = await self._route(model or self.model)
+        adapter = self._adapter(model)
+        endpoint = self._endpoint(model)
         owner = f"{self.provider.name}:{model}"
         if self.takes_images(model) is False:
             messages = without_images(messages)
@@ -357,10 +521,8 @@ class LLMClient:
             show_reasoning=self.show_reasoning,
             max_tokens=max_tokens,
         )
-        payload = _merge(self.adapter.payload(request), self.provider.extra_body)
-        log.debug(
-            "POST %s model=%s messages=%d tools=%d", self.endpoint, model, len(messages), len(request.tools)
-        )
+        payload = _merge(adapter.payload(request), self.provider.extra_body)
+        log.debug("POST %s model=%s messages=%d tools=%d", endpoint, model, len(messages), len(request.tools))
 
         usage: Usage | None = None
         finished = False  # a stream that just stops (a proxy dropping it) isn't a reply
@@ -370,11 +532,16 @@ class LLMClient:
         other: list[str] = []  # lines that aren't server-sent events: an error page, say
         busy: LLMError | None = None  # a transient error reported inside the stream, to retry
         for attempt in range(self.retries + 1):
-            parser = self.adapter.parser()
+            parser = adapter.parser()
             try:
                 async with (
                     httpx.AsyncClient(timeout=self._timeouts(), transport=self.transport) as client,
-                    client.stream("POST", self.endpoint, json=payload, headers=self._headers()) as resp,
+                    client.stream(
+                        "POST",
+                        endpoint,
+                        json=payload,
+                        headers={**self._headers(model, messages), **route_headers},
+                    ) as resp,
                 ):
                     if resp.status_code >= 400:
                         body = (await resp.aread()).decode(errors="replace")
@@ -382,11 +549,11 @@ class LLMClient:
                             delay = retry_delay(_retry_after(resp.headers), attempt)
                             log.warning(
                                 "%s answered %d; retrying in %.1fs (%d of %d)",
-                                self.endpoint, resp.status_code, delay, attempt + 1, self.retries,
+                                endpoint, resp.status_code, delay, attempt + 1, self.retries,
                             )  # fmt: skip
                             await asyncio.sleep(delay)
                             continue
-                        raise _http_error(resp.status_code, body, self.endpoint)
+                        raise _http_error(resp.status_code, body, endpoint)
                     other.clear()
                     async for data in _sse_data(resp.aiter_lines(), other):
                         if data == "[DONE]":
@@ -396,7 +563,7 @@ class LLMClient:
                             event = json.loads(data)
                         except json.JSONDecodeError:
                             unreadable += 1
-                            log.debug("unreadable stream event from %s: %.120s", self.endpoint, data)
+                            log.debug("unreadable stream event from %s: %.120s", endpoint, data)
                             continue
                         if isinstance(event.get("provider"), str):
                             route = event["provider"]
@@ -417,7 +584,7 @@ class LLMClient:
                             yield chunk
                 if busy is not None:  # "overloaded" before any output: ask again
                     delay = retry_delay(None, attempt)
-                    log.warning("%s: %s; retrying in %.1fs", self.endpoint, busy, delay)
+                    log.warning("%s: %s; retrying in %.1fs", endpoint, busy, delay)
                     busy = None
                     await asyncio.sleep(delay)
                     continue
@@ -425,7 +592,7 @@ class LLMClient:
             except httpx.TransportError as e:  # refused, reset, DNS, TLS, timeouts, dropped mid-reply
                 if not started and attempt < self.retries and isinstance(e, _RETRYABLE_TRANSPORT):
                     delay = retry_delay(None, attempt)
-                    log.warning("%s: %s; retrying in %.1fs", self.endpoint, type(e).__name__, delay)
+                    log.warning("%s: %s; retrying in %.1fs", endpoint, type(e).__name__, delay)
                     await asyncio.sleep(delay)
                     continue
                 failure = describe_network_error(e)
@@ -435,18 +602,18 @@ class LLMClient:
 
         if not finished and not started and other:  # a JSON or HTML body instead of a stream
             raise _classify(
-                LLMError(f"{self.endpoint} didn't answer with an event stream: {' '.join(other)[:500]}")
+                LLMError(f"{endpoint} didn't answer with an event stream: {' '.join(other)[:500]}")
             )
         if unreadable:
             log.warning(
                 "%d stream event(s) from %s weren't valid JSON and were skipped; the reply may be "
                 "missing some text (run with --debug to see them)",
                 unreadable,
-                self.endpoint,
+                endpoint,
             )
         if not finished:
             raise LLMError(
-                f"incomplete response from {self.endpoint}: the stream ended without a finish event, "
+                f"incomplete response from {endpoint}: the stream ended without a finish event, "
                 "so the reply was not added to the conversation. Try again; if it keeps happening, "
                 "a proxy or network timeout may be cutting the connection."
             )
@@ -461,7 +628,14 @@ class LLMClient:
         the harness's own quick calls (the permission classifier, summaries), which have
         no tools and would only get slower."""
         if self.effort is not None:
-            return None if self.effort == "none" else self.effort
+            if self.effort == "none":
+                return None
+            info = self.model_info(model)
+            if info is not None and (
+                info.reasoning is False or (info.efforts is not None and self.effort not in info.efforts)
+            ):
+                return None
+            return self.effort
         info = self.model_info(model)
         return DEFAULT_OPT_IN_EFFORT if agent_turn and info is not None and info.reasoning else None
 
@@ -492,6 +666,9 @@ class LLMClient:
         model = model or self.model
         if self.tool_calls in ("native", "text"):
             return self.tool_calls  # type: ignore[return-value]
+        info = self.model_info(model)
+        if info is not None and info.native_tools is False:
+            return "text"
         if self.calibration is None:
             return "native"
         if model in self._formats:
@@ -556,10 +733,20 @@ class LLMClient:
 
     async def ping(self, model: str | None = None) -> Ping:
         """The cheapest possible request, to check the key and that the model can be used."""
-        payload = self.adapter.ping_payload(model or self.model)
+        await self._prepare_auth()
+        await self._ensure_model_list()
+        try:
+            model, route_headers = await self._route(model or self.model)
+        except AuthenticationError as e:
+            return Ping(ok=False, status=None, message=str(e))
+        adapter = self._adapter(model)
+        endpoint = self._endpoint(model)
+        payload = adapter.ping_payload(model)
         try:
             async with httpx.AsyncClient(timeout=30.0, transport=self.transport) as client:
-                resp = await client.post(self.endpoint, json=payload, headers=self._headers())
+                resp = await client.post(
+                    endpoint, json=payload, headers={**self._headers(model), **route_headers}
+                )
         except httpx.TransportError as e:
             return Ping(ok=False, status=None, message=describe_network_error(e).message)
         if resp.status_code == 200:
@@ -636,3 +823,15 @@ def _merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
         else:
             base[key] = value
     return base
+
+
+def _chatgpt_token_is_fresh(profile: dict[str, Any]) -> bool:
+    """Whether this profile can safely start another request without token rotation."""
+    token = profile.get("access_token")
+    expires_at = profile.get("expires_at")
+    return (
+        isinstance(token, str)
+        and bool(token)
+        and isinstance(expires_at, int | float)
+        and expires_at > time.time() + 300
+    )

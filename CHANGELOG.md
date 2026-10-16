@@ -7,6 +7,50 @@ the SDK, and every break is listed here.
 
 ## Unreleased
 
+### Added
+- ChatGPT Plus and Pro users can choose the separate ChatGPT plan provider and use
+  Continue with ChatGPT instead of creating an OpenAI API key. tinyharness validates
+  the OpenID identity, stores renewable credentials privately, discovers models for
+  the selected account, and follows the plan-usage Responses API restrictions.
+- GitHub Copilot subscriptions can connect through GitHub's device sign-in. tinyharness
+  loads the account's live Copilot model catalog and uses each model's advertised Chat,
+  Responses or Anthropic Messages endpoint while keeping the tinyharness agent loop.
+- LiteLLM is a first-class gateway choice. Setup asks for a company or local proxy URL,
+  accepts an optional gateway key, discovers its models and remembers the connection.
+- Fresh setup and `/connect` let local runtimes and gateways use their standard or saved
+  endpoint, enter another URL, and keep, replace or remove an existing server key. No
+  configuration-file editing is required.
+- `/effort` uses the selected model's advertised capabilities: unsupported levels are
+  unavailable, while unadvertised self-hosted capabilities are clearly marked as an
+  explicit try-at-your-own-endpoint choice. Requests omit known-unsupported effort settings.
+- Provider-neutral setup now offers each provider's supported connection methods. OpenRouter
+  can connect through a PKCE-protected browser flow or a one-time code on remote machines;
+  manually pasted keys and environment credentials remain supported.
+- Hosted-provider labels include their familiar model families (Claude, GPT and Gemini)
+  so users do not need to know the vendor/company distinction.
+- `/connect [provider]` adds or replaces a provider connection without leaving the session.
+- Setup discovers models from Ollama, LM Studio, llama.cpp, vLLM and SGLang on their
+  standard local endpoints, then checks the selected model before starting a session.
+  When the standard endpoint is unavailable, it can connect and remember a remote or
+  custom endpoint with an optional server key.
+
+### Changed
+- `/model` shows the complete model catalog for the active provider instead of a
+  mixed-provider recent list. The banner and status bar identify the provider separately
+  from its model.
+
+### Fixed
+- Ollama setup reads each model's native capabilities and automatically uses text-based
+  tool calls when a model such as `gemma3:270m` does not accept API tool definitions.
+- GitHub Copilot setup uses the account-specific API endpoint returned by GitHub and lets
+  you choose another model without signing in again when GitHub lists one it later rejects.
+- GitHub Copilot setup recognizes Free and Student accounts as Auto-only instead of showing
+  catalog entries they cannot select. Paid and organization-managed accounts get Auto plus
+  the named models GitHub explicitly enables for their account and policy.
+- GitHub Copilot's Auto model works. It failed with "The requested model is not supported"
+  because tinyharness sent requests without a model; it now asks GitHub which model Auto
+  picks and sends that model with Auto's session token, as VS Code does.
+
 ## 0.1.0 (2026-10-14)
 
 First release.

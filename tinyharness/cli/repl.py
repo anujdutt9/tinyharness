@@ -284,7 +284,9 @@ class Repl:
         least important parts first when the terminal is narrow."""
         session = self.session
         parts: list[tuple[int, StyleAndTextTuples]] = []  # (keep priority: lower is dropped first, items)
-        model = session.model_label + (f" · {session.config.effort}" if session.config.effort else "")
+        model = f"{session.config.provider_info.label} / {session.model_label}"
+        if session.config.effort:
+            model += f" · {session.config.effort}"
         parts.append((5, [("class:toolbar.dim", model)]))
         if session.sandbox is not None:
             parts.append((3, [("class:toolbar.ok", "sandbox")]))

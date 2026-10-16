@@ -7,7 +7,7 @@ from tinyharness.agent.history import Message, ToolCall
 from tinyharness.llm.calibration import CalibrationStore, as_text, probe, tools_section
 from tinyharness.llm.client import LLMClient
 from tinyharness.llm.providers import load_catalog
-from tinyharness.llm.types import StreamChunk, ToolSpec
+from tinyharness.llm.types import ModelInfo, StreamChunk, ToolSpec
 
 
 def replying(*chunks):
@@ -105,6 +105,21 @@ async def test_a_failed_probe_uses_the_interface_and_isnt_remembered(tmp_path, m
     monkeypatch.setattr("tinyharness.llm.client.probe", failing)
     client = LLMClient(load_catalog()["openrouter"], "k", "m", calibration=store)
     assert await client.tool_format() == "native" and store.get("openrouter:m") is None
+
+
+async def test_a_model_known_not_to_accept_native_tools_uses_text_tools(tmp_path):
+    """Seen live: Ollama accepted gemma3:270m during setup, then rejected the first
+    agent turn because tinyharness sent native tools the model does not support."""
+    from tinyharness.llm.models import ModelDirectory
+
+    directory = ModelDirectory(tmp_path)
+    directory.store("ollama", [ModelInfo("gemma3:270m", native_tools=False)])
+    client = LLMClient(load_catalog()["ollama"], "", "gemma3:270m", models=directory, tool_calls="auto")
+
+    assert await client.tool_format() == "text"
+
+    forced = LLMClient(load_catalog()["ollama"], "", "gemma3:270m", models=directory, tool_calls="native")
+    assert await forced.tool_format() == "native"
 
 
 def test_text_mode_calls_use_a_tag_server_parsers_leave_alone():

@@ -62,7 +62,7 @@ class ResponsesAdapter(Adapter):
         if request.system:
             payload["instructions"] = request.system
         if request.tools:
-            payload["tools"] = [
+            functions = [
                 {
                     "type": "function",
                     "name": t.name,
@@ -72,7 +72,19 @@ class ResponsesAdapter(Adapter):
                 }
                 for t in request.tools
             ]
-        if request.max_tokens:
+            payload["tools"] = (
+                [
+                    {
+                        "type": "namespace",
+                        "name": "tinyharness",
+                        "description": "Tools provided by the local tinyharness agent runtime.",
+                        "tools": functions,
+                    }
+                ]
+                if self.provider.request_profile == "chatgpt_plan"
+                else functions
+            )
+        if request.max_tokens and self.provider.request_profile != "chatgpt_plan":
             payload["max_output_tokens"] = request.max_tokens
         if request.effort:
             payload["reasoning"] = {"effort": request.effort}
@@ -89,6 +101,13 @@ class ResponsesAdapter(Adapter):
         return _ResponsesParser()
 
     def ping_payload(self, model: str) -> dict[str, Any]:
+        if self.provider.request_profile == "chatgpt_plan":
+            return {
+                "model": model,
+                "input": [{"role": "user", "content": "ping"}],
+                "stream": True,
+                "store": False,
+            }
         return {"model": model, "input": "ping", "max_output_tokens": 16, "store": False}
 
 

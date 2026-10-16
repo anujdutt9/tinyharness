@@ -35,6 +35,7 @@ import os
 import secrets
 import shutil
 import tomllib
+import uuid
 from pathlib import Path
 from typing import Any, Literal
 
@@ -213,7 +214,14 @@ class Config(BaseModel):
         if auto:
             # A key set for this run says more about what you want now than one saved in
             # auth.json long ago (seen: a stale saved key beating a fresh one).
-            with_key = [n for n in self.providers if self.has_key(n)]
+            # A keyless local runtime is usable when it is running, but checking that is
+            # asynchronous. Do not silently choose one for scripts merely because it has
+            # no credential; interactive setup discovers it explicitly.
+            with_key = [
+                n
+                for n in self.providers
+                if self.has_key(n) and not self.providers[n].local and not self.providers[n].endpoint_setup
+            ]
             fresh = [n for n in with_key if self.providers[n].api_key_source in ("environment", ".env")]
             provider = (fresh or with_key or list(self.providers))[0]
         self.provider = provider
@@ -279,9 +287,9 @@ class Config(BaseModel):
     def credential_values(self) -> dict[str, str]:
         """Return resolved credentials for redaction boundaries."""
         return {
-            provider.api_key_env: provider.api_key
+            provider.api_key_env or provider.name.upper(): provider.api_key
             for provider in self.providers.values()
-            if provider.api_key_env and provider.api_key
+            if provider.api_key
         }
 
     def has_key(self, provider: str) -> bool:
@@ -380,6 +388,93 @@ def read_auth(path: Path | None = None) -> dict[str, str]:
     return keys
 
 
+def ensure_chatgpt_host_id() -> str:
+    """Return this installation's stable opaque ChatGPT agent-host identifier."""
+    data = _read_auth_file()
+    entry = data.get("chatgpt")
+    if isinstance(entry, dict) and isinstance(entry.get("host_id"), str) and entry["host_id"]:
+        return entry["host_id"]
+    host_id = f"urn:uuid:{uuid.uuid4()}"
+    entry = dict(entry) if isinstance(entry, dict) else {}
+    entry["host_id"] = host_id
+    entry.setdefault("profiles", {})
+    data["chatgpt"] = entry
+    _write_auth_file(data)
+    return host_id
+
+
+def chatgpt_profiles() -> list[dict[str, Any]]:
+    """Saved ChatGPT registrations, with the active one first."""
+    entry = _read_auth_file().get("chatgpt")
+    if not isinstance(entry, dict) or not isinstance(entry.get("profiles"), dict):
+        return []
+    profiles = [dict(item) for item in entry["profiles"].values() if isinstance(item, dict)]
+    active = entry.get("active")
+    return sorted(profiles, key=lambda item: item.get("client_id") != active)
+
+
+def read_chatgpt_profile(client_id: str | None = None) -> dict[str, Any]:
+    """Read one protected ChatGPT profile, defaulting to the active registration."""
+    entry = _read_auth_file().get("chatgpt")
+    if not isinstance(entry, dict) or not isinstance(entry.get("profiles"), dict):
+        return {}
+    selected = client_id or entry.get("active")
+    profile = entry["profiles"].get(selected) if isinstance(selected, str) else None
+    return dict(profile) if isinstance(profile, dict) else {}
+
+
+def save_chatgpt_registration(host_id: str, client_id: str) -> Path:
+    """Persist an issued client ID before exchanging its short-lived authorization code."""
+    data = _read_auth_file()
+    old = data.get("chatgpt")
+    entry = dict(old) if isinstance(old, dict) else {}
+    old_profiles = entry.get("profiles")
+    profiles = dict(old_profiles) if isinstance(old_profiles, dict) else {}
+    old_profile = profiles.get(client_id)
+    profile = dict(old_profile) if isinstance(old_profile, dict) else {}
+    profile.update(client_id=client_id, ext_agent_host_id=host_id)
+    profiles[client_id] = profile
+    entry.update(host_id=host_id, profiles=profiles)
+    data["chatgpt"] = entry
+    return _write_auth_file(data)
+
+
+def save_chatgpt_profile(profile: dict[str, Any], *, active: bool = True) -> Path:
+    """Atomically replace one validated ChatGPT token set and optionally make it active."""
+    client_id = profile.get("client_id")
+    host_id = profile.get("ext_agent_host_id")
+    if not isinstance(client_id, str) or not client_id or not isinstance(host_id, str) or not host_id:
+        raise ValueError("invalid ChatGPT profile")
+    data = _read_auth_file()
+    old = data.get("chatgpt")
+    entry = dict(old) if isinstance(old, dict) else {}
+    old_profiles = entry.get("profiles")
+    profiles = dict(old_profiles) if isinstance(old_profiles, dict) else {}
+    profiles[client_id] = dict(profile)
+    entry.update(host_id=host_id, profiles=profiles)
+    if active:
+        entry["active"] = client_id
+    data["chatgpt"] = entry
+    return _write_auth_file(data)
+
+
+def clear_chatgpt_tokens(client_id: str) -> Path:
+    """Forget an unusable renewable session while retaining its account registration."""
+    data = _read_auth_file()
+    old = data.get("chatgpt")
+    entry = dict(old) if isinstance(old, dict) else {}
+    old_profiles = entry.get("profiles")
+    profiles = dict(old_profiles) if isinstance(old_profiles, dict) else {}
+    old_profile = profiles.get(client_id)
+    profile = dict(old_profile) if isinstance(old_profile, dict) else {"client_id": client_id}
+    for field in ("access_token", "refresh_token", "id_token", "expires_at", "expires_in", "scopes"):
+        profile.pop(field, None)
+    profiles[client_id] = profile
+    entry["profiles"] = profiles
+    data["chatgpt"] = entry
+    return _write_auth_file(data)
+
+
 def resolve_credentials(providers: dict[str, Provider], dotenv: dict[str, str] | None = None) -> None:
     """Resolve exactly one credential and its source for every provider.
 
@@ -395,8 +490,17 @@ def resolve_credentials(providers: dict[str, Provider], dotenv: dict[str, str] |
     for name, provider in providers.items():
         if provider.api_key_source == "SDK override":
             continue
+        if provider.auth_refresh == "chatgpt":
+            profile = read_chatgpt_profile()
+            token = profile.get("access_token")
+            provider.set_auth_data(profile)
+            provider.set_api_key(token if isinstance(token, str) else "", "auth.json" if token else "")
+            continue
         if not provider.needs_key:
-            provider.set_api_key("", "")
+            # Self-hosted OpenAI-compatible servers often need no key, but some vLLM,
+            # SGLang and gateway deployments protect the same endpoint with one.
+            value = saved.get(name, "").strip()
+            provider.set_api_key(value, "auth.json" if value else "")
             continue
         variable = provider.api_key_env
         candidates = (
@@ -415,9 +519,46 @@ def save_key(provider: str, value: str, providers: dict[str, Provider]) -> Path:
     data[provider] = {**(entry if isinstance(entry, dict) else {}), "api_key": value}
     path = _write_auth_file(data)
     info = providers[provider]
-    if info.needs_key and info.api_key_source not in ("SDK override", "environment", ".env"):
+    if info.api_key_source not in ("SDK override", "environment", ".env"):
         info.set_api_key(value, "auth.json")
     return path
+
+
+def save_provider_connection(provider: Provider, api_key: str = "") -> Path:
+    """Persist a discovered endpoint and model, plus its optional credential."""
+    data = _read_auth_file()
+    old = data.get(provider.name)
+    entry = dict(old) if isinstance(old, dict) else {}
+    entry.update(
+        {
+            "base_url": provider.base_url,
+            "default_model": provider.default_model,
+            "small_model": provider.small_model,
+        }
+    )
+    if provider.auth_refresh != "chatgpt":
+        if api_key:
+            entry["api_key"] = api_key
+        else:
+            entry.pop("api_key", None)
+    data[provider.name] = entry
+    path = _write_auth_file(data)
+    if provider.auth_refresh != "chatgpt":
+        provider.set_api_key(api_key, "auth.json" if api_key else "")
+    return path
+
+
+def _saved_provider_overrides() -> dict[str, dict[str, Any]]:
+    """Non-secret endpoint choices saved by interactive provider setup."""
+    allowed = ("base_url", "default_model", "small_model")
+    overrides = {}
+    for name, entry in _read_auth_file().items():
+        if not isinstance(entry, dict):
+            continue
+        fields = {field: entry[field] for field in allowed if isinstance(entry.get(field), str)}
+        if fields:
+            overrides[name] = fields
+    return overrides
 
 
 def _read_auth_file(path: Path | None = None) -> dict[str, Any]:
@@ -647,7 +788,11 @@ def load_config(path: Path | None = None, *, use_last_model: bool = False) -> Co
         migrate_legacy_config()  # before reading it: it may be about to move here
     path = path or default_config_path()
     data = _read_toml(path)
-    providers = load_catalog(data.pop("providers", None))
+    configured_providers = data.pop("providers", None) or {}
+    provider_overrides = _saved_provider_overrides()
+    for name, fields in configured_providers.items():
+        provider_overrides.setdefault(name, {}).update(fields)
+    providers = load_catalog(provider_overrides)
 
     migrate_legacy_keys(providers)
     working_dir = data.get("working_dir") or data.get("sandbox_root")

@@ -24,8 +24,8 @@ framework underneath, so you can read the whole thing in an afternoon.
 
 - **Readable.** About 9k lines of code for the agent core (12k with the terminal UI),
   commented for people learning how agents work. Start with [`agent/loop.py`](https://github.com/anujdutt9/tinyharness/blob/main/tinyharness/agent/loop.py).
-- **Any model, even yours.** Anthropic, OpenAI, Gemini, xAI, OpenRouter, DeepSeek, Mistral
-  and Groq, each through its own current API, plus any OpenAI-compatible server: vLLM,
+- **Any model, even yours.** Anthropic, OpenAI API, ChatGPT plans, Gemini, xAI, OpenRouter, GitHub Copilot,
+  DeepSeek, Mistral and Groq, plus LiteLLM and any OpenAI-compatible server: vLLM,
   Ollama, llama.cpp, SGLang.
 - **Robust with small models.** Cut-off replies, empty replies, tool calls written as
   text, malformed arguments and repeated failures are handled by the harness, so mid-size
@@ -52,14 +52,25 @@ uv tool install tinyharness-lm     # or: pipx install tinyharness-lm
 cd your-project && tinyharness
 ```
 
-The first run asks which provider to use and for its API key; one key for any supported
-provider is enough. `uv tool upgrade tinyharness-lm` updates it.
+The first run asks where your models come from and offers the connection methods that
+provider supports. Eligible Plus and Pro users can choose ChatGPT plan and Continue with
+ChatGPT without creating an API key; OpenAI API remains a separate choice. OpenRouter
+connects in the browser, and GitHub Copilot uses GitHub's device sign-in with the models
+included in that subscription. Ollama, LM Studio, llama.cpp,
+vLLM and SGLang are discovered on their
+standard local endpoints. If one is remote, uses another port or requires a server key,
+setup asks for those details and remembers them. LiteLLM setup similarly accepts a local
+or company-hosted proxy URL and optional gateway key. The same guided screen can replace
+an endpoint or its key later with `/connect`; editing a configuration file is not required.
+`uv tool upgrade tinyharness-lm` updates it.
 
 In the session, type `/` to autocomplete commands. The ones you'll use most:
 
 | Command | |
 |---|---|
-| `/model` | pick a model from any provider you have a key for |
+| `/provider` | switch the active model provider |
+| `/model` | pick from the active provider's models |
+| `/connect [provider]` | connect a provider in the browser or with an API key |
 | `/mode` | change the permission mode (or press Shift+Tab) |
 | `/effort` | how hard the model reasons, `low` … `max`, the same for every model |
 | `/skills`, `/<skill>` | find or run skills |
@@ -67,7 +78,7 @@ In the session, type `/` to autocomplete commands. The ones you'll use most:
 | `/sandbox` | what commands can write, read and reach |
 | `/btw <question>` | a quick side question, even while the agent works; not added to the conversation |
 | `/sessions`, `/context`, `/clear` | switch conversations, inspect context, or start fresh |
-| `/key [provider]` | add or replace a provider key saved in `auth.json` |
+| `/key [provider]` | manually add or replace an API key saved in `auth.json` |
 
 Useful flags: `-c` (continue the latest conversation), `-r` (pick one), `-p "prompt"`
 (run one prompt and exit), `--model provider:model`, `--mode ask`, `--cwd <dir>`.
@@ -161,7 +172,7 @@ Every prompt sent to the model is a Markdown file in [`tinyharness/prompts/`](ht
 ## Docs
 
 - [docs/features.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/features.md): everything above, in detail
-- [docs/configuration.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/configuration.md): API keys, providers, gateways, self-hosted models, where files live
+- [docs/configuration.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/configuration.md): provider connections, gateways, self-hosted models, where files live
 - [docs/extending.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/extending.md): extensions, custom tools, hooks, subagents and plugins
 - [docs/extension-api.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/extension-api.md): the extension API in full
 - [docs/skills.md](https://github.com/anujdutt9/tinyharness/blob/main/docs/skills.md): writing and sharing skills

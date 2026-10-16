@@ -31,11 +31,13 @@ CATALOG_PATH = Path(__file__).with_name("providers.toml")
 DEFAULT_CONTEXT = 128_000  # when neither the provider nor the config says otherwise
 
 Api = Literal["chat", "responses", "anthropic", "gemini"]
+AuthMethod = Literal["api_key", "openrouter", "github_copilot", "chatgpt"]
 
 
 class Provider(BaseModel):
     _api_key: str = PrivateAttr(default="")
     _api_key_source: str = PrivateAttr(default="")
+    _auth_data: dict[str, Any] = PrivateAttr(default_factory=dict)
 
     name: str
     label: str = ""
@@ -43,6 +45,13 @@ class Provider(BaseModel):
     base_url: str
     api_key_env: str = ""  # empty: the endpoint needs no key (a local vLLM or Ollama)
     key_url: str = ""
+    auth_methods: list[AuthMethod] = Field(default_factory=list)
+    local: bool = False  # a well-known local runtime; setup discovers its live models
+    endpoint_setup: bool = False  # setup asks for an OpenAI-compatible gateway URL and optional key
+    auth_refresh: Literal["", "github_copilot", "chatgpt"] = ""
+    model_catalog: Literal["default", "github_copilot", "ollama", "chatgpt"] = "default"
+    request_headers: Literal["default", "github_copilot"] = "default"
+    request_profile: Literal["default", "chatgpt_plan"] = "default"
     default_model: str = ""
     small_model: str = ""  # cheap model for background work (classifier, WebSearch digests)
     extra_headers: dict[str, str] = Field(default_factory=dict)
@@ -84,6 +93,8 @@ class Provider(BaseModel):
             self.default_model = self.models[0].id
         if not self.small_model:
             self.small_model = self.default_model
+        if not self.auth_methods and self.api_key_env:
+            self.auth_methods = ["api_key"]
         return self
 
     @property
@@ -101,12 +112,25 @@ class Provider(BaseModel):
         self._api_key_source = source if value else ""
 
     @property
+    def auth_data(self) -> dict[str, Any]:
+        """Provider-specific renewable credential metadata, never serialized into config."""
+        return dict(self._auth_data)
+
+    def set_auth_data(self, value: dict[str, Any]) -> None:
+        """Attach protected credential metadata loaded from auth.json."""
+        self._auth_data = dict(value)
+
+    @property
     def needs_key(self) -> bool:
         return bool(self.api_key_env)
 
     @property
     def has_key(self) -> bool:
         """Ready to use: its key is set, or it needs none."""
+        if self.auth_refresh == "chatgpt":
+            return bool(self.api_key and self._auth_data.get("refresh_token"))
+        if self.endpoint_setup:
+            return bool(self.default_model)
         return not self.needs_key or bool(self.api_key)
 
 
