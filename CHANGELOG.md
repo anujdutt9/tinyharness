@@ -7,20 +7,6 @@ the SDK, and every break is listed here.
 
 ## Unreleased
 
-- `/model` now shows the complete model catalog for the active provider instead of a mixed-provider recent list, and the banner and status bar identify the provider separately from its model.
-
-### Fixed
-- Ollama setup reads each model's native capabilities and automatically uses text-based
-  tool calls when a model such as `gemma3:270m` does not accept API tool definitions.
-- GitHub Copilot setup uses the account-specific API endpoint returned by GitHub and lets
-  you choose another model without signing in again when GitHub lists one it later rejects.
-- GitHub Copilot setup recognizes Free and Student accounts as Auto-only instead of showing
-  catalog entries they cannot select. Paid and organization-managed accounts get Auto plus
-  the named models GitHub explicitly enables for their account and policy.
-- GitHub Copilot's Auto model works. It failed with "The requested model is not supported"
-  because tinyharness sent requests without a model; it now asks GitHub which model Auto
-  picks and sends that model with Auto's session token, as VS Code does.
-
 ### Added
 - ChatGPT Plus and Pro users can choose the separate ChatGPT plan provider and use
   Continue with ChatGPT instead of creating an OpenAI API key. tinyharness validates
@@ -47,6 +33,23 @@ the SDK, and every break is listed here.
   standard local endpoints, then checks the selected model before starting a session.
   When the standard endpoint is unavailable, it can connect and remember a remote or
   custom endpoint with an optional server key.
+
+### Changed
+- `/model` shows the complete model catalog for the active provider instead of a
+  mixed-provider recent list. The banner and status bar identify the provider separately
+  from its model.
+
+### Fixed
+- Ollama setup reads each model's native capabilities and automatically uses text-based
+  tool calls when a model such as `gemma3:270m` does not accept API tool definitions.
+- GitHub Copilot setup uses the account-specific API endpoint returned by GitHub and lets
+  you choose another model without signing in again when GitHub lists one it later rejects.
+- GitHub Copilot setup recognizes Free and Student accounts as Auto-only instead of showing
+  catalog entries they cannot select. Paid and organization-managed accounts get Auto plus
+  the named models GitHub explicitly enables for their account and policy.
+- GitHub Copilot's Auto model works. It failed with "The requested model is not supported"
+  because tinyharness sent requests without a model; it now asks GitHub which model Auto
+  picks and sends that model with Auto's session token, as VS Code does.
 
 ## 0.1.0 (2026-10-14)
 

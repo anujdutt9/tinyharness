@@ -50,6 +50,8 @@ Each was a real failure; each has tests. A change that weakens one needs a reaso
 - Every fix gets a regression test named for the behavior; for a failure seen in real
   use, the docstring says what was seen ("Seen live: ...").
 - Every user-visible change gets a line in `CHANGELOG.md`, written for users.
+- When cutting a release, rename `Unreleased` to the version and release date, then add a
+  new empty `Unreleased` section above it for subsequent changes.
 - Comments say why, in plain words, matching the surrounding density. No new
   dependencies without asking.
 - Public classes and functions use concise numpydoc docstrings. Keep obvious private
