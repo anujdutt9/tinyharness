@@ -35,6 +35,9 @@ the SDK, and every break is listed here.
   custom endpoint with an optional server key.
 
 ### Changed
+- Bash tells agents that commands are fail-fast and how to handle optional discovery checks.
+  Missing executables and optional paths, plus pipelines closed by an output limiter such as
+  `head`, now appear as explained warnings instead of unexplained red exit-code failures.
 - `/model` shows the complete model catalog for the active provider instead of a
   mixed-provider recent list. The banner and status bar identify the provider separately
   from its model.

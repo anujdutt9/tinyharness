@@ -643,6 +643,9 @@ class BashTool(Tool[BashInput]):
             "Run a shell command in the working directory and return its combined stdout/stderr "
             "and exit code. Use it to run tests, builds, linters, git and other CLI tools. Each call "
             "starts fresh in the working directory (use `cd dir && ...`); nothing interactive. "
+            "Commands are fail-fast, including pipelines: split independent probes; guard expected "
+            "misses from `which`, `command -v`, `grep`, `test`, or optional-path `ls` with `if`; "
+            "and avoid `producer | head` because the producer can exit with SIGPIPE. "
             "Prefer Read/Grep/Glob/Edit over cat/grep/find/sed for files. "
             f"{limits}"
         )
@@ -856,6 +859,12 @@ class BashTool(Tool[BashInput]):
         if timed_out:
             text += f"\n(timed out after {args.timeout}s; the command was killed)"
         elif code:
+            if code == 141:
+                text += (
+                    "\n[tinyharness:pipeline_closed] A command in the pipeline received SIGPIPE "
+                    "because its reader closed early. This commonly happens with `| head`; use a "
+                    "bounded Read/Grep/Glob call or a command that consumes its full input."
+                )
             text += f"\n(exit code {code})"
         return text
 

@@ -210,6 +210,43 @@ def test_failed_commands_show_why_underneath(renderer):
     assert [line.strip() for line in why] == ["⎿ > build", "src/app.ts(12,5): error TS2322: bad type"]
 
 
+def test_sigpipe_is_an_explained_warning_not_a_generic_failure(renderer):
+    """Seen live: `grep ... | head` looked like a broken task when the reader merely closed early."""
+    output = (
+        "first match\n"
+        "[tinyharness:pipeline_closed] A command in the pipeline received SIGPIPE because its "
+        "reader closed early.\n"
+        "(exit code 141)"
+    )
+    replay(renderer, ("Bash(grep x . | head)", "Bash", {"command": "grep x . | head"}, output, False))
+    row, *why = shown(renderer)
+    assert row.startswith("! Bash") and row.endswith("pipeline stopped early")
+    assert "[tinyharness:pipeline_closed]" in " ".join(why)
+
+
+@pytest.mark.parametrize(
+    ("summary", "command", "output"),
+    [
+        (
+            "Bash(cd repo && which uv python3.12; uv --version)",
+            "cd repo && which uv python3.12; uv --version",
+            "/usr/local/bin/uv\n(exit code 1)",
+        ),
+        (
+            "Bash(ls -l ~/.cargo/bin/cargo /opt/homebrew/bin/python3.12)",
+            "ls -l ~/.cargo/bin/cargo /opt/homebrew/bin/python3.12",
+            "ls: /opt/homebrew/bin/python3.12: No such file or directory\n(exit code 1)",
+        ),
+    ],
+)
+def test_missing_discovery_targets_are_warnings(renderer, summary, command, output):
+    """Seen live: missing optional executables and paths looked like broken setup commands."""
+    replay(renderer, (summary, "Bash", {"command": command}, output, False))
+    row, *why = shown(renderer)
+    assert row.startswith("! Bash") and row.endswith("not found")
+    assert why
+
+
 def test_rejected_and_denied_calls(renderer):
     replay(
         renderer,

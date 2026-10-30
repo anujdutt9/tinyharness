@@ -94,6 +94,8 @@ _EDIT_STATS = re.compile(r", -(\d+)/\+(\d+) lines$")
 _WRITE_STATS = re.compile(r", (\d+) lines$")
 _EXIT_CODE = re.compile(r"\(exit code (\d+)\)\s*$")
 _TIMEOUT = re.compile(r"\(timed out after \d+s; the command was killed\)\s*$")
+_LOOKUP_PROBE = re.compile(r"(?:^|[;&|]\s*)(?:which\b|command\s+-v\b|test\s+-[a-zA-Z]\b)")
+_PATH_PROBE = re.compile(r"(?:^|[;&|]\s*)(?:ls|stat)\b")
 _MATCH_HEADER = re.compile(r"^\d+ (total )?match\(es\)|^\d+ files?\b")
 # Commands that run a test suite, so the turn's footer can say whether the tests passed.
 _TEST_COMMAND = re.compile(
@@ -143,6 +145,22 @@ def _preview_line(tool: _RunningTool, line: str, failed: bool) -> Text:
             style = "diff.add" if match.group() == "+" else "diff.del"
             out.stylize(style, start + match.start(), start + match.end())
     return out
+
+
+def _bash_warning(tool: _RunningTool, text: str) -> str | None:
+    """Name routine shell outcomes that need attention but do not mean the task broke."""
+    match = _EXIT_CODE.search(text)
+    if tool.name != "Bash" or match is None:
+        return None
+    if match.group(1) == "141":
+        return "pipeline stopped early"
+    if match.group(1) != "1":
+        return None
+    command = str(tool.args.get("command", ""))
+    missing_path = "No such file or directory" in text
+    if _LOOKUP_PROBE.search(command) or (missing_path and _PATH_PROBE.search(command)):
+        return "not found"
+    return None
 
 
 def format_todos(todos: list[dict[str, str]]) -> Text:
@@ -504,10 +522,18 @@ class Renderer:
             lines.pop()
         if not lines or lines == ["(no output)"]:
             return []
-        failed = is_error or bool(_EXIT_CODE.search(output)) or bool(_TIMEOUT.search(output))
+        warning = _bash_warning(tool, output)
+        failed = (
+            is_error or (bool(_EXIT_CODE.search(output)) and warning is None) or bool(_TIMEOUT.search(output))
+        )
         shown = lines[-PREVIEW_LINES:] if failed else lines[:PREVIEW_LINES]
         room = max(self.console.width - 6, 20)
-        out = [_preview_line(tool, _cut(line.expandtabs(4), room), failed) for line in shown]
+        out = [
+            Text(_cut(line.expandtabs(4), room), style="warn")
+            if warning
+            else _preview_line(tool, _cut(line.expandtabs(4), room), failed)
+            for line in shown
+        ]
         if (more := len(lines) - len(shown)) > 0:
             where = "above" if failed else "more"
             out.insert(
@@ -575,6 +601,9 @@ class Renderer:
             if is_test:
                 self._turn.tests_passed = False
             under = Text(ellipsize(last, 200), style="err") if last else None
+            if warning := _bash_warning(tool, text):
+                under = Text(ellipsize(last, 200), style="warn") if last else None
+                return Text("!", style="warn"), Text(warning, style="warn"), under
             return Text(FAILED, style="err"), Text(f"exit {m.group(1)}", style="err"), under
         if is_test:
             self._turn.tests_passed = True

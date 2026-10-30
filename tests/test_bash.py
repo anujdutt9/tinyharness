@@ -133,9 +133,20 @@ async def test_a_failed_step_stops_before_a_stale_followup(tmp_path):
     assert "old" not in out and out.endswith("(exit code 1)")
 
 
+async def test_sigpipe_explains_how_to_avoid_the_false_alarm(tmp_path):
+    """Seen live: harmless discovery pipelines ending in `head` repeatedly showed exit 141."""
+    out = await run(unsandboxed(tmp_path), "yes row | head -1", tmp_path)
+    assert "[tinyharness:pipeline_closed]" in out
+    assert "Read/Grep/Glob" in out
+    assert out.endswith("(exit code 141)")
+
+
 def test_description_matches_the_sandbox(tmp_path):
     assert "runs in a sandbox" in BashTool(FakeSandbox(), SandboxPolicy(write_roots=())).description
     assert "without a sandbox" in unsandboxed(tmp_path).description
+    assert "guard expected misses" in unsandboxed(tmp_path).description
+    assert "optional-path `ls`" in unsandboxed(tmp_path).description
+    assert "SIGPIPE" in unsandboxed(tmp_path).description
 
 
 async def test_localhost_capability_keeps_the_command_sandboxed(tmp_path):
