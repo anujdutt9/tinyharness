@@ -184,6 +184,9 @@ async def test_local_steps_beside_a_declared_install_keep_it_setup(tmp_path, mon
         return Execution("ok", 0, False, True, [], ["pypi.org", "files.pythonhosted.org"])
 
     monkeypatch.setattr(BashTool, "execute", downloaded)
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    (tmp_path / ".venv" / "bin" / "activate").write_text("")
     tool = BashTool(object(), SandboxPolicy(write_roots=(tmp_path,), project_roots=(tmp_path,)))
     for command in (
         "cd . && git checkout pyproject.toml; git status --short; cp a.toml pyproject.toml; "
@@ -193,6 +196,37 @@ async def test_local_steps_beside_a_declared_install_keep_it_setup(tmp_path, mon
         ctx = make_ctx(tmp_path)
         await tool.run(BashInput(command=command), ctx)
         assert ctx.outside == [], command
+
+
+async def test_sourcing_an_activate_script_outside_the_project_keeps_downloads_outside(tmp_path, monkeypatch):
+    """Found in review: any path ending in `/bin/activate` counted as inert setup, so
+    `source /tmp/x/bin/activate; uv sync` hid whatever that script downloaded."""
+    from tinyharness.sandbox import SandboxPolicy
+
+    async def downloaded(self, args, ctx):
+        return Execution("ok", 0, False, True, [], ["pypi.org"])
+
+    monkeypatch.setattr(BashTool, "execute", downloaded)
+    project, elsewhere = tmp_path / "project", tmp_path / "elsewhere"
+    for root in (project, elsewhere):
+        (root / ".venv" / "bin").mkdir(parents=True)
+        (root / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        (root / ".venv" / "bin" / "activate").write_text("")
+    (project / "fake" / "bin").mkdir(parents=True)
+    (project / "fake" / "bin" / "activate").write_text("")  # no pyvenv.cfg: not a venv
+    tool = BashTool(object(), SandboxPolicy(write_roots=(project,), project_roots=(project,)))
+    for command in (
+        f"source {elsewhere}/.venv/bin/activate; uv sync",
+        "source fake/bin/activate && uv sync",
+        "source $VENV/bin/activate && uv sync",
+        "source missing/bin/activate && uv sync",
+    ):
+        ctx = make_ctx(project)
+        await tool.run(BashInput(command=command), ctx)
+        assert ctx.outside, command
+    ctx = make_ctx(project)
+    await tool.run(BashInput(command="source .venv/bin/activate && uv sync"), ctx)
+    assert ctx.outside == []
 
 
 async def test_another_step_beside_a_declared_install_keeps_its_downloads_outside(tmp_path, monkeypatch):

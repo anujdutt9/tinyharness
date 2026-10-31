@@ -66,13 +66,13 @@ the SDK, and every break is listed here.
 - Fewer permission prompts in the sandbox. Installing what the project already declares
   (`uv sync`, `pip install -e .`, `pip install -r requirements.txt`, `npm ci`) no longer
   asks. Naming a new package can be approved once per ecosystem for the session, and in
-  auto mode the classifier reviews whether the install serves the request.
-  `[permissions] allow = ["Bash(capability:software:Python package)"]` pre-approves one.
+  auto mode the classifier reviews whether the install serves the request. An install
+  inside `sh -c`, `eval` or `exec` asks the same way. `[permissions] allow = ["Bash(capability:software:Python package)"]` pre-approves one.
 - Installing the project's declared dependencies (`uv pip install -e .`, `uv sync`,
   `npm ci`) no longer marks the conversation as holding outside content, so later
   commands don't all ask: it is authorized project setup inside the sandbox. This holds
   only when every other step in the command is setup (`cd`, making a venv, activating
-  it) or a local reader; any other step keeps the downloads as outside content.
+  the project's own virtualenv) or a local reader; any other step keeps the downloads as outside content.
   Installing a new package by name still counts, since its build and code can print or
   plant text. Known local inspection (`which`, `ls`, local `git` reads) stays quiet even
   then, because it cannot send anything.
@@ -138,8 +138,9 @@ the SDK, and every break is listed here.
 - The sandbox also keeps editor tasks and settings (`.vscode/`, `.idea/`), `.envrc`,
   `.gitmodules`, `.mcp.json` and Claude Code's settings, commands and agents read-only:
   each runs code outside the sandbox when you open or enter the project. An allowed host
-  name that resolves to this machine, its link (such as the cloud metadata service) or no
-  one is refused.
+  name or address that is or resolves to this machine, its link (such as the cloud
+  metadata service at `169.254.169.254`) or no one is refused; local servers go through
+  `localhost` approval instead.
 - Three blocked retries are counted per action, so unrelated parallel calls cannot
   combine into an unexpected prompt.
 

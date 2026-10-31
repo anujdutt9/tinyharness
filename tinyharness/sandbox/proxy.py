@@ -215,26 +215,28 @@ class AllowlistProxy:
         # The allowlist matches names, and whoever runs a name's DNS decides where it points.
         # Look it up once, refuse local answers, and connect to that same address, so a
         # second lookup can't point the connection somewhere else (DNS rebinding).
-        address = host
+        # A literal address gets the same check: the model can request one with
+        # `network_host`, and loopback has its own policy (`allow_localhost`, NO_PROXY).
         try:
-            ipaddress.ip_address(host)  # an address listed on purpose is the user's choice
+            addresses = [str(ipaddress.ip_address(host))]
         except ValueError:
             try:
                 addresses = await asyncio.wait_for(self.resolve(host, port), timeout=30)
             except (OSError, TimeoutError) as e:
                 await _reply(writer, 502, f"tinyharness sandbox: couldn't resolve {host}: {e}")
                 return None
-            if not addresses or any(_local(a) for a in addresses):
-                self.denied.append(host)
-                log.info("sandbox proxy blocked %s: it resolves to a local address", host)
-                await _reply(
-                    writer,
-                    403,
-                    f"tinyharness sandbox: {host} resolves to a local address ({', '.join(addresses)}); "
-                    "an allowed name can't reach this machine or its network.",
-                )
-                return None
-            address = addresses[0]
+        if not addresses or any(_local(a) for a in addresses):
+            self.denied.append(host)
+            log.info("sandbox proxy blocked %s: it is or resolves to a local address", host)
+            await _reply(
+                writer,
+                403,
+                f"tinyharness sandbox: {host} resolves to a local address ({', '.join(addresses)}); "
+                "an allowed host can't reach this machine or its network. For a local server, "
+                "request network_host=localhost instead.",
+            )
+            return None
+        address = addresses[0]
         self.reached.append(host)
         try:
             return await asyncio.wait_for(asyncio.open_connection(address, port), timeout=30)

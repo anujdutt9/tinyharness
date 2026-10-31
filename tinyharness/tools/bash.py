@@ -120,10 +120,11 @@ _MAY_DOWNLOAD = re.compile(
     r"uv\s+(?:pip|add|sync|tool|run)|npm|npx|pnpm|yarn|bun|brew|ssh|scp|rsync)(?=\s|$)"
 )
 _SHELL_OPERATORS = frozenset(";&|()\n")
-_WRAPPERS = {"command", "env", "nohup", "sudo", "time"}
+_WRAPPERS = {"builtin", "command", "env", "exec", "nohup", "sudo", "time"}
 _SHELL_PREFIXES = {"!", "if", "then", "elif", "else", "while", "until", "do"}
 _WRAPPER_OPTIONS_WITH_VALUES = {
     "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+    "exec": {"-a"},
     "sudo": {"-C", "-D", "-g", "-h", "-p", "-R", "-T", "-u"},
     "time": {"-f", "--format", "-o", "--output"},
 }
@@ -308,6 +309,17 @@ def _acquisition_in_segment(
                 acquisition,
                 python_launchers=tuple((argument_index, *path) for path in acquisition.python_launchers),
             )
+    if executable == "eval" and args:
+        # `eval` runs its joined arguments as a command, like `sh -c`. Launchers are
+        # only rewritable when that command is a single word of the original.
+        acquisition = _software_acquisition(" ".join(args), cwd)
+        if acquisition is None:
+            return None
+        argument_index = token_offset + index + 1
+        launchers = (
+            tuple((argument_index, *path) for path in acquisition.python_launchers) if len(args) == 1 else ()
+        )
+        return replace(acquisition, python_launchers=launchers)
     python_invocation = bool(re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", executable))
     if python_invocation:
         try:
@@ -1232,7 +1244,7 @@ def _installs_declared_only(command: str, policy: SandboxPolicy) -> bool:
             or name in _READERS
             or name in _LOCAL_STEPS
             or (name == "git" and len(words) > 1 and words[1] in _GIT_LOCAL)
-            or (name in {"source", "."} and len(words) == 2 and words[1].endswith("/bin/activate"))
+            or (name in {"source", "."} and len(words) == 2 and _project_activation(words[1], cwd, policy))
             or _MAKES_VENV.search(" ".join(words))
         ):
             pass
@@ -1242,6 +1254,26 @@ def _installs_declared_only(command: str, policy: SandboxPolicy) -> bool:
             return False
         cwd = _directory_after(segment, cwd)
     return installs > 0
+
+
+def _project_activation(path: str, cwd: Path | None, policy: SandboxPolicy) -> bool:
+    """Whether a sourced script is a virtualenv's `bin/activate` inside the project.
+
+    It runs like any script, so it is trusted only as far as the project's own files are
+    (a declared install runs the project's build code too). One elsewhere, such as under
+    /tmp, could download anything.
+    """
+    if _EXPANDS.search(path) or cwd is None:
+        return False
+    script = cwd / path
+    environment = script.parent.parent
+    return (
+        script.name == "activate"
+        and script.parent.name == "bin"
+        and script.is_file()
+        and (environment / "pyvenv.cfg").is_file()
+        and _inside(script, tuple(root.resolve() for root in policy.project_roots))
+    )
 
 
 def certainly_offline(command: str) -> bool:

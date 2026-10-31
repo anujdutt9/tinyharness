@@ -34,7 +34,9 @@ async def _connect(proxy_port, target):
     return reader, writer
 
 
-async def test_an_allowed_host_gets_a_tunnel_and_others_a_403():
+async def test_an_allowed_host_gets_a_tunnel_and_others_a_403(monkeypatch):
+    # The echo server is on loopback, which the proxy otherwise refuses.
+    monkeypatch.setattr("tinyharness.sandbox.proxy._local", lambda address: False)
     server, port = await _echo_server()
     proxy = AllowlistProxy(("127.0.0.1",))
     try:
@@ -95,6 +97,28 @@ async def test_an_allowed_name_that_points_at_this_machine_is_refused():
             reply = await reader.read()
             assert reply.startswith(b"HTTP/1.1 403") and b"resolves to a local address" in reply
             assert proxy.denied == ["rebind.example"] and proxy.reached == []
+            writer.close()
+        finally:
+            proxy.close()
+
+
+async def test_an_allowed_literal_local_address_is_refused():
+    """Found in review: a literal address skipped the local check, so an approved
+    `network_host=169.254.169.254` reached cloud metadata. Loopback goes through
+    `allow_localhost`, not the proxy."""
+    for host, target in (
+        ("169.254.169.254", "169.254.169.254:80"),
+        ("127.0.0.1", "127.0.0.1:8000"),
+        ("::1", "[::1]:8000"),
+        ("0.0.0.0", "0.0.0.0:8000"),
+    ):
+        proxy = AllowlistProxy((host,))
+        try:
+            proxy_port = await proxy.start()
+            reader, writer = await _connect(proxy_port, target)
+            reply = await reader.read()
+            assert reply.startswith(b"HTTP/1.1 403") and b"local address" in reply, host
+            assert proxy.denied == [host] and proxy.reached == []
             writer.close()
         finally:
             proxy.close()
