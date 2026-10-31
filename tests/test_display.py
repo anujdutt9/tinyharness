@@ -1,5 +1,6 @@
 """What the CLI shows: tool rows, the turn footer, the status bar, tokens and cost."""
 
+import inspect
 import json
 import re
 import subprocess
@@ -585,6 +586,23 @@ async def test_a_message_sent_mid_turn_reaches_the_agent_at_its_next_step(tmp_pa
         session.close()
 
 
+def test_scratch_paths_are_shown_short_and_link_to_the_real_file(renderer):
+    """Seen live: rows read `/Users/…/.tinyharness/projects/app-63fe…/tmp/1793…/make_nb.py`,
+    burying the file name and making scratch work look like it happened somewhere odd."""
+    renderer.scratch = "/home/u/.tinyharness/projects/app/tmp/1793-abc/"
+    shown = renderer._relative("cd /home/u/.tinyharness/projects/app/tmp/1793-abc && python3 make_nb.py")
+    assert shown == "cd (scratch) && python3 make_nb.py"
+    assert (
+        renderer._relative("/home/u/.tinyharness/projects/app/tmp/1793-abc/make_nb.py")
+        == "(scratch)/make_nb.py"
+    )
+    assert renderer._relative("/repo/notebook.ipynb") == "notebook.ipynb"  # project paths as before
+    assert (
+        renderer._absolute("(scratch)/make_nb.py")
+        == "/home/u/.tinyharness/projects/app/tmp/1793-abc/make_nb.py"
+    )
+
+
 def test_the_live_region_never_shows_raw_link_codes():
     from tinyharness.cli.render import without_links
 
@@ -614,6 +632,38 @@ def test_reasoning_can_be_shown(renderer):
     assert "The bug is in the retry loop." in renderer.live_ansi(100)  # while it thinks
     renderer.handle(AssistantText("Found it."))
     assert shown(renderer)[:2] == ["∴ Thinking", "  The bug is in the retry loop."]
+
+
+def test_long_reasoning_streams_line_by_line_and_keeps_its_top(renderer):
+    """Seen live: the live region showed the last 8 lines of a thought, so the top of a long
+    one was never readable while it streamed. Finished lines now go to the scrollback."""
+    renderer.show_thinking = True
+    lines = [f"Step {i}: check the part numbered {i}." for i in range(1, 21)]
+    think(renderer, *(line + "\n" for line in lines), "Now the last idea, still")
+    printed = shown(renderer)
+    assert printed[0] == "∴ Thinking" and printed[1] == "  Step 1: check the part numbered 1."
+    assert "  Step 20: check the part numbered 20." in printed
+    live = renderer.live_ansi(100)
+    assert "Now the last idea, still" in live and "Step 1:" not in live
+    renderer.handle(AssistantText("Found it."))
+    text = "\n".join(printed + shown(renderer))  # shown() returns what's new since it was last called
+    assert text.count("Step 1: check") == 1 and text.count("Now the last idea, still") == 1
+
+
+def test_a_very_long_reasoning_line_shows_its_end_while_it_streams(renderer):
+    renderer.show_thinking = True
+    think(renderer, "start " + "word " * 2000 + "the latest words")
+    live = renderer.live_ansi(100)
+    assert live.rstrip().endswith("words") and "start" not in live and "…" in live
+
+
+def test_ctrl_t_says_it_applies_from_now_on():
+    """Reasoning already printed stays in the terminal's scrollback: the notice says so,
+    instead of promising to hide what's on screen."""
+    from tinyharness.cli.repl import Repl
+
+    source = inspect.getsource(Repl.show_thinking)
+    assert "hidden from here on" in source and "shown from here on" in source
 
 
 def test_a_model_that_keeps_its_reasoning_private_just_shows_the_time(renderer):

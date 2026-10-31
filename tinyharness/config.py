@@ -65,7 +65,7 @@ class SandboxSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = True  # False: commands run unsandboxed, and every one asks first
+    enabled: bool = True  # False: commands run as you; reads run, default mode asks for the rest
     required: bool = False  # fail closed when no supported sandbox backend is active
     allow_write: list[Path] = Field(default_factory=list)  # more writable dirs, e.g. a second repo
     allow_localhost: bool = False  # let commands use loopback (tests that start a local server)

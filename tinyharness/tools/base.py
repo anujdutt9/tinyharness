@@ -249,6 +249,12 @@ class Tool(ABC, Generic[InputT]):
         network), so modes that allow project edits may allow it without asking."""
         return False
 
+    def runs_unsandboxed(self, args: dict[str, Any]) -> bool:
+        """Whether this call runs a program with the sandbox turned off (`/sandbox off`),
+        so it can reach anything the user can. A blanket rule given while the sandbox was
+        on doesn't cover it."""
+        return False
+
     def can_send_out(self, args: dict[str, Any]) -> bool:
         """Whether this call can contact another machine with conversation data."""
         return self.network

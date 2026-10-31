@@ -733,10 +733,12 @@ class Repl:
     def show_thinking(self, show: bool) -> None:
         self.renderer.show_thinking = show
         self.session.set_show_thinking(show)
+        # Reasoning already printed is in the terminal's scrollback, which nothing can take
+        # back; the switch is for what comes next, including a thought still being written.
         if not show:
-            self.console.print("  [muted]∴ Reasoning hidden (ctrl+t shows it)[/]")
+            self.console.print("  [muted]∴ Reasoning hidden from here on (ctrl+t shows it again)[/]")
             return
-        self.console.print("  [muted]∴ Reasoning shown (ctrl+t hides it)[/]")
+        self.console.print("  [muted]∴ Reasoning shown from here on (ctrl+t hides it again)[/]")
         # The latest reasoning, if it was hidden when it happened; once is enough.
         renderer = self.renderer
         if renderer.last_thought and not renderer.last_thought_shown and not self.turn_running:
@@ -796,6 +798,7 @@ class Repl:
             str(selected.workspace.root),
             selected.ctx.usage,
             show_thinking=selected.config.show_thinking,
+            scratch=str(selected.scratch.dir),
         )
         self.context_used = 0.0
         self.git = git_status(selected.workspace.root)

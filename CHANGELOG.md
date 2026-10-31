@@ -8,6 +8,12 @@ the SDK, and every break is listed here.
 ## Unreleased
 
 ### Added
+- The agent knows when it's in plan mode. It's told when plan mode starts and ends (again
+  after a long conversation is summarized), plans with you, and when you want it built,
+  asks you to switch modes with Shift+Tab. If it tries to change a file or run a command
+  in plan mode anyway, its turn stops there with a one-line reminder of how to build,
+  instead of it writing the whole result into its reply. This works the same with any
+  model, local ones included.
 - ChatGPT Plus and Pro users can choose the separate ChatGPT plan provider and use
   Continue with ChatGPT instead of creating an OpenAI API key. tinyharness validates
   the OpenID identity, stores renewable credentials privately, discovers models for
@@ -38,6 +44,22 @@ the SDK, and every break is listed here.
   off by default: a sandboxed command can then change what those tools load later.
 
 ### Changed
+- When a request names a library, model or product the agent doesn't recognize, it looks it
+  up on the web before asking you or guessing, then answers your question with what it
+  learned instead of reporting the research back.
+- Replies lead with the answer and don't restate what you already know: what you told it
+  or named, or what a tool already showed you. What it looked up comes in where it changes
+  the answer, not as a summary up front.
+- Files in the session's scratch folder show as `(scratch)/make_nb.py` instead of a long
+  path under `~/.tinyharness`; links still open the real file. The agent keeps the
+  scripts that produce a deliverable (a notebook's generator, a page's build script) with
+  it in your project so you can rerun them; scratch is only for throwaway files, and it
+  leaves tool caches such as Playwright's browsers where they are.
+- Shift+Tab cycles `default` → `auto` → `plan`. `ask` mode is out of the cycle, since
+  approving every edit out of habit protects less than it seems; `/mode ask` and
+  `--mode ask` still switch to it.
+- When no sandbox is available, the start-up banner gives the command that installs one
+  (for Linux, the one for your package manager) instead of only saying it's off.
 - `/model` shows the complete model catalog for the active provider instead of a
   mixed-provider recent list. The banner and status bar identify the provider separately
   from its model.
@@ -78,7 +100,8 @@ the SDK, and every break is listed here.
   a review: `curl`/`wget` reads of allowed hosts, read-only `gh` commands, and text filters
   such as `jq` or a `python3 -c` that only parses JSON. Neither does reading a page on a
   host you named yourself or one on the sandbox allowlist. Anything that could carry data
-  out (a request body, an upload, headers, a new host, a script) is still reviewed.
+  out (a request body, an upload, headers, a new host, a script) is still reviewed, and so
+  is a text step that can run a program (`sed`'s `e` command, `sort --compress-program`).
 - In auto mode a command that needs a host outside the allowlist can be approved by the
   review for that one command, instead of asking you. With outside content in the
   conversation, you are still asked: a new destination is how that content could get data
@@ -98,8 +121,12 @@ the SDK, and every break is listed here.
   you anywhere on your machine, reads run, `default` mode asks before other commands and
   auto mode's review decides them. Deleting files, `sudo`, touching credential files and
   changing files that run code later (git hooks, editor settings, `.envrc`) still ask you,
-  and "don't ask again" doesn't cover them. Before, every command asked once the sandbox
-  was off, even in auto mode, and even `bypassPermissions` asked.
+  and "don't ask again" doesn't cover them. That includes credential paths written as a
+  pattern or in quotes (`~/.ss?/id_*`) and `sudo` called by its full path, and a read
+  that can run a program or write a file (`rg --pre`, `tree -o`) is not treated as a read.
+  A "don't ask again" given while the sandbox was on doesn't carry over once it's off.
+  Before, every command asked once the sandbox was off, even in auto mode, and even
+  `bypassPermissions` asked.
 - Programs that talk to their own helper processes over Unix sockets work in the sandbox:
   ZMQ `ipc://`, multiprocessing managers, language servers. A command may use sockets in
   the folders it can write (the project and its private temp folder); others, such as
@@ -128,6 +155,18 @@ the SDK, and every break is listed here.
 - The next-message suggestion stands on its own without repeating `tab to use` beside it.
 
 ### Fixed
+- Grep searches a file you name directly up to 64 MB, such as a long session log, instead of
+  refusing anything over 2 MB. A search across a folder still skips files that big, and a
+  file past the limit gets a suggestion to search it with `rg` through Bash.
+- Shown reasoning streams line by line into the scrollback, so a long thought is readable
+  from its first line while the model is still thinking. Before, only its last eight
+  lines were on screen until it finished. Ctrl+T says it applies from here on, since
+  reasoning already printed stays in the terminal's scrollback.
+- An install that also needs a new host, such as Playwright downloading Chrome, asks one
+  question naming both instead of two in a row; "for this session" allows both.
+- "Don't ask again for Bash" no longer lets a command that could send project data out
+  run without asking once a web page or download is in the conversation. Such a command
+  is reviewed like any other, and the prompt doesn't offer to remember the answer.
 - Piping downloaded JSON into a local `python -c` parser no longer looks like downloading
   and executing a program. Piping a script into Python, or explicitly evaluating the
   downloaded input, still requires software-acquisition approval. An unauthenticated

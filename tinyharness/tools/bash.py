@@ -14,7 +14,10 @@ Containment is chosen by the harness, never by a model tool argument.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
+import glob
 import hashlib
+import itertools
 import os
 import re
 import shlex
@@ -69,8 +72,18 @@ _READERS = frozenset(
      "column", "diff", "cmp", "tree"}
 )  # fmt: skip
 _GIT_READS = frozenset({"status", "log", "diff", "show", "ls-files", "rev-parse", "blame"})
-_FIND_WRITES = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls"})
-_SQLITE_WRITES = (".output", ".once", ".save", ".backup", ".import", ".shell", ".system", ".log", ".excel")
+_FIND_WRITES = frozenset(
+    {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}
+)
+# Options that make a reader run a program or write a file: `rg --pre=sh`, `tree -o FILE`,
+# `git diff --output=FILE`. git and GNU tools take any unambiguous prefix of a long option
+# (`--outp=FILE`), so a prefix counts too.
+_UNSAFE_OPTIONS = {
+    "rg": ("--pre", "--hostname-bin"),
+    "tree": ("-o",),
+    "git": ("--output", "--ext-diff", "--textconv"),
+    "sort": ("--compress-program",),
+}
 
 # Keep this deterministic: a small model must not decide whether an irreversible shell
 # command is routine. These recognizable destructive operations always ask in auto mode.
@@ -90,8 +103,16 @@ _DESTRUCTIVE_COMMANDS = (
 # With the sandbox off, these ask the user even in auto mode: the sandbox no longer stops
 # them, and a review model must not be the only thing between them and your machine.
 _AS_ANOTHER_USER = re.compile(r"(?:^|[;&|()\s])(?:sudo|doas|su)(?=\s|$)")
+_OTHER_USER = frozenset({"sudo", "doas", "su", "pkexec", "run0"})  # also as /usr/bin/sudo, "sudo"
 _CREDENTIAL_DIRS = re.compile(r"(^|/)\.(ssh|aws|gnupg|kube|azure|docker)(/|$)|(^|/)\.config/(gh|gcloud)(/|$)")
 _WORDS = re.compile(r"[^\s;&|()<>'\"`]+")
+# What makes the shell turn one word into other paths (`cat ~/.ss?/id_*`), so the
+# credential check looks at what the word expands to, not only how it's spelled.
+_EXPANDS = re.compile(r"[*?\[{$~]")
+_BRACE = re.compile(r"\{([^{}]*,[^{}]*)\}")
+# The directories _CREDENTIAL_DIRS names, for patterns that could spell one.
+_CREDENTIAL_NAMES = (".ssh", ".aws", ".gnupg", ".kube", ".azure", ".docker", "gh", "gcloud")
+_MAX_EXPANSIONS = 200
 # Programs that fetch from the network: without the proxy's record, their output counts
 # as outside content.
 _MAY_DOWNLOAD = re.compile(
@@ -837,6 +858,9 @@ class BashTool(Tool[BashInput]):
     def contained(self, args: dict[str, Any]) -> bool:
         return self.sandbox is not None
 
+    def runs_unsandboxed(self, args: dict[str, Any]) -> bool:
+        return self.sandbox is None
+
     def can_send_out(self, args: dict[str, Any]) -> bool:
         """The sandbox's allowlist is still an outbound channel for readable project data,
         except for plain downloads: they send an allowed host nothing but the URL."""
@@ -879,7 +903,11 @@ class BashTool(Tool[BashInput]):
         for pattern, reason in _DESTRUCTIVE_COMMANDS:
             if pattern.search(command):
                 return reason
-        return None if self.sandbox else _unsandboxed_risk(command)
+        if self.sandbox:
+            return None
+        return _unsandboxed_risk(
+            command, next(iter(self.policy.project_roots or self.policy.write_roots), None)
+        )
 
     async def run(self, args: BashInput, ctx: ToolContext) -> str:
         started = time.time()
@@ -1133,16 +1161,29 @@ def only_reads(command: str) -> bool:
         if not words:
             return False
         name, rest = words[0], words[1:]
+        if _unsafe_options(name, rest):
+            return False
         if name in _READERS:
             continue
         if name == "find" and not _FIND_WRITES.intersection(rest):
             continue
         if name == "git" and rest[:1] and rest[0] in _GIT_READS:
             continue
-        if name == "sqlite3" and "-readonly" in rest and not any(w in segment for w in _SQLITE_WRITES):
-            continue
         return False
     return True
+
+
+def _unsafe_options(name: str, args: list[str]) -> bool:
+    """Whether `args` include an option that makes `name` run a program or write a file."""
+    for option in _UNSAFE_OPTIONS.get(name, ()):
+        for arg in args:
+            given = arg.split("=", 1)[0]
+            if option.startswith("--"):
+                if len(given) > 2 and given.startswith("--") and option.startswith(given):
+                    return True
+            elif arg.startswith("-") and not arg.startswith("--") and option[1] in arg[1:]:
+                return True  # a short option, perhaps bundled (`tree -ao FILE`)
+    return False
 
 
 # Shell builtins that may sit beside a declared install without running another program.
@@ -1232,6 +1273,8 @@ def certainly_offline(command: str) -> bool:
 def _offline_step(words: list[str]) -> bool:
     """One step of `certainly_offline`: a known local reader."""
     name, rest = words[0], words[1:]
+    if _unsafe_options(name, rest):
+        return False
     if name in _READERS:
         return True
     if name == "find" and not _FIND_WRITES.intersection(rest):
@@ -1252,8 +1295,17 @@ def _offline_step(words: list[str]) -> bool:
 _PATH_VARIABLES = frozenset({"TMPDIR", "HOME", "PWD", "XDG_CACHE_HOME"})
 _VARIABLE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
 # Text tools that cannot open a connection (awk is absent: gawk reads /inet/tcp files).
-_TEXT_STEPS = frozenset(
-    {"sed", "sort", "uniq", "tee", "base64", "shasum", "md5", "mkdir", "touch", "true", "sleep"}
+# sed is judged by its script (`_plain_sed`), sort by its options (`_UNSAFE_OPTIONS`).
+_TEXT_STEPS = frozenset({"sort", "uniq", "tee", "base64", "shasum", "md5", "mkdir", "touch", "true", "sleep"})
+# One sed command that only prints, deletes or substitutes, with an optional address or
+# range. Anything else is refused: GNU sed's `e` command and `s///e` flag run programs.
+_SED_ADDRESS = r"(?:\d+|\$|/(?:[^/\\\n]|\\.)*/)"
+_SED_COMMAND = re.compile(
+    rf"\s*(?:{_SED_ADDRESS}(?:\s*,\s*{_SED_ADDRESS})?\s*!?\s*)?"
+    r"(?:[pdqP=]|s(?P<d>[^\w\s\\])(?:(?!(?P=d))[^\\]|\\.)*(?P=d)(?:(?!(?P=d))[^\\]|\\.)*(?P=d)[gpiImM0-9]*)\s*"
+)
+_SED_FLAGS = frozenset(
+    {"-n", "--quiet", "--silent", "-E", "-r", "--regexp-extended", "-u", "--unbuffered", "--sandbox"}
 )
 _CURL_FLAGS = frozenset("sSfLiIvO")
 _CURL_LONG = frozenset(
@@ -1354,8 +1406,12 @@ def _variables(word: str) -> list[str]:
 
 def _reading_step(words: list[str]) -> bool:
     name, rest = words[0], words[1:]
+    if _unsafe_options(name, rest):
+        return False
     if _offline_step(words) or name in _TEXT_STEPS:
         return True
+    if name == "sed":
+        return _plain_sed(rest)
     if name == "curl":
         return _plain_options(rest, _CURL_FLAGS, _CURL_LONG, _CURL_VALUES)
     if name == "wget":
@@ -1397,6 +1453,54 @@ def _plain_options(
     return urls > 0
 
 
+def _plain_sed(args: list[str]) -> bool:
+    """`sed -n '1,20p'`, `sed 's/a/b/g' file`: scripts that only print, delete or substitute."""
+    scripts, operands = [], []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-e", "--expression"):
+            if i + 1 == len(args):
+                return False
+            scripts.append(args[i + 1])
+            i += 1
+        elif arg.startswith("--expression="):
+            scripts.append(arg.split("=", 1)[1])
+        elif len(arg) > 2 and arg[0] == "-" and arg[-1] == "e" and set(arg[1:-1]) <= set("nEru"):
+            if i + 1 == len(args):  # bundled flags ending in -e (`sed -ne 's/x/y/p'`)
+                return False
+            scripts.append(args[i + 1])
+            i += 1
+        elif arg in _SED_FLAGS or (len(arg) > 1 and arg[0] == "-" and set(arg[1:]) <= set("nEru")):
+            pass
+        elif arg.startswith(("-i", "--in-place")):
+            pass  # editing in place writes a file, which sends nothing anywhere
+        elif arg.startswith("-") and arg != "-":
+            return False  # -f reads a script we can't see; anything unknown
+        else:
+            operands.append(arg)
+        i += 1
+    if not scripts:
+        if not operands:
+            return False
+        scripts.append(operands[0])
+    return all(_sed_script(script) for script in scripts)
+
+
+def _sed_script(script: str) -> bool:
+    position = 0
+    while match := _SED_COMMAND.match(script, position):
+        position = match.end()
+        if position == len(script):
+            return True
+        if script[position] not in ";\n":
+            return False
+        position += 1
+        if position == len(script):
+            return True
+    return False
+
+
 def _gh_reads(args: list[str]) -> bool:
     """`gh issue view`, `gh pr list`, `gh api <path>` and the like: no method, field or input."""
     if not args:
@@ -1434,11 +1538,19 @@ def _text_filter(args: list[str]) -> bool:
     return True
 
 
-def _unsandboxed_risk(command: str) -> str | None:
+def _unsandboxed_risk(command: str, cwd: Path | None = None) -> str | None:
     """Why an unsandboxed command must ask the user, or None for the review to judge."""
-    if _AS_ANOTHER_USER.search(command):
+    shell_words = _shell_words(command)
+    if _AS_ANOTHER_USER.search(command) or any(Path(word).name in _OTHER_USER for word, _ in shell_words):
         return "runs a command as another user (sudo)"
     words = [word.removeprefix("~") for word in _WORDS.findall(command)]
+    for word, expands in shell_words:
+        words.append(word.removeprefix("~"))
+        if expands:
+            paths = _expansions(word, cwd or Path.cwd())
+            if paths is None:
+                return "touches credential files (its pattern names too many paths to check)"
+            words += paths
     if any(is_secret_path(word) or _CREDENTIAL_DIRS.search(word) for word in words):
         return "touches credential files"
     if not only_reads(command):
@@ -1446,6 +1558,78 @@ def _unsandboxed_risk(command: str) -> str | None:
             if any(re.search(rf"(^|/){re.escape(rel)}(/|$)", word) for word in words):
                 return f"changes {rel}, which runs code later (hooks, editor or agent settings)"
     return None
+
+
+def _shell_words(command: str) -> list[tuple[str, bool]]:
+    """Each word as the shell reads it, quotes and escapes removed (`~/.s"s"h` is
+    `~/.ssh`, `\\sudo` is `sudo`), and whether the shell expands it: a `~`, variable,
+    brace or glob outside quotes. A command that doesn't parse has no words."""
+    try:
+        lexer = shlex.shlex(command, posix=False, punctuation_chars=";&|()<>")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    words = []
+    for token in tokens:
+        try:
+            word = " ".join(shlex.split(token))
+        except ValueError:
+            word = token
+        unquoted = re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", "", token)
+        words.append((word.strip("`"), bool(_EXPANDS.search(unquoted))))
+    return words
+
+
+def _expansions(word: str, cwd: Path) -> list[str] | None:
+    """The paths a word stands for once the shell expands `~`, variables, braces and
+    globs, as far as they exist now. None when there are too many to check."""
+    found = []
+    patterns = _braces(os.path.expandvars(os.path.expanduser(word)))
+    if patterns is None:
+        return None
+    for pattern in patterns:
+        found.append(pattern)
+        if glob.has_magic(pattern) and os.path.isabs(pattern):
+            found += _credential_spellings(pattern)
+        if glob.has_magic(pattern):
+            where = pattern if os.path.isabs(pattern) else os.path.join(glob.escape(str(cwd)), pattern)
+            matches = list(itertools.islice(glob.iglob(where), _MAX_EXPANSIONS + 1))
+            if len(matches) > _MAX_EXPANSIONS:
+                return None
+            found += matches
+    return found
+
+
+def _credential_spellings(pattern: str) -> list[str]:
+    """`~/.a?s/credentials` read as `~/.aws/credentials`: what a pattern could name even
+    where nothing matches yet. Like the shell, `*` alone doesn't match a dot directory."""
+    parts = pattern.split("/")
+    return [
+        "/".join([*parts[:i], name, *parts[i + 1 :]])
+        for i, part in enumerate(parts)
+        if glob.has_magic(part)
+        for name in _CREDENTIAL_NAMES
+        if (part.startswith(".") or not name.startswith(".")) and fnmatch.fnmatchcase(name, part)
+    ]
+
+
+def _braces(word: str) -> list[str] | None:
+    """`~/.{ssh,aws}/x` as the shell spells it out; None past `_MAX_EXPANSIONS`."""
+    words = [word]
+    while any(_BRACE.search(w) for w in words):
+        spelled = []
+        for w in words:
+            if match := _BRACE.search(w):
+                spelled += [
+                    w[: match.start()] + part + w[match.end() :] for part in match.group(1).split(",")
+                ]
+            else:
+                spelled.append(w)
+        if len(spelled) > _MAX_EXPANSIONS:
+            return None
+        words = spelled
+    return words
 
 
 def default_shell() -> str:

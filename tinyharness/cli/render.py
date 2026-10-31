@@ -132,6 +132,7 @@ PREVIEW_LINES = 3  # of a command's or search's output, under its row
 _PREVIEWED = frozenset({"Bash", "Grep", "Glob"})
 # How a decision the user wasn't asked about is credited, under the call.
 _ALLOWED_BY = {"classifier": "auto mode", "hook": "hook"}
+SCRATCH = "(scratch)"  # how the session's scratch directory is shown: not a real path to type
 LIVE_THOUGHT_LINES = 8  # while the model reasons, the latest lines of it (when shown)
 
 
@@ -245,6 +246,9 @@ class Renderer:
     def __init__(self, console: Console) -> None:
         self.console = console
         self.root: str | None = None  # "<working dir>/"; stripped so paths display relative
+        # "<session scratch dir>/", shown as SCRATCH: the full path buries the file name, and
+        # made scratch work look like it happened somewhere unexpected.
+        self.scratch: str | None = None
         self.meter: UsageMeter | None = None  # the session's, for tokens and cost per turn
         self.last_output: tuple[str, str] | None = None  # (summary, full output) of the last tool
         self.show_thinking = False  # print the model's reasoning, or just how long it took
@@ -253,6 +257,7 @@ class Renderer:
         self._sandbox_explained = False  # the first sandbox block says why; later ones don't
         self._thought: list[str] = []  # reasoning so far in this model call
         self._thought_since: float | None = None
+        self._thought_printed = 0  # chars of it already in the scrollback (shown, finished lines)
         # Embedded: the REPL keeps its input box up during a turn and draws the live region
         # itself (see `live_ansi`); rich's own Live display would fight it for the screen.
         self.embedded = False
@@ -273,15 +278,19 @@ class Renderer:
         self._finished_agents: list[SubagentUpdate] = []  # shown under their Agent/Team call
         self._last_was_row = False  # consecutive tool rows print as one block
 
-    def use_session(self, root: str, meter: UsageMeter, *, show_thinking: bool) -> None:
+    def use_session(
+        self, root: str, meter: UsageMeter, *, show_thinking: bool, scratch: str | None = None
+    ) -> None:
         """Point the reusable terminal renderer at a newly selected conversation."""
         self.root = f"{root.rstrip('/')}/"
+        self.scratch = f"{scratch.rstrip('/')}/" if scratch else None
         self.meter = meter
         self.show_thinking = show_thinking
         self.last_output = None
         self.last_thought = ""
         self.last_thought_shown = False
         self._thought.clear()
+        self._thought_printed = 0
         self._running.clear()
         self._agents.clear()
         self._finished_agents.clear()
@@ -312,9 +321,12 @@ class Renderer:
             # What it has been doing: its last few calls (fewer each when several run).
             each = RECENT_CALLS if len(agents) == 1 else 1
             parts.extend(self._recent_calls(agent, each, frame, last=i == len(agents) - 1))
-        if self.show_thinking and (thought := "".join(self._thought).strip()):
-            tail = "\n".join(thought.splitlines()[-LIVE_THOUGHT_LINES:])
-            parts.append(Padding(Text(tail, style="thinking"), (0, 0, 0, 2)))
+        if self.show_thinking and (writing := "".join(self._thought)[self._thought_printed :].strip()):
+            # Only the line still being written is here (`_flush_thought`). Its end, if it's
+            # longer than the live region can hold: the region is drawn from the top down.
+            room = LIVE_THOUGHT_LINES * max(self.console.width - 4, 20)
+            shown = writing if len(writing) <= room else "…" + writing[-room:]
+            parts.append(Padding(Text(shown, style="thinking"), (0, 0, 0, 2)))
         if self._activity:
             elapsed = int(now - self._activity_since)
             detail = f" · {self._activity_detail}" if self._activity_detail else ""
@@ -387,6 +399,8 @@ class Renderer:
         self._streaming = rest
 
     def _relative(self, text: str) -> str:
+        if self.scratch:
+            text = text.replace(self.scratch, f"{SCRATCH}/").replace(self.scratch.rstrip("/"), SCRATCH)
         if not self.root:
             return text
         return text.replace(self.root, "").replace(self.root.rstrip("/"), ".")
@@ -464,6 +478,8 @@ class Renderer:
         return detail
 
     def _absolute(self, path: str) -> str:
+        if self.scratch and path.startswith(f"{SCRATCH}/"):
+            return f"{self.scratch}{path.removeprefix(f'{SCRATCH}/')}"
         return path if path.startswith(("/", "~")) or not self.root else f"{self.root}{path}"
 
     def _agent_line(
@@ -719,6 +735,8 @@ class Renderer:
                 if self._thought_since is None:
                     self._thought_since = time.monotonic()
                 self._thought.append(text)
+                if self.show_thinking:
+                    self._flush_thought()
                 if self._activity == WAITING:
                     self.wait("Thinking")
             case ModelStuck(reason=reason):
@@ -839,21 +857,40 @@ class Renderer:
         if self._thought_since is None:
             return
         elapsed = time.monotonic() - self._thought_since
-        thought = "".join(self._thought).strip()
-        self._thought, self._thought_since = [], None
+        whole = "".join(self._thought)
+        thought, rest = whole.strip(), whole[self._thought_printed :].strip()
+        started = self._thought_printed > 0
+        self._thought, self._thought_since, self._thought_printed = [], None, 0
         if thought:
             self.last_thought, self.last_thought_shown = thought, self.show_thinking
         if self.show_thinking and thought:
-            self._block(
-                Group(
-                    Text("∴ Thinking", style="subtle"), Padding(Text(thought, style="thinking"), (0, 0, 0, 2))
-                )
-            )
+            if rest:
+                self._print_thought(rest, first=not started)
         elif thought or elapsed >= 1:
             line = Text(f"∴ Thought for {_duration(elapsed)}", style="subtle")
             if thought:
                 line.append(" · ctrl+t to show", style="subtle")
             self._block(line)
+
+    def _flush_thought(self) -> None:
+        """Print the reasoning's finished lines as they come, leaving only the line still being
+        written to the live region. Seen live: the live region showed the last 8 lines, so a
+        long thought lost its top while it streamed."""
+        whole = "".join(self._thought)
+        cut = whole.rfind("\n") + 1
+        if cut <= self._thought_printed:
+            return
+        done = whole[self._thought_printed : cut].strip("\n")
+        if done.strip():
+            self._print_thought(done, first=self._thought_printed == 0)
+        self._thought_printed = cut
+
+    def _print_thought(self, text: str, *, first: bool) -> None:
+        body = Padding(Text(text, style="thinking"), (0, 0, 0, 2))
+        if first:
+            self._block(Group(Text("∴ Thinking", style="subtle"), body))
+        else:
+            self._print(body)
 
     def _doing(self, update: SubagentUpdate) -> str:
         match update.phase:
@@ -891,7 +928,13 @@ class Renderer:
             )
         elif reason == "interrupted":
             self._block(Text("■ Stopped. What should it do instead?", style="warn"))
-        elif self._turn.tools:
+        elif reason == "plan_mode":
+            self._block(
+                Text("⏸ Plan mode kept it from making changes. ", style="warn").append(
+                    "Press shift+tab to switch modes, then tell it to build.", style="muted"
+                )
+            )
+        if reason in ("stop", "plan_mode") and self._turn.tools:
             self._block(self.footer())
 
     def footer(self) -> Text:

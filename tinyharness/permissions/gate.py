@@ -35,6 +35,10 @@ from tinyharness.permissions.modes import PermissionMode
 from tinyharness.permissions.rules import CAPABILITY, DOMAIN, PermissionRules, Rule
 from tinyharness.sandbox.proxy import SERVICE_HOSTS, host_allowed
 
+# What "don't ask again" for an unsandboxed command remembers, so the answer doesn't
+# reach sandboxed commands either. A config rule (`allow = ["Bash"]`) covers both.
+UNSANDBOXED = CAPABILITY + "unsandboxed"
+
 if TYPE_CHECKING:
     from tinyharness.hooks import HookRunner
     from tinyharness.permissions.classifier import PermissionClassifier
@@ -114,6 +118,9 @@ class PermissionGate:
     # Bash and the gate share this set. Remembering a host must expand the sandbox's
     # actual policy too; remembering only the prompt decision leaves later commands blocked.
     session_network_hosts: set[str] = field(default_factory=set, repr=False)
+    # "Don't ask again" answers given while the sandbox was on. They don't carry over to
+    # `/sandbox off`: the person agreed to sandboxed commands, not to any command.
+    sandboxed_grants: set[Rule] = field(default_factory=set, repr=False)
     # The sandbox's allowlist. Reading a page there needs no review, even with outside
     # content in the conversation: it sends the host nothing but the URL.
     allowed_hosts: tuple[str, ...] = ()
@@ -214,6 +221,18 @@ class PermissionGate:
                 if auto_install is not None and not auto_install.allow:
                     return auto_install
                 remembered = auto_install is not None  # this install only: judge the next one again
+            # An install that also needs a new host (Playwright fetching Chrome) is one
+            # question about both, not two in a row. Seen live: "allow browser runtime
+            # installs", then straight away "allow storage.googleapis.com" for the same command.
+            host_too = (
+                not remembered
+                and scoped_escape
+                and escape == sandbox_escape
+                and site is not None
+                and tool.risk(args, path) is None
+            )
+            if host_too and self.rules.check(tool.name, site) == "deny":
+                return Decision(False, "blocked by a deny rule", "rule")
             if not remembered:
                 request = PermissionRequest(
                     agent=self.agent,
@@ -221,8 +240,11 @@ class PermissionGate:
                     args=args,
                     summary=summary or tool.name,
                     path=str(path) if path else None,
-                    remember_label=approval_boundary.remember_label,
-                    warning=approval_boundary.warning + self._outside_warning(),
+                    remember_label=approval_boundary.remember_label
+                    + (f" and {tool.name} for {target_host}" if host_too else ""),
+                    warning=approval_boundary.warning
+                    + (f"; {escape}" if host_too else "")
+                    + self._outside_warning(),
                 )
                 answer = await self._ask(request)
                 if not answer.allow:
@@ -230,12 +252,18 @@ class PermissionGate:
                 install_answer = answer
                 if answer.remember:
                     self.rules.add_allow(Rule(tool.name, capability))
-        match self.rules.check(tool.name, str(path) if path else site):
+                    if host_too:
+                        self._remember(tool, path, trusted, site, args)
+                if host_too:
+                    return answer  # the one answer covered the install and the host
+        target = str(path) if path else site
+        unsandboxed = target is None and tool.runs_unsandboxed(args)
+        match self.rules.check(tool.name, UNSANDBOXED if unsandboxed else target):
             case "deny":
                 return Decision(False, "blocked by a deny rule", "rule")
-            # A blanket rule ("don't ask again for Bash") doesn't cover what must always ask:
-            # deleting files, sudo, credentials (the tool's `risk`).
-            case "allow" if escape is None and (path is not None or site or tool.risk(args, path) is None):
+            case "allow" if escape is None and (
+                target is not None or self._blanket_covers(tool, args, target_host, history_tail)
+            ):
                 return auto_install or Decision(True, "matches an allow rule", "rule")
             case "allow" if scoped_escape:
                 # The remembered rule grants only this sandbox-enforced capability. The
@@ -281,7 +309,7 @@ class PermissionGate:
             )
             answer = await self._ask(request)
             if answer.allow and answer.remember and request.remember_label:
-                self._remember(tool, path, trusted, site)
+                self._remember(tool, path, trusted, site, args)
             return answer
 
         risk = self._auto_risk(tool, args, path, trusted) if self.mode == PermissionMode.AUTO else None
@@ -303,25 +331,54 @@ class PermissionGate:
 
         # Auto mode asks about every risky action case by case: a "don't ask again"
         # would stop it judging the next one (and used to switch modes).
-        case_by_case = risk is not None
+        # So does a blanket rule while outside content could be steering a call that can
+        # send data out: `_blanket_covers` wouldn't honor the answer.
+        case_by_case = risk is not None or (target is None and self.outside() and tool.can_send_out(args))
         request = PermissionRequest(
             agent=self.agent,
             tool=tool.name,
             args=args,
             summary=summary or tool.name,
             path=str(path) if path else None,
-            remember_label="" if case_by_case else self._remember_label(tool, path, trusted, target_host),
+            remember_label=""
+            if case_by_case
+            else self._remember_label(tool, path, trusted, target_host, args),
             reason=risk or "",
             warning=self._outside_warning().removeprefix("; ") if tool.can_send_out(args) else "",
         )
         decision = await self._ask(request)
         if decision.allow and decision.remember and request.remember_label:
-            self._remember(tool, path, trusted, site)
+            self._remember(tool, path, trusted, site, args)
         elif decision.allow and tool.read_only and (site or path is not None):
             # A plain "yes" to reading something covers reading it again this session.
             for name in _readers(tool) if path is not None and not site else (tool.name,):
                 self.rules.add_allow(Rule(name, site or glob.escape(str(path))))
         return decision
+
+    def _blanket_covers(
+        self, tool: Tool[Any], args: dict[str, Any], target_host: str | None, history_tail: str
+    ) -> bool:
+        """Whether a rule for the whole tool ("don't ask again for Bash") covers this call.
+
+        It never covers what must always ask (the tool's `risk`: deleting files, sudo,
+        credentials), an unsandboxed command on the strength of an answer given while the
+        sandbox was on, nor a call that could send data out while outside content is in
+        the conversation: the Rule of Two holds whatever was answered before. Seen in
+        review: with the sandbox off, a remembered `Bash` let `curl -d @src/main.py`
+        through after a WebFetch.
+        """
+        if tool.risk(args, None) is not None:
+            return False
+        if tool.runs_unsandboxed(args) and not any(
+            rule.matches(tool.name, UNSANDBOXED) and rule not in self.sandboxed_grants
+            for rule in self.rules.allow
+        ):
+            return False  # only answers given while the sandbox was on: see `sandboxed_grants`
+        return not (
+            self.outside()
+            and tool.can_send_out(args)
+            and not self._trusted_read(tool, args, target_host, history_tail)
+        )
 
     def _outside_warning(self) -> str:
         """Said when a call could send data out while outside content is in the conversation."""
@@ -583,7 +640,12 @@ class PermissionGate:
     # mode indicator). Anything outside the project is remembered per directory.
 
     def _remember_label(
-        self, tool: Tool[Any], path: Path | None, trusted: bool, host: str | None = None
+        self,
+        tool: Tool[Any],
+        path: Path | None,
+        trusted: bool,
+        host: str | None = None,
+        args: dict[str, Any] | None = None,
     ) -> str:
         if host:
             if bundle := self._network_bundle(tool, host):
@@ -593,6 +655,8 @@ class PermissionGate:
                 return f"allow {len(hosts)} exact destinations declared by /{name} this session"
             return f"allow {tool.name} for {host} this session"
         if path is None:
+            if args is not None and tool.runs_unsandboxed(args):
+                return f"don't ask again for unsandboxed {tool.name} commands this session"
             return f"don't ask again for {tool.name} this session"
         if trusted:
             return "allow all edits in this project for this session"
@@ -600,7 +664,14 @@ class PermissionGate:
             return f"allow reading in {_directory(path)}/ for this session"
         return f"allow {tool.name} in {_directory(path)}/ for this session"
 
-    def _remember(self, tool: Tool[Any], path: Path | None, trusted: bool, site: str | None = None) -> None:
+    def _remember(
+        self,
+        tool: Tool[Any],
+        path: Path | None,
+        trusted: bool,
+        site: str | None = None,
+        args: dict[str, Any] | None = None,
+    ) -> None:
         if site:
             host = site.removeprefix(DOMAIN)
             bundle = self._network_bundle(tool, host)
@@ -610,7 +681,11 @@ class PermissionGate:
                 if tool.name == "Bash":
                     self.session_network_hosts.add(allowed_host)
         elif path is None:
-            self.rules.add_allow(Rule(tool.name))
+            if args is not None and tool.runs_unsandboxed(args):
+                self.rules.add_allow(Rule(tool.name, UNSANDBOXED))
+            elif (rule := Rule(tool.name)) not in self.rules.allow:
+                self.rules.add_allow(rule)
+                self.sandboxed_grants.add(rule)
         elif trusted:
             self.set_mode(PermissionMode.DEFAULT)
         else:

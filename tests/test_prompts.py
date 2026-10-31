@@ -157,3 +157,27 @@ def test_what_changes_per_session_comes_last(tmp_path):
     shared = a[: a.index("# This session")]
     assert b.startswith(shared) and "X" in shared and a.rstrip().endswith(a.splitlines()[-1])
     assert a.splitlines()[-1].startswith("Today's date:")
+
+
+def test_scratch_is_for_throwaway_files_and_what_builds_a_deliverable_stays_with_it(tmp_path):
+    """Seen live: a notebook landed in the project but its 748-line generator went to scratch,
+    deleted at session end, so the notebook couldn't be regenerated or changed from it."""
+    prompt = build_system_prompt(tmp_path, tmp_path / "s", model_name="M", model_id="m", provider="p")
+    assert "scripts and sources that produce them" in prompt
+    assert "only for throwaway files" in prompt and "don't point them here" in prompt
+
+
+def test_an_unfamiliar_name_is_looked_up_before_asking_or_guessing():
+    """Seen live: asked to fine-tune "a laya decision model", the agent asked what laya meant
+    and built the whole brainstorm on a wrong guess, with WebSearch available all along."""
+    prompt = load_prompt("system", **{v: f"<{v}>" for v in PROMPT_VARIABLES["system"]})
+    assert "don't recognize" in prompt and "look it up with WebSearch or WebFetch before asking" in prompt
+    # Seen live next: it looked Laya up, then opened by explaining Laya to the user who named it.
+    assert "for your own understanding" in prompt and "only when\n  the user asked for it" in prompt
+
+
+def test_answers_lead_with_the_answer_and_dont_restate_what_the_user_knows():
+    """Seen live: after looking up "laya", the reply opened with five bullets explaining Laya
+    to the user who had named it, before getting to the use cases they asked for."""
+    prompt = load_prompt("system", **{v: f"<{v}>" for v in PROMPT_VARIABLES["system"]})
+    assert "lead with the answer" in prompt and "Don't restate what the user already knows" in prompt

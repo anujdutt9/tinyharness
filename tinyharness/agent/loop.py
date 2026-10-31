@@ -67,6 +67,7 @@ from tinyharness.llm.textcalls import (
 )
 from tinyharness.llm.types import LLMError, RunawayOutputError, StreamChunk
 from tinyharness.llm.usage import Usage
+from tinyharness.permissions.modes import PermissionMode
 from tinyharness.security import mask_secrets
 from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolOutput, note_outside
 from tinyharness.tools.todo import format_todos
@@ -114,6 +115,14 @@ STEP_LIMIT_NOTE = (
     "what is left unfinished."
 )
 STEP_LIMIT_RESULT = "(not run: the step limit was reached)"
+# Answer to a call plan mode hid, from the main agent. The turn ends there, leaving the
+# switch to build to the user (Done "plan_mode"). Seen live: told only "unknown or
+# unavailable tool", a model decided the session had no write access and printed a whole
+# notebook into its reply instead.
+PLAN_MODE_CALL = (
+    "(not run: plan mode is on, so nothing changes files or runs commands. The turn ended "
+    "here; the user switches modes when they want you to build, and you'll be told)"
+)
 # A tool failing the same way again: the model is told to change approach after NOTE_AT
 # failures in a row. The turn isn't stopped for it; the step limit bounds a loop.
 REPEAT_NOTE_AT = 2
@@ -154,6 +163,9 @@ class LoopDeps:
     # so two never write at the same moment, while their model calls overlap freely.
     write_lock: asyncio.Lock | None = None
     turn_id: str = ""
+    # The main agent's turn: in plan mode, a call to a tool that changes things ends the turn
+    # so the user can choose to build (PLAN_MODE_CALL). A subagent keeps researching instead.
+    plan_handoff: bool = False
 
 
 @dataclass
@@ -172,6 +184,7 @@ class _Batch:
     approved: list[_ApprovedCall] = field(default_factory=list)
     interrupted: bool = False  # the user said "no": skip everything else in this turn
     feedback: str = ""  # ...and optionally told the agent what to do instead
+    build_requested: bool = False  # it called a tool plan mode hides: end the turn after this batch
 
 
 @dataclass
@@ -440,6 +453,9 @@ async def _run_agent_loop(
 
         approved = batch.approved
         if not approved:
+            if batch.build_requested:
+                yield Done(reason="plan_mode")
+                return
             continue
 
         # 4. Run the approved calls. Read-only batches run concurrently.
@@ -506,6 +522,9 @@ async def _run_agent_loop(
             for i, item in enumerate(approved):
                 if i in finished:
                     history.add_tool_result(item.call.id, *finished[i])
+        if batch.build_requested:  # its read-only neighbors ran; now the user decides
+            yield Done(reason="plan_mode")
+            return
 
     # Out of steps. One more reply, without running tools, so the work so far isn't lost:
     # a subagent's answer is its last text, and the caller sees nothing else.
@@ -589,6 +608,13 @@ def _error_kind(output: str) -> str:
     first = re.split(r"[.;]\s", first, maxsplit=1)[0]  # the reason, without the explanation after it
     first = re.sub(r"(['\"`]).*?\1", "…", first)
     return re.sub(r"\d+", "N", first)[:80]
+
+
+def _hidden_by_plan(deps: LoopDeps, name: str) -> bool:
+    """Whether `name` is a tool the session has but plan mode doesn't offer."""
+    everything = {n: t for n in deps.tools.names() if (t := deps.tools.get(n)) is not None}
+    tool = _find_tool(everything, name)
+    return tool is not None and not tool.read_only
 
 
 def _find_tool(available: dict[str, Tool[Any]], name: str) -> Tool[Any] | None:
@@ -873,6 +899,15 @@ async def _prepare_call(
         return
 
     tool = _find_tool(available, call.name)
+    if (
+        tool is None
+        and deps.plan_handoff
+        and deps.gate.mode == PermissionMode.PLAN
+        and _hidden_by_plan(deps, call.name)
+    ):
+        batch.build_requested = True
+        yield reject(PLAN_MODE_CALL)
+        return
     if tool is None:
         yield reject(
             f"error: unknown or unavailable tool {call.name!r}. Available: {', '.join(sorted(available))}"

@@ -185,7 +185,9 @@ class SubagentUpdate:
 class Done:
     """Report why the current turn finished."""
 
-    reason: Literal["stop", "max_steps", "interrupted"] = "stop"
+    # plan_mode: in plan mode it tried to change something; it stopped there for the user
+    # to switch modes (agent/loop.py PLAN_MODE_CALL)
+    reason: Literal["stop", "max_steps", "interrupted", "plan_mode"] = "stop"
 
 
 Event = (

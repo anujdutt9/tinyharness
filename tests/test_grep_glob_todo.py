@@ -204,3 +204,25 @@ async def test_todowrite_skips_the_gate(tmp_path):
     gate = PermissionGate(workspace=Workspace(tmp_path))
     d = await gate.check(TodoWriteTool(), {"todos": []}, target_path=None)
     assert d.allow and d.source == "tool"
+
+
+async def test_grep_searches_a_big_file_named_directly_but_a_walk_still_skips_it(ctx, tmp_path):
+    """Seen live: a 2.2 MB session log was refused ("files up to 2 MB") and the model was
+    told to page through it with Read. A file named directly is what the model wants."""
+    log = tmp_path / "session.jsonl"
+    log.write_text('{"event": "noise"}\n' * 150_000 + '{"event": "routing_decision"}\n')
+    assert log.stat().st_size > 2_000_000
+    out = await call(
+        GrepTool(), {"pattern": "routing_decision", "path": str(log), "output_mode": "content"}, ctx
+    )
+    assert "routing_decision" in out
+    walk = await call(GrepTool(), {"pattern": "routing_decision", "path": str(tmp_path)}, ctx)
+    assert "session.jsonl" not in walk  # in a walk, a file that size is data, not code
+
+
+async def test_a_file_too_big_even_to_name_points_to_rg(ctx, tmp_path, monkeypatch):
+    monkeypatch.setattr("tinyharness.tools.grep.MAX_NAMED_FILE_BYTES", 1_000)
+    log = tmp_path / "huge.log"
+    log.write_text("x" * 5_000)
+    with pytest.raises(ToolError, match=r"Search it with Bash instead.*rg -n 'PATTERN'"):
+        await call(GrepTool(), {"pattern": "x", "path": str(log)}, ctx)

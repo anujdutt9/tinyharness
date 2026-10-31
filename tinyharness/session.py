@@ -83,6 +83,26 @@ from tinyharness.trust import TrustStore
 from tinyharness.workspace import Scratch, Workspace
 
 MAX_SUGGESTION = 120  # chars: a longer "next message" is the model explaining, not a suggestion
+# Told to the model when the conversation doesn't already say which side of plan mode it's
+# on (`_plan_note_says_planning`). Leaving plan mode is the user's switch, as in opencode.
+PLAN_TAG = "<plan-mode>"
+PLAN_ON = (
+    "You are in plan mode: you can read, search and research, but nothing that changes files "
+    "or runs commands is available. Work out the plan with the user: what to change, in which "
+    "files, and how you'll check it. Don't write the finished work (whole files or programs) "
+    "into your reply. When the user wants it built, tell them to switch modes (Shift+Tab in "
+    "the CLI); you'll be told when plan mode is off."
+)
+PLAN_OFF = "Plan mode is off: the tools that change files and run commands are available again."
+
+
+def _plan_note_says_planning(messages: Sequence[Message]) -> bool:
+    """Whether the last plan-mode note in the conversation says plan mode is on."""
+    for message in reversed(messages):
+        content = message.content if message.role == "user" and isinstance(message.content, str) else ""
+        if content.startswith(PLAN_TAG):
+            return content.startswith(PLAN_TAG + PLAN_ON)
+    return False
 
 
 def _one_at_a_time(callback: PermissionCallback | None) -> PermissionCallback | None:
@@ -995,6 +1015,11 @@ class Session:
         if self._sandbox_note:
             prompt = f"<sandbox-changed>{self._sandbox_note}</sandbox-changed>\n\n{prompt}"
             self._sandbox_note = ""
+        # Plan mode hides the tools that change things: say so, or the model can only guess
+        # why they're gone. Read from the conversation each turn rather than remembered:
+        # compaction can summarize the note away, and a resumed session starts with none.
+        if (planning := self.mode == PermissionMode.PLAN) != _plan_note_says_planning(self.history.messages):
+            prompt = f"{PLAN_TAG}{PLAN_ON if planning else PLAN_OFF}</plan-mode>\n\n{prompt}"
 
         deps = LoopDeps(
             llm=self.llm,
@@ -1008,6 +1033,7 @@ class Session:
             max_steps=self.options.max_steps,
             inbox=self.take_steering,
             turn_id=turn_id,
+            plan_handoff=True,
         )
         skill_reads: dict[str, Skill] = {}  # Read calls of a SKILL.md, by call id
         try:

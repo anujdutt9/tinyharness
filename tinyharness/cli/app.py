@@ -28,6 +28,7 @@ from tinyharness.cli.widgets import pick
 from tinyharness.config import note_launch, remember_model
 from tinyharness.paths import pretty_path, source_checkout
 from tinyharness.permissions import PermissionMode
+from tinyharness.sandbox import setup_hint
 from tinyharness.session import MissingAPIKeyError, Session, SessionOptions, list_sessions
 from tinyharness.skills import import_skills
 from tinyharness.trust import TrustStore, scan
@@ -205,8 +206,15 @@ def _attention(session: Session) -> list[Text]:
     """What the compact banner still has to say: things that are off."""
     cfg, out = session.config, []
     if session.sandbox is None and "Bash" in session.tools.names():
-        why = "disabled in config" if not cfg.sandbox.enabled else "not available on this system"
-        out.append(Text.assemble(("⚠ sandbox off", "warn"), (f" · {why} · /sandbox turns it on", "muted")))
+        if cfg.sandbox.enabled:  # wanted but missing: say how to get it, not just that it's off
+            out.append(Text.assemble(("⚠ sandbox off", "warn"), (" · not available on this system", "muted")))
+            out.append(Text.assemble(("  to turn it on: ", "muted"), (setup_hint(), "key")))
+        else:
+            out.append(
+                Text.assemble(
+                    ("⚠ sandbox off", "warn"), (" · disabled in config · /sandbox turns it on", "muted")
+                )
+            )
     if session.project_code.needs_trust and not session.project_trusted:
         out.append(
             Text.assemble(("⚠ this folder's hooks and plugins are off", "warn"), (" · not trusted", "muted"))
@@ -245,6 +253,7 @@ async def run(args: argparse.Namespace, console: Console) -> None:
     if interactive:
         await confirm_needs(session, console)
     renderer.root = f"{session.workspace.root}/"
+    renderer.scratch = f"{session.scratch.dir}/"
     renderer.meter = session.ctx.usage
     renderer.show_thinking = session.config.show_thinking
     try:

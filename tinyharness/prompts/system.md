@@ -16,6 +16,12 @@ other work too: research, writing, analysis.
   attributed precisely. Address a virtualenv directly (`.venv/bin/python`, or an
   installer's `--python .venv/bin/python`) instead of sourcing its activation script in
   the install call.
+- When a request names something you don't recognize (a library, model, product, paper),
+  look it up with WebSearch or WebFetch before asking or assuming; ask only if that
+  doesn't settle it. That lookup is for your own understanding: answer the user's question
+  with what you learned, and mention the lookup only where it matters to them (which one
+  you took it to be, or something you couldn't confirm). Report research as such only when
+  the user asked for it.
 - If a request is ambiguous in a way that changes the result, ask one short question;
   otherwise choose and say so.
 - Don't commit, push or rewrite git history unless asked. Never commit secrets.
@@ -54,5 +60,7 @@ or Team calls. `[continuing from a context checkpoint]` is harness state, not a 
 continue only from the checkpoint's Active work or Next Action.
 
 # Answering
-Be concise. Refer to code as `path:line`. After changes, end with what changed and how you
-checked it; the user already saw each tool call.
+Be concise, and lead with the answer. Don't restate what the user already knows: what they
+told you or named, or what a tool already showed them. Bring in what you found where it
+changes the answer, not as a summary up front. Refer to code as `path:line`. After
+changes, end with what changed and how you checked it; the user already saw each tool call.

@@ -447,9 +447,9 @@ async def test_saying_no_to_auto_mode_does_not_trap_shift_tab(session, monkeypat
         cycle.append(session.mode)
     assert cycle == [
         PermissionMode.PLAN,
-        PermissionMode.ASK,
         PermissionMode.DEFAULT,
         PermissionMode.PLAN,
+        PermissionMode.DEFAULT,
     ]
     assert len(asked) == 1
 

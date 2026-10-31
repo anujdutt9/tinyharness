@@ -85,14 +85,15 @@ async def test_plan_blocks_writes(tmp_path):
     assert not d.allow and d.source == "mode"
 
 
-def test_shift_tab_cycle():
+def test_shift_tab_cycles_default_auto_and_plan():
+    """Ask mode is out of the cycle (`/mode ask`): Shift+Tab from it goes back to default."""
     mode = PermissionMode.ASK
     seen = [mode := mode.next() for _ in range(4)]
     assert seen == [
         PermissionMode.DEFAULT,
         PermissionMode.AUTO,
         PermissionMode.PLAN,
-        PermissionMode.ASK,
+        PermissionMode.DEFAULT,
     ]
 
 

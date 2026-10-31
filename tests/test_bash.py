@@ -14,8 +14,9 @@ from conftest import call, make_ctx
 from tinyharness import process
 from tinyharness.events import ArtifactPresented
 from tinyharness.hooks import Hook, HookRunner
-from tinyharness.permissions import Decision, PermissionGate, PermissionMode, PermissionRules
+from tinyharness.permissions import Decision, PermissionGate, PermissionMode, PermissionRules, Rule
 from tinyharness.permissions.classifier import ClassifierDecision
+from tinyharness.permissions.rules import CAPABILITY
 from tinyharness.sandbox import Sandbox, SandboxPolicy
 from tinyharness.testing import scripted_session
 from tinyharness.tools import bash
@@ -683,25 +684,67 @@ def test_known_local_inspection_cannot_send_out():
     assert not certainly_offline("curl https://x.example")
 
 
-async def test_acquisition_and_new_network_host_are_separate_decisions(tmp_path):
-    tool, user = sandboxed_bash(tmp_path), User()
+async def test_an_install_that_needs_a_new_host_is_one_question_naming_both(tmp_path):
+    """Seen live: "allow browser runtime installs", then straight away "allow
+    storage.googleapis.com" for the same Playwright command. One question names both
+    risks; "for this session" grants both, a plain yes only this command."""
+    tool = sandboxed_bash(tmp_path)
     args = tool.parse(
         {
             "command": "npx -y playwright install chromium-headless-shell",
             "network_host": "storage.example.com",
         }
     )
+
+    async def check(gate):
+        return await gate.check(
+            tool,
+            args.model_dump(),
+            None,
+            target_host=tool.target_host(args),
+            approval_boundary=tool.approval_boundary(args),
+        )
+
+    user = User()
     gate = PermissionGate(workspace=Workspace(tmp_path), callback=user)
-    decision = await gate.check(
+    assert (await check(gate)).allow
+    [request] = user.asked
+    assert (
+        "download and execute new" in request.warning and "connect to storage.example.com" in request.warning
+    )
+    assert request.remember_label.endswith("and Bash for storage.example.com")
+    await check(gate)
+    assert len(user.asked) == 2  # a plain yes covered that command only
+
+    asked = []
+
+    async def remember(request):
+        asked.append(request)
+        return Decision(True, "ok", "user", remember=True)
+
+    gate = PermissionGate(workspace=Workspace(tmp_path), callback=remember)
+    assert (await check(gate)).allow and (await check(gate)).allow
+    assert len(asked) == 1  # the session answer covered both
+
+
+async def test_with_installs_already_allowed_only_the_new_host_is_asked(tmp_path):
+    tool, user = sandboxed_bash(tmp_path), User()
+    args = tool.parse(
+        {"command": "npx -y playwright install chromium", "network_host": "storage.example.com"}
+    )
+    gate = PermissionGate(workspace=Workspace(tmp_path), callback=user)
+    gate.rules.add_allow(Rule("Bash", CAPABILITY + tool.approval_boundary(args).key))
+    await gate.check(
         tool,
         args.model_dump(),
         None,
         target_host=tool.target_host(args),
         approval_boundary=tool.approval_boundary(args),
     )
-    assert decision.allow and len(user.asked) == 2
-    assert "download and execute new" in user.asked[0].warning
-    assert "connect to storage.example.com" in user.asked[1].warning
+    [request] = user.asked
+    assert (
+        "connect to storage.example.com" in request.warning and "download and execute" not in request.warning
+    )
 
 
 async def test_allow_hook_cannot_approve_software_acquisition(tmp_path):
@@ -963,6 +1006,18 @@ async def test_with_the_sandbox_off_default_mode_asks_before_changes_and_runs_re
             "it changes .envrc, which runs code later (hooks, editor or agent settings)",
         ),
         ("rm -rf build", "it deletes files"),
+        # Other spellings of the same thing (found in review)
+        ("cat ~/.ss?/id_*", "it touches credential files"),
+        ("cat ~/.a?s/credentials", "it touches credential files"),
+        ("cat ~/.{ssh,aws}/id_rsa", "it touches credential files"),
+        ('cat ~/.s"s"h/id_rsa', "it touches credential files"),
+        ("cat $HOME/.ssh/id_rsa", "it touches credential files"),
+        ("/usr/bin/sudo make install", "it runs a command as another user (sudo)"),
+        ("`sudo` make install", "it runs a command as another user (sudo)"),
+        ('"sudo" make install', "it runs a command as another user (sudo)"),
+        ("s\\udo make install", "it runs a command as another user (sudo)"),
+        ("cp src/*.py build/", None),  # a glob that names no credentials
+        ("sed -i 's/.*//' notes.txt", None),  # quoted: the shell expands nothing
     ],
 )
 async def test_with_the_sandbox_off_auto_mode_reviews_and_critical_commands_ask(tmp_path, command, reason):
@@ -1053,6 +1108,40 @@ async def test_with_the_sandbox_off_rules_apply_but_not_to_critical_commands(tmp
     assert len(user.asked) == 1  # "allow Bash" doesn't cover deleting files
     deny = PermissionGate(workspace=Workspace(tmp_path), rules=PermissionRules.parse([], ["Bash"], tmp_path))
     assert not (await deny.check(tool, {"command": "ls"}, None)).allow
+
+
+@pytest.mark.parametrize("command", ["rg --pre=sh -e . x.sh", "tree -o ~/.zshrc .", "cat ~/.ss?/id_*"])
+async def test_with_the_sandbox_off_a_reader_that_runs_programs_or_writes_files_asks(tmp_path, command):
+    """Found in review: with the sandbox off, default mode ran these as "a command that
+    only reads". `rg --pre` runs a program; `tree -o` overwrites a file; the glob reads a
+    private key."""
+    decision, asked = await check(
+        tmp_path, unsandboxed(tmp_path), PermissionMode.DEFAULT, {"command": command}
+    )
+    assert decision.allow and len(asked) == 1
+
+
+async def test_dont_ask_again_while_sandboxed_does_not_cover_unsandboxed_commands(tmp_path):
+    """Found in review: a "don't ask again for Bash" given for sandboxed commands kept
+    covering every command after `/sandbox off`."""
+    asked = []
+
+    async def answer(request):
+        asked.append(request)
+        return Decision(True, "ok", "user", remember=True)
+
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.ASK, callback=answer)
+    sandboxed = BashTool(FakeSandbox(), SandboxPolicy(write_roots=(tmp_path,)))
+    await gate.check(sandboxed, {"command": "make"}, None)
+    await gate.check(sandboxed, {"command": "make test"}, None)
+    assert len(asked) == 1
+    await gate.check(unsandboxed(tmp_path), {"command": "make"}, None)
+    assert (
+        len(asked) == 2
+        and asked[1].remember_label == "don't ask again for unsandboxed Bash commands this session"
+    )
+    await gate.check(unsandboxed(tmp_path), {"command": "make test"}, None)
+    assert len(asked) == 2  # the answer given without the sandbox covers commands without it
 
 
 async def test_yes_dont_ask_again_never_covers_critical_commands(tmp_path):
@@ -1229,7 +1318,6 @@ async def test_open_hands_documents_to_the_system_opener(tmp_path, monkeypatch):
         ("ls -la", True),
         ("cat a.txt | grep x | wc -l", True),
         ("git log --oneline", True),
-        ("sqlite3 -readonly app.db 'SELECT 1'", True),
         ("find . -name '*.py'", True),
         ("sqlite3 app.db 'SELECT 1'", False),
         ("sqlite3 -readonly app.db '.output x'", False),
@@ -1240,6 +1328,16 @@ async def test_open_hands_documents_to_the_system_opener(tmp_path, monkeypatch):
         ("echo $(rm x)", False),
         ("find . -delete", False),
         ("python3 script.py", False),
+        # Readers with an option that runs a program or writes a file (found in review)
+        ("rg --pre=sh -e . x.sh", False),
+        ("tree -o ~/.zshrc .", False),
+        ("tree -ao out.txt .", False),
+        ("git diff --output=/tmp/x", False),
+        ("git diff --outp=/tmp/x", False),  # git takes any unambiguous prefix
+        ("find . -fprint0 x", False),
+        ("sqlite3 -readonly app.db 'SELECT 1'", False),  # dot-commands and writefile() run anything
+        ("rg -n TODO src", True),
+        ("tree -L 2", True),
     ],
 )
 def test_only_commands_that_certainly_read_skip_the_write_lock(command, reads):

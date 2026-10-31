@@ -37,6 +37,15 @@ def test_missing_sandbox_has_platform_specific_setup_help(monkeypatch):
     assert "Git Bash" in setup_hint() and "windows-install" in setup_hint()
 
 
+def test_linux_setup_help_names_the_install_command_for_its_package_manager(monkeypatch):
+    """A banner that only says "not available" leaves you to find the packages yourself."""
+    monkeypatch.setattr("tinyharness.sandbox.sys.platform", "linux")
+    monkeypatch.setattr(
+        "tinyharness.sandbox.shutil.which", lambda name: "/usr/bin/dnf" if name == "dnf" else None
+    )
+    assert setup_hint().startswith("sudo dnf install bubblewrap socat ripgrep, then npm install")
+
+
 def test_project_policy_uses_private_scratch_temp_and_tool_caches(tmp_path):
     root = tmp_path / "proj"
     scratch = root / ".tinyharness" / "tmp" / "s1"
