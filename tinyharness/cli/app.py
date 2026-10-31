@@ -166,7 +166,8 @@ def print_banner(console: Console, session: Session, *, compact: bool = False) -
     elif "Bash" in session.tools.names():
         why = "disabled in config" if not cfg.sandbox.enabled else "not available on this system"
         details.add_row(
-            "sandbox", Text.assemble(("off", "warn"), (f" · {why} · every command asks first", "muted"))
+            "sandbox",
+            Text.assemble(("off", "warn"), (f" · {why} · deleting, sudo and credentials ask", "muted")),
         )
     if session.project_code.needs_trust and not session.project_trusted:
         n = len(session.project_code.hooks) + len(session.project_code.plugins)
@@ -205,9 +206,7 @@ def _attention(session: Session) -> list[Text]:
     cfg, out = session.config, []
     if session.sandbox is None and "Bash" in session.tools.names():
         why = "disabled in config" if not cfg.sandbox.enabled else "not available on this system"
-        out.append(
-            Text.assemble(("⚠ sandbox off", "warn"), (f" · {why} · every command asks first", "muted"))
-        )
+        out.append(Text.assemble(("⚠ sandbox off", "warn"), (f" · {why} · /sandbox turns it on", "muted")))
     if session.project_code.needs_trust and not session.project_trusted:
         out.append(
             Text.assemble(("⚠ this folder's hooks and plugins are off", "warn"), (" · not trusted", "muted"))

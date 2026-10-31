@@ -20,6 +20,7 @@ import re
 import shlex
 import shutil
 import sys
+import time
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -29,8 +30,9 @@ from pydantic import Field, ValidationError, field_validator
 
 from tinyharness.process import kill_group
 from tinyharness.sandbox import Sandbox, SandboxPolicy
-from tinyharness.sandbox.proxy import AllowlistProxy, host_allowed
-from tinyharness.security import sanitized_env
+from tinyharness.sandbox.policy import PROTECTED_IN_PROJECT
+from tinyharness.sandbox.proxy import PACKAGE_REGISTRY_HOSTS, AllowlistProxy, host_allowed, service_hosts
+from tinyharness.security import is_secret_path, sanitized_env
 from tinyharness.tools.base import ApprovalBoundary, Tool, ToolContext, ToolInput, note_outside
 
 HEAD_BYTES = 15_000  # output kept from the start...
@@ -85,6 +87,17 @@ _DESTRUCTIVE_COMMANDS = (
     ),
 )
 
+# With the sandbox off, these ask the user even in auto mode: the sandbox no longer stops
+# them, and a review model must not be the only thing between them and your machine.
+_AS_ANOTHER_USER = re.compile(r"(?:^|[;&|()\s])(?:sudo|doas|su)(?=\s|$)")
+_CREDENTIAL_DIRS = re.compile(r"(^|/)\.(ssh|aws|gnupg|kube|azure|docker)(/|$)|(^|/)\.config/(gh|gcloud)(/|$)")
+_WORDS = re.compile(r"[^\s;&|()<>'\"`]+")
+# Programs that fetch from the network: without the proxy's record, their output counts
+# as outside content.
+_MAY_DOWNLOAD = re.compile(
+    r"https?://|(?:^|[;&|()\s])(?:curl|wget|gh|git\s+(?:clone|fetch|pull)|pip3?\s+install|"
+    r"uv\s+(?:pip|add|sync|tool|run)|npm|npx|pnpm|yarn|bun|brew|ssh|scp|rsync)(?=\s|$)"
+)
 _SHELL_OPERATORS = frozenset(";&|()\n")
 _WRAPPERS = {"command", "env", "nohup", "sudo", "time"}
 _SHELL_PREFIXES = {"!", "if", "then", "elif", "else", "while", "until", "do"}
@@ -93,13 +106,27 @@ _WRAPPER_OPTIONS_WITH_VALUES = {
     "sudo": {"-C", "-D", "-g", "-h", "-p", "-R", "-T", "-u"},
     "time": {"-f", "--format", "-o", "--output"},
 }
+# The command makes its own environment first (`uv venv && uv pip install -e .`):
+# creating one ahead of it made `uv venv` fail with "already exists".
+_MAKES_VENV = re.compile(r"(?:^|[;&|()\s])(?:uv\s+venv|\S*python[\d.]*\s+-m\s+venv|virtualenv)(?=\s|$)")
 _DOWNLOAD_AND_EXECUTE = re.compile(
     r"\b(?:curl|wget)\b[^\n]*(?:\||&&|;)\s*(?:sudo\s+)?"
-    r"(?:bash|sh|zsh|python\d*(?:\.\d+)*|node|chmod\s+\+x|\./)\b"
+    r"(?:bash|sh|zsh|python\d*(?:\.\d+)*(?!\s+(?:-\S+\s+)*-c(?:\s|$))|node|chmod\s+\+x|\./)\b"
     r"|\b(?:iwr|irm|invoke-webrequest|invoke-restmethod)\b[^\n]*\|\s*"
     r"(?:iex|invoke-expression)\b",
     re.IGNORECASE,
 )
+_PYTHON_PIPE_INLINE = re.compile(
+    r"\b(?:curl|wget)\b[^\n]*\|\s*(?:sudo\s+)?python\d*(?:\.\d+)*\s+"
+    r"(?:-\S+\s+)*-c\s+(?P<quote>['\"])(?P<code>.*?)(?P=quote)",
+    re.IGNORECASE,
+)
+_EXECUTES_STDIN = re.compile(r"\b(?:exec|eval|compile)\s*\(", re.IGNORECASE)
+_SHELL_REDIRECTION = re.compile(r"^\d*(?:>>?|<<?)(?:&\d+|\S+)$")
+_FD_DUPLICATION = re.compile(r"(?<!\S)\d*[<>]&\d+(?!\S)")
+# Throwing a known local reader's output away cannot send project data anywhere.
+# Keep other redirections conservative: they may read or change a real file.
+_DEVNULL_OUTPUT = re.compile(r"(?<!\S)\d*>>?/dev/null(?!\S)")
 
 
 @dataclass(frozen=True)
@@ -110,15 +137,25 @@ class _SoftwareAcquisition:
     # Token-index paths to absolute Python launchers. A nested path starts with the
     # outer shell/env argument token, then identifies the executable inside it.
     python_launchers: tuple[tuple[int, ...], ...] = ()
+    # Installs only what the project already declares (`uv sync`, `pip install -e .`,
+    # `npm ci`), so there is no new package name to approve.
+    declared: bool = False
 
 
 def _software_acquisition(command: str, cwd: Path | None = None) -> _SoftwareAcquisition | None:
     """Return one boundary covering every acquisition in the complete command."""
     found: list[_SoftwareAcquisition] = []
-    if _DOWNLOAD_AND_EXECUTE.search(command):
+    inline_exec = any(
+        _EXECUTES_STDIN.search(match.group("code")) for match in _PYTHON_PIPE_INLINE.finditer(command)
+    )
+    if _DOWNLOAD_AND_EXECUTE.search(command) or inline_exec:
         found.append(_SoftwareAcquisition("software:bootstrap", "downloaded executable"))
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()\n")
+        # `shlex` otherwise splits `2>&1` into three words and mistakes `&` for a
+        # command boundary. Keep three inert words so launcher token offsets still line
+        # up with the original command when an absolute Python path must be rewritten.
+        parsed_command = _FD_DUPLICATION.sub("--tinyharness-fd --tinyharness-fd --tinyharness-fd", command)
+        lexer = shlex.shlex(parsed_command, posix=True, punctuation_chars=";&|()\n")
         lexer.whitespace = " \t\r"  # an unquoted newline is a command boundary, not a space
         lexer.whitespace_split = True
         tokens = list(lexer)
@@ -140,18 +177,25 @@ def _software_acquisition(command: str, cwd: Path | None = None) -> _SoftwareAcq
     if not found:
         return None
 
-    # A remembered decision must authorize exactly the command the user saw, not only
-    # its first install segment. Include nested/script scopes so changing a PEP 723
-    # dependency also invalidates the earlier approval.
-    material = command + "\0" + "\0".join(item.scope for item in found)
-    digest = hashlib.sha256(material.encode()).hexdigest()[:16]
-    kinds = tuple(dict.fromkeys(item.kind for item in found))
+    pending = [item for item in found if not item.declared] or found
+    kinds = tuple(dict.fromkeys(item.kind for item in pending))
     kind = kinds[0] if len(kinds) == 1 else "software"
+    if any(item.scope.startswith(("software:bootstrap", "software:uv-script")) for item in pending):
+        # Piped installers and PEP 723 scripts are approved per command: changing the
+        # script's dependencies invalidates the earlier approval.
+        material = command + "\0" + "\0".join(item.scope for item in pending)
+        scope = f"software:command:{hashlib.sha256(material.encode()).hexdigest()[:16]}"
+    else:
+        # One yes covers this kind of install for the session. Asking again for every
+        # spelling of `pip install` taught people to click through; the boundary that
+        # matters once outside text can steer the model is the outside-content check.
+        scope = "software:" + "+".join(sorted(kinds))
     return _SoftwareAcquisition(
-        f"software:command:{digest}",
+        scope,
         kind,
         any(item.needs_python_environment for item in found),
         tuple(launcher for item in found for launcher in item.python_launchers),
+        declared=all(item.declared for item in found),
     )
 
 
@@ -331,6 +375,28 @@ def _acquisition_in_segment(
     if not kind:
         return None
 
+    declared = False
+    if kind == "Python package" and uv_script_scope is None and not uv_inline_dependencies:
+        if executable == "uv" and operation == "sync":
+            declared = True
+        elif pip_executable and operation == "install":
+            declared = _declared_python_install(_after_words(args, "install"), cwd)
+        elif executable == "uv" and operation == "pip":
+            files_only = subcommand == "sync"
+            declared = _declared_python_install(_after_words(args, "pip", subcommand), cwd, files_only)
+    elif kind == "JavaScript package":
+        declared = (
+            executable in {"npm", "pnpm", "yarn", "bun"}
+            and operation in {"ci", "i", "install"}
+            and len(positional) == 1
+        )
+    elif kind in {"Ruby package", "PHP package", ".NET package"}:
+        declared = (executable, operation) in {
+            ("bundle", "install"),
+            ("composer", "install"),
+            ("dotnet", "restore"),
+        }
+
     normalized = " ".join(tokens)
     scope = uv_script_scope or f"software:{executable}:{hashlib.sha256(normalized.encode()).hexdigest()[:16]}"
     launcher = (
@@ -338,7 +404,79 @@ def _acquisition_in_segment(
         if python_environment and python_invocation and Path(executable_token).is_absolute()
         else ()
     )
-    return _SoftwareAcquisition(scope, kind, python_environment, launcher)
+    return _SoftwareAcquisition(scope, kind, python_environment, launcher, declared)
+
+
+# pip / uv pip options whose value is a requirements file, an editable path, another
+# package source, or something else that is not a requirement.
+_PIP_FILES = frozenset(
+    {"-r", "--requirement", "-c", "--constraint", "-b", "--build-constraint", "--overrides"}
+)
+_PIP_EDITABLE = frozenset({"-e", "--editable"})
+# Another index is a different source than the one the project declared against.
+_PIP_OTHER_SOURCES = frozenset(
+    {"-i", "--index-url", "--extra-index-url", "--index", "--default-index", "-f", "--find-links"}
+)
+_PIP_VALUES = frozenset(
+    {"-p", "--python", "-t", "--target", "--prefix", "--root", "--cache-dir", "--config-file",
+     "--python-version", "--python-platform", "--platform", "--group", "--extra", "--src",
+     "--no-binary", "--only-binary", "--proxy", "--timeout", "--retries", "--cert",
+     "--client-cert", "--color", "--directory", "--project", "--upgrade-package", "-P"}
+)  # fmt: skip
+_PIP_TAKES_VALUE = _PIP_FILES | _PIP_EDITABLE | _PIP_OTHER_SOURCES | _PIP_VALUES
+
+
+def _after_words(args: list[str], *words: str) -> list[str]:
+    """The arguments after the command words (`install`, or `pip install`)."""
+    lowered = [arg.lower() for arg in args]
+    index = 0
+    for word in words:
+        index = lowered.index(word, index) + 1 if word in lowered[index:] else len(args)
+    return args[index:]
+
+
+def _declared_python_install(args: list[str], cwd: Path | None, files_only: bool = False) -> bool:
+    """Whether a pip install names only local paths and requirement files, no new package.
+
+    An option it doesn't know that takes a value makes that value look like a package
+    name, so the install asks: unknown means not declared.
+    """
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if _SHELL_REDIRECTION.fullmatch(arg):
+            index += 1
+            continue
+        option, equals, value = arg.partition("=")
+        if not equals and arg[:2] in _PIP_TAKES_VALUE and len(arg) > 2 and not arg.startswith("--"):
+            option, equals, value = arg[:2], "=", arg[2:]  # `-rrequirements.txt`, `-e.`
+        takes_value = option in _PIP_TAKES_VALUE
+        if takes_value and not equals:
+            value = args[index + 1] if index + 1 < len(args) else ""
+        index += 2 if takes_value and not equals else 1
+        if option in _PIP_OTHER_SOURCES:
+            return False
+        if option in _PIP_FILES or option in _PIP_EDITABLE:
+            if not _local_requirement(value, cwd, named=False):
+                return False
+        elif not arg.startswith("-") and not _local_requirement(arg, cwd, named=not files_only):
+            return False
+    return True
+
+
+def _local_requirement(value: str, cwd: Path | None, *, named: bool) -> bool:
+    """A requirement that is a path on this machine, not a package on an index.
+
+    With `named`, a bare word is a package name to pip even when a folder of that name
+    exists, so the value must look like a path.
+    """
+    if cwd is None or not value or "://" in value or "@" in value or any(c in value for c in "$`*"):
+        return False
+    text = re.sub(r"\[[^\]]*\]$", "", value)  # extras: `python[all_mps]`
+    if named and not ("/" in text or text.startswith(".") or text.endswith((".whl", ".tar.gz", ".zip"))):
+        return False
+    path = Path(text).expanduser()
+    return (path if path.is_absolute() else cwd / path).exists()
 
 
 _OPTIONS_WITH_VALUES = {
@@ -543,7 +681,7 @@ def _python_install_environment(
         "PATH": str(scripts) + os.pathsep + os.environ.get("PATH", ""),
     }
     command = _rewrite_python_launchers(command, acquisition.python_launchers, selected_python)
-    if create:
+    if create and not _MAKES_VENV.search(command):
         launcher = "python" if sys.platform == "win32" else shlex.quote(sys.executable)
         command = f"{launcher} -m venv {shlex.quote(str(environment))} && {command}"
     return command, env, environment
@@ -615,35 +753,51 @@ class BashTool(Tool[BashInput]):
         proxy: AllowlistProxy | None = None,
         session_hosts: set[str] | None = None,
     ) -> None:
-        self.sandbox = sandbox
         self.policy = policy
         self.shell = shell or default_shell()
-        self.proxy = proxy if sandbox is not None else None
         self.session_hosts = session_hosts if session_hosts is not None else set()
+        self.set_sandbox(sandbox, proxy)
+
+    def set_sandbox(self, sandbox: Sandbox | None, proxy: AllowlistProxy | None = None) -> None:
+        """Run later commands in `sandbox`, or without one. The description changes with it,
+        so the model knows what its commands can reach."""
+        self.sandbox = sandbox
+        self.proxy = proxy if sandbox is not None else None
         network = (
             "network only to package registries (PyPI, npm), GitHub and common CDNs, through a "
             "proxy (/sandbox lists them)"
-            if self.proxy or (sandbox and getattr(sandbox, "manages_network", False) and policy.allowed_hosts)
+            if self.proxy
+            or (sandbox and getattr(sandbox, "manages_network", False) and self.policy.allowed_hosts)
             else "no network access"
         )
         limits = (
             "It runs in a sandbox: it can write only inside the working directory and private "
             f"scratch/cache directories, can't read credential files, and has {network}"
-            + (" (and localhost)" if policy.allow_localhost else "")
+            + (" (and localhost)" if self.policy.allow_localhost else "")
             + ". API key variables are stripped, and apps (`open`, browsers like Chrome.app) can't "
             "start. When a download names a blocked destination, retry once with network_host set "
             "to that exact hostname; approval keeps the command sandboxed. Use structured file/Open "
-            "tools for host actions; Bash never drops containment. Explicit software acquisition "
-            "asks first; run an already-installed executable directly to reuse it without another prompt. "
+            "tools for host actions; Bash never drops containment. Installing what the project declares "
+            "(`uv sync`, `pip install -e .`, `npm ci`) runs freely when it is its own command, apart from "
+            "tests and other steps; naming a new package is reviewed first; run "
+            "an already-installed executable directly to reuse it without another prompt. "
             "A bare Python install uses a writable active environment or a project-local .venv."
             if sandbox
-            else "It runs without a sandbox, so the user approves every command."
+            else "The user turned the sandbox off: commands run as the user, can read and write any "
+            "folder and reach any host, so network_host isn't needed. Commands that delete files, "
+            "use sudo, touch credential files or change files that run code later (git hooks, "
+            "editor settings, .envrc) ask the user first. API key variables are stripped. "
+            "A bare Python install uses a writable active environment or a project-local .venv."
         )
         self.description = (
             "Run a shell command in the working directory and return its combined stdout/stderr "
             "and exit code. Use it to run tests, builds, linters, git and other CLI tools. Each call "
             "starts fresh in the working directory (use `cd dir && ...`); nothing interactive. "
-            "Prefer Read/Grep/Glob/Edit over cat/grep/find/sed for files. "
+            "Commands use ordinary shell semantics: join dependent steps with `&&`, and independent "
+            "probes with `;`. Bash already keeps the beginning and end of large output, so prefer a "
+            "command's own limit flag (`git log -n 3`) over piping into `head` or `tail`. "
+            "To look at files use Read/Grep/Glob, not cat/head/ls/find/grep: they run in parallel, "
+            "never ask, and take paths in any subdirectory. Use Edit over sed. "
             f"{limits}"
         )
 
@@ -658,7 +812,7 @@ class BashTool(Tool[BashInput]):
     def approval_boundary(self, args: BashInput) -> ApprovalBoundary | None:
         project = (self.policy.project_roots or self.policy.write_roots)[0].resolve()
         acquisition = _software_acquisition(args.command, project)
-        if acquisition is None:
+        if acquisition is None or acquisition.declared:
             return None
         if acquisition.needs_python_environment:
             _, _, environment = _python_install_environment(args.command, self.policy)
@@ -671,26 +825,30 @@ class BashTool(Tool[BashInput]):
             acquisition.scope,
             f"this command can download and execute new {acquisition.kind} code; "
             f"it will write only to {location}",
-            f"allow this {acquisition.kind} acquisition for this session",
+            f"allow {acquisition.kind} installs for this session",
         )
 
-    def writes(self, args: BashInput) -> bool:
-        return not only_reads(args.command)
+    def writes(self, args: BashInput | dict[str, Any]) -> bool:
+        command = (
+            args.command if isinstance(args, BashInput) else str(args.get("command", ""))
+        )  # the gate's raw args
+        return not (only_reads(command) or certainly_offline(command))
 
     def contained(self, args: dict[str, Any]) -> bool:
         return self.sandbox is not None
 
     def can_send_out(self, args: dict[str, Any]) -> bool:
-        """The sandbox's allowlist is still an outbound channel for readable project data."""
-        return self.sandbox is None or bool(
-            self.policy.allowed_hosts or self.session_hosts or self._network_host(args)
-        )
+        """The sandbox's allowlist is still an outbound channel for readable project data,
+        except for plain downloads: they send an allowed host nothing but the URL."""
+        if self.sandbox is None:  # any host: only a command that can't use the network is safe
+            return not certainly_offline(str(args.get("command", "")))
+        if not (self.policy.allowed_hosts or self.session_hosts or self._network_host(args)):
+            return False
+        return bool(self._network_host(args)) or not network_reads_only(str(args.get("command", "")))
 
     def escapes(self, args: dict[str, Any]) -> str | None:
-        if self.sandbox is None:
-            return (
-                "no sandbox backend is active: this command can use the network and change any of your files"
-            )
+        if self.sandbox is None:  # off is the user's choice (/sandbox): there's nothing to escape
+            return None
         host = self._network_host(args)
         if host and not self._host_is_allowed(host):
             return (
@@ -721,13 +879,60 @@ class BashTool(Tool[BashInput]):
         for pattern, reason in _DESTRUCTIVE_COMMANDS:
             if pattern.search(command):
                 return reason
-        return None if self.sandbox else "runs a shell command without a sandbox"
+        return None if self.sandbox else _unsandboxed_risk(command)
 
     async def run(self, args: BashInput, ctx: ToolContext) -> str:
+        started = time.time()
         run = await self.execute(args, ctx)
-        if run.reached:  # what it downloaded is outside content (a README can carry instructions)
-            note_outside(ctx, f"Bash downloads from {', '.join(run.reached[:3])}")
-        return self._report(run.output, run.code, run.timed_out, args, run.sandboxed, run.blocked)
+        reached = run.reached
+        if _installs_declared_only(args.command, self.policy):
+            # Installing what the project declares is authorized project setup inside the
+            # sandbox, not new outside content: the repo's authors chose those packages. A
+            # new package name still counts: its build and its code can print or plant text.
+            reached = [host for host in reached if not host_allowed(host, PACKAGE_REGISTRY_HOSTS)]
+        if reached:  # what it downloaded is outside content (a README can carry instructions)
+            note_outside(ctx, f"Bash downloads from {', '.join(reached[:3])}")
+        elif (
+            not run.sandboxed
+            and _MAY_DOWNLOAD.search(args.command)
+            and not _installs_declared_only(args.command, self.policy)
+        ):
+            # No proxy says which hosts it reached: anything that looks like a download counts.
+            note_outside(ctx, "Bash network use (no sandbox)")
+        notes = self._cached_python_notes(args.command, started) if run.sandboxed else ()
+        return self._report(run.output, run.code, run.timed_out, args, run.sandboxed, run.blocked, notes)
+
+    def _cached_python_notes(self, command: str, since: float) -> tuple[str, ...]:
+        """Say so when a new virtualenv's Python lives in the private sandbox cache.
+
+        Seen live: `uv venv -p 3.12` downloaded Python into the sandbox cache, so the
+        project's .venv worked from the user's terminal and IDE only while that cache lasted.
+        """
+        cache = self.policy.cache_dir
+        if cache is None or "uv" in self.policy.shared_caches or not _MAKES_VENV.search(command):
+            return ()
+        notes = []
+        for root in self.policy.project_roots:
+            for config in (*root.glob("*/pyvenv.cfg"), *root.glob("*/*/pyvenv.cfg")):
+                try:
+                    if config.stat().st_mtime < since - 1:
+                        continue
+                    home = next(
+                        (line.partition("=")[2].strip() for line in config.read_text().splitlines()
+                         if line.partition("=")[0].strip() == "home"),
+                        "",
+                    )  # fmt: skip
+                except OSError:
+                    continue
+                if home and Path(home).resolve().is_relative_to(cache):
+                    notes.append(
+                        f"[tinyharness:venv_uses_sandbox_python path={config.parent}] Tell the user: this "
+                        "virtualenv works from their own terminal and IDE, but its Python is stored in "
+                        f"tinyharness's private sandbox cache ({cache}), so clearing that cache breaks it. "
+                        'To keep uv\'s Pythons where uv normally keeps them, set `share_caches = ["uv"]` '
+                        "under [sandbox] in ~/.tinyharness/config.toml and recreate the venv."
+                    )
+        return tuple(notes)
 
     async def execute(self, args: BashInput, ctx: ToolContext) -> Execution:
         """Run the command; what it printed and how it ended, before any notes are added."""
@@ -737,7 +942,10 @@ class BashTool(Tool[BashInput]):
         policy, denied_before, reached_before = self.policy, 0, 0
         active_proxy = self.proxy
         temporary_proxy = False
-        added_hosts = (*sorted(self.session_hosts), *((args.network_host,) if args.network_host else ()))
+        added_hosts = (
+            *sorted(self.session_hosts),
+            *(service_hosts(args.network_host) if args.network_host else ()),
+        )
         if sandboxed and added_hosts:
             localhost = "localhost" in added_hosts
             remote_hosts = tuple(host for host in added_hosts if host != "localhost")
@@ -815,6 +1023,31 @@ class BashTool(Tool[BashInput]):
         code = None if timed_out else proc.returncode
         return Execution(output.text(), code, timed_out, sandboxed, blocked, reached)
 
+    def _blocked_path(self, text: str) -> tuple[str, bool]:
+        """The path a denied write named, and whether it is a protected one (.git/hooks).
+
+        A path outside every writable root counts, and so does a protected path inside
+        one, even relative (`pre-commit install` reports `.git/hooks/pre-commit`).
+        """
+        roots = self.policy.write_roots
+        for match in _DENIED_PATH.finditer(text):
+            path = Path(next(group for group in match.groups() if group))
+            if self._protected(path):
+                return str(path), True
+            if path.is_absolute() and not any(path == root or path.is_relative_to(root) for root in roots):
+                return str(path), False
+        return "", False
+
+    def _protected(self, path: Path) -> bool:
+        if path.is_absolute() and any(path == p or path.is_relative_to(p) for p in self.policy.protected):
+            return True
+        parts = path.parts
+        for rel in PROTECTED_IN_PROJECT:
+            want = Path(rel).parts
+            if any(parts[i : i + len(want)] == want for i in range(len(parts) - len(want) + 1)):
+                return True
+        return False
+
     def _report(
         self,
         text: str,
@@ -823,6 +1056,7 @@ class BashTool(Tool[BashInput]):
         args: BashInput,
         sandboxed: bool,
         blocked: list[str] | None = None,
+        notes: tuple[str, ...] = (),
     ) -> str:
         text = text.rstrip() or "(no output)"
         if blocked:
@@ -845,12 +1079,33 @@ class BashTool(Tool[BashInput]):
                 "local test, preview, or development server, retry with network_host='localhost'; "
                 "do not change the command's containment."
             )
-        elif sandboxed and denied:
+        elif sandboxed and denied and (protected := self._blocked_path(text))[1]:
+            # Seen live: `pre-commit install` hit .git/hooks; nothing said only the user can.
             text += (
-                "\n[tinyharness:filesystem_or_process_denied] This command stayed sandboxed. "
-                "Use the working directory, $TMPDIR, or an explicitly configured writable root; "
-                "do not retry outside containment."
+                f"\n[tinyharness:protected_path_denied path={protected[0]}] This command stayed "
+                f"sandboxed. {protected[0]} is protected: git hooks and config and tinyharness's own "
+                "settings run code later, outside the sandbox, so no sandboxed command may change them. "
+                "Don't look for a way around it: tell the user the exact command to run in their own "
+                "terminal for this step (for example `pre-commit install`), and carry on without it."
             )
+        elif sandboxed and denied:
+            path, _ = self._blocked_path(text)
+            text += (
+                f"\n[tinyharness:filesystem_or_process_denied{f' path={path}' if path else ''}] "
+                "This command stayed sandboxed. Use the working directory, $TMPDIR, or an explicitly "
+                "configured writable root; do not retry outside containment."
+            )
+            if path and _is_home_dot_dir(path):
+                # Seen live: SGLang hard-codes ~/.cache/sglang instead of following XDG.
+                text += (
+                    f" The tool writes {path} directly instead of following $XDG_CACHE_HOME, which "
+                    "already points at a writable sandbox cache. Find the variable that sets this "
+                    "folder (most tools have one, like FOO_CACHE_DIR or FOO_HOME) and point it beneath "
+                    "$XDG_CACHE_HOME. If you have a Memory tool, save that variable there so later "
+                    "sessions set it from the start."
+                )
+        for note in notes:
+            text += f"\n{note}"
         # The outcome goes last: the CLI reads it from the final line (a failed test run
         # showed as passing when this note came after it).
         if timed_out:
@@ -890,16 +1145,333 @@ def only_reads(command: str) -> bool:
     return True
 
 
+# Shell builtins that may sit beside a declared install without running another program.
+# `source` is deliberately absent: an activation-looking script can execute anything.
+_SETUP_STEPS = frozenset({"cd", "export", "true"})
+# Local file and text tools that have no way to reach the network themselves.
+_LOCAL_STEPS = frozenset(
+    {"cp", "mv", "mkdir", "touch", "ln", "sed", "awk", "sort", "uniq", "uname", "date", "sleep", "false"}
+)
+# git subcommands that only touch the local repository (not fetch, pull, clone, push).
+_GIT_LOCAL = _GIT_READS | {"checkout", "switch", "restore", "add", "branch", "reset", "stash"}
+
+
+def _installs_declared_only(command: str, policy: SandboxPolicy) -> bool:
+    """Whether the command is project setup: declared installs, plus steps that can't fetch.
+
+    Traffic is attributed to the whole command, so any other step (`npm view x`, a
+    `python -c` that makes a request) keeps the registry hosts as outside content.
+    """
+    # shlex preserves legacy command substitutions as ordinary text. Reject them before
+    # deciding that a builtin or local reader cannot have fetched the registry traffic.
+    if "`" in command:
+        return False
+    cwd: Path | None = (policy.project_roots or policy.write_roots)[0].resolve()
+    try:
+        lexer = shlex.shlex(_FD_DUPLICATION.sub("", command), posix=True, punctuation_chars=";&|()\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    # A subshell's steps are judged like any others: `(cd x && uv sync)` is setup, and
+    # `uv sync && (curl ...)` still has a step that fetches.
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token and set(token) <= _SHELL_OPERATORS:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    installs = 0
+    for segment in (item for item in segments if item):
+        words = [word for word in segment if not _SHELL_REDIRECTION.fullmatch(word)]
+        name = Path(words[0]).name if words else ""
+        if (
+            name in _SETUP_STEPS
+            or name in _READERS
+            or name in _LOCAL_STEPS
+            or (name == "git" and len(words) > 1 and words[1] in _GIT_LOCAL)
+            or (name in {"source", "."} and len(words) == 2 and words[1].endswith("/bin/activate"))
+            or _MAKES_VENV.search(" ".join(words))
+        ):
+            pass
+        elif (acquisition := _acquisition_in_segment(segment, cwd)) is not None and acquisition.declared:
+            installs += 1
+        else:
+            return False
+        cwd = _directory_after(segment, cwd)
+    return installs > 0
+
+
+def certainly_offline(command: str) -> bool:
+    """Whether every command is a known local reader that cannot use the network.
+
+    This is narrower than "read-only": arbitrary programs may read files and send them out.
+    It lets outside content coexist with local inspection such as `which cargo; ls bin | head`.
+    """
+    command = _DEVNULL_OUTPUT.sub("", _FD_DUPLICATION.sub("", command))
+    if any(marker in command for marker in ("`", "$(", "<", ">", "(", ")", "{")):
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|\n")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token and set(token) <= _SHELL_OPERATORS:
+            if segments[-1]:
+                segments.append([])
+        else:
+            segments[-1].append(token)
+    return bool(segments and any(segments)) and all(_offline_step(words) for words in segments if words)
+
+
+def _offline_step(words: list[str]) -> bool:
+    """One step of `certainly_offline`: a known local reader."""
+    name, rest = words[0], words[1:]
+    if name in _READERS:
+        return True
+    if name == "find" and not _FIND_WRITES.intersection(rest):
+        return True
+    if (
+        name == "git"
+        and rest[:1]
+        and (rest[0] in _GIT_READS or (rest[0] == "remote" and rest[1:] in (["-v"], ["--verbose"])))
+    ):
+        return True
+    if name in {"cd", "test", "[", "[["}:
+        return True
+    return name in {"python", "python3", "uv", "conda", "cargo", "rustc"} and rest in (["--version"], ["-V"])
+
+
+# Variables a plain download may name: loop variables, and these, which hold paths the
+# harness set rather than anything read from a file.
+_PATH_VARIABLES = frozenset({"TMPDIR", "HOME", "PWD", "XDG_CACHE_HOME"})
+_VARIABLE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
+# Text tools that cannot open a connection (awk is absent: gawk reads /inet/tcp files).
+_TEXT_STEPS = frozenset(
+    {"sed", "sort", "uniq", "tee", "base64", "shasum", "md5", "mkdir", "touch", "true", "sleep"}
+)
+_CURL_FLAGS = frozenset("sSfLiIvO")
+_CURL_LONG = frozenset(
+    {"--silent", "--show-error", "--fail", "--fail-with-body", "--location", "--include", "--head",
+     "--compressed", "--verbose", "--remote-name", "--globoff"}
+)  # fmt: skip
+_CURL_VALUES = frozenset(
+    {
+        "-o",
+        "--output",
+        "-m",
+        "--max-time",
+        "--connect-timeout",
+        "--retry",
+        "--retry-delay",
+        "-w",
+        "--write-out",
+    }
+)
+_WGET_FLAGS = frozenset("qv")
+_WGET_VALUES = frozenset({"-O", "--output-document", "-T", "--timeout", "-t", "--tries"})
+_GH_READS = {
+    "issue": {"list", "view", "status"},
+    "pr": {"list", "view", "diff", "checks", "status"},
+    "repo": {"view"},
+    "release": {"list", "view"},
+    "run": {"list", "view"},
+}
+_GH_API_OPTIONS = frozenset({"--jq", "-q", "--paginate", "--slurp", "-R", "--repo"})
+# What a `python -c` text filter may import. With no other module, no dunder names and no
+# dynamic imports or evaluation it has no way to open a connection.
+_FILTER_MODULES = frozenset(
+    {"json", "sys", "re", "textwrap", "collections", "itertools", "datetime", "math", "csv", "html", "pprint"}
+)
+_FILTER_FORBIDDEN = ("__", "importlib", "exec", "eval", "compile", "getattr", "globals", "vars(", "modules")
+_IMPORTS = re.compile(r"\b(?:from\s+([\w.]+)\s+import|import\s+([\w., ]+))")
+
+
+def network_reads_only(command: str) -> bool:
+    """Whether every step reads: a local reader, or a plain download of literal URLs.
+
+    Once outside content is in the conversation, a call that could send project data out
+    is reviewed (permissions/gate.py). A plain download sends nothing but the URL it
+    names, and only to a host the sandbox already allows; what it fetches is outside
+    content all the same. Seen live: 34 of 65 auto-mode reviews were `curl` reads of
+    GitHub issues and docs, each one waiting on a model.
+    """
+    command = _DEVNULL_OUTPUT.sub("", _FD_DUPLICATION.sub("", command))
+    if "`" in command or "$(" in command:
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|\n<>()")
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False
+    segments: list[list[str]] = [[]]
+    expect_target = False
+    for token in tokens:
+        if expect_target:  # the file after `>`: writing a file sends nothing anywhere
+            expect_target = False
+            continue
+        if token in (">", ">>"):
+            expect_target = True
+        elif token in (";", "&&", "||", "|", "\n"):
+            if segments[-1]:
+                segments.append([])
+        elif token and set(token) <= set(";&|\n<>()"):
+            return False  # input redirection, subshells, background jobs
+        else:
+            segments[-1].append(token)
+    if expect_target or not any(segments):
+        return False
+    variables = set(_PATH_VARIABLES)
+    for words in (segment for segment in segments if segment):
+        if words[0] == "do":
+            words = words[1:]
+        if not words or words == ["done"]:
+            continue
+        if words[0] == "for":
+            if len(words) < 3 or words[2] != "in" or not words[1].isidentifier():
+                return False
+            variables.add(words[1])
+            if any("$" in word for word in words[3:]):
+                return False
+            continue
+        if any(name not in variables for word in words for name in _variables(word)):
+            return False
+        if not _reading_step(words):
+            return False
+    return True
+
+
+def _variables(word: str) -> list[str]:
+    return [braced or bare for braced, bare in _VARIABLE.findall(word)]
+
+
+def _reading_step(words: list[str]) -> bool:
+    name, rest = words[0], words[1:]
+    if _offline_step(words) or name in _TEXT_STEPS:
+        return True
+    if name == "curl":
+        return _plain_options(rest, _CURL_FLAGS, _CURL_LONG, _CURL_VALUES)
+    if name == "wget":
+        return _plain_options(rest, _WGET_FLAGS, frozenset({"--quiet", "-nv"}), _WGET_VALUES)
+    if name == "gh":
+        return _gh_reads(rest)
+    if Path(name).name in {"python", "python3"} or re.fullmatch(r"python3\.\d+", Path(name).name):
+        return _text_filter(rest)
+    return False
+
+
+def _plain_options(
+    args: list[str], flags: frozenset[str], long: frozenset[str], values: frozenset[str]
+) -> bool:
+    """Only output, timing and redirect options, and at least one http(s) URL."""
+    urls = 0
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith("--"):
+            if arg.split("=", 1)[0] in values:
+                i += 1 if "=" in arg else 2
+                continue
+            if arg not in long:
+                return False
+        elif arg.startswith("-") and len(arg) > 1:
+            letters = arg[1:]
+            for k, letter in enumerate(letters):
+                if f"-{letter}" in values:  # its value is the rest of the word, or the next word
+                    i += k == len(letters) - 1
+                    break
+                if letter not in flags:
+                    return False
+        elif re.match(r"https?://", arg):
+            urls += 1
+        else:
+            return False
+        i += 1
+    return urls > 0
+
+
+def _gh_reads(args: list[str]) -> bool:
+    """`gh issue view`, `gh pr list`, `gh api <path>` and the like: no method, field or input."""
+    if not args:
+        return False
+    if args[0] == "search":
+        return True
+    if args[0] != "api":
+        return len(args) > 1 and args[1] in _GH_READS.get(args[0], set())
+    positional = []
+    i = 1
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith("-"):
+            option = arg.split("=", 1)[0]
+            if option not in _GH_API_OPTIONS:
+                return False
+            i += option not in {"--paginate", "--slurp"} and "=" not in arg
+        else:
+            positional.append(arg)
+        i += 1
+    return len(positional) == 1
+
+
+def _text_filter(args: list[str]) -> bool:
+    """`python3 -c '...'` that only reshapes text: standard modules that can't connect."""
+    if len(args) < 2 or args[0] != "-c":
+        return False
+    code = args[1]
+    if any(word in code for word in _FILTER_FORBIDDEN):
+        return False
+    for source, names in _IMPORTS.findall(code):
+        modules = [source] if source else [name.strip().split(" ")[0] for name in names.split(",")]
+        if any(module.split(".")[0] not in _FILTER_MODULES for module in modules if module):
+            return False
+    return True
+
+
+def _unsandboxed_risk(command: str) -> str | None:
+    """Why an unsandboxed command must ask the user, or None for the review to judge."""
+    if _AS_ANOTHER_USER.search(command):
+        return "runs a command as another user (sudo)"
+    words = [word.removeprefix("~") for word in _WORDS.findall(command)]
+    if any(is_secret_path(word) or _CREDENTIAL_DIRS.search(word) for word in words):
+        return "touches credential files"
+    if not only_reads(command):
+        for rel in PROTECTED_IN_PROJECT:
+            if any(re.search(rf"(^|/){re.escape(rel)}(/|$)", word) for word in words):
+                return f"changes {rel}, which runs code later (hooks, editor or agent settings)"
+    return None
+
+
 def default_shell() -> str:
     return shutil.which("bash") or shutil.which("sh") or "/bin/sh"
 
 
 def shell_argv(shell: str, command: str) -> list[str]:
-    """Run command chains fail-fast, including failures hidden in pipelines."""
-    name = Path(shell).name.lower()
-    if name in {"bash", "zsh"} or name.startswith("bash"):
-        return [shell, "-e", "-o", "pipefail", "-c", command]
-    return [shell, "-e", "-c", command]
+    """Run with the shell's ordinary command-list and pipeline semantics."""
+    return [shell, "-c", command]
+
+
+# Where a denied write says what it tried: Python's `Operation not permitted: '/x'` and
+# BSD tools' `mkdir: /x: Operation not permitted`.
+_DENIED_PATH = re.compile(
+    r"(?:Operation not permitted|Permission denied): '([^']+)'"
+    r"|(/[^\s:'\"]+): (?:Operation not permitted|Permission denied)"
+)
+
+
+def _is_home_dot_dir(path: str) -> bool:
+    """Under a hidden folder in the home directory (~/.cache/x, ~/.triton/x), where tools keep caches."""
+    try:
+        parts = Path(path).relative_to(Path.home()).parts
+    except ValueError:
+        return False
+    return len(parts) >= 2 and parts[0].startswith(".")
 
 
 class _Capture:

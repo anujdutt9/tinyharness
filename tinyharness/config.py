@@ -73,6 +73,10 @@ class SandboxSettings(BaseModel):
     # registries, GitHub and script CDNs by default. `*.example.com` covers subdomains.
     # [] turns the network off entirely. Add other exact destinations deliberately.
     allow_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))
+    # Caches to share with your own terminal instead of a private copy: "uv", "pip", "npm",
+    # "huggingface", "torch". Saves downloading and compiling twice; in exchange, a sandboxed
+    # command can change what those tools load later, outside the sandbox.
+    share_caches: list[Literal["uv", "pip", "npm", "huggingface", "torch"]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _required_is_enabled(self) -> SandboxSettings:
@@ -82,11 +86,12 @@ class SandboxSettings(BaseModel):
 
 
 class ModelRoles(BaseModel):
-    """Active-provider model IDs for classifier, search digestion, and compaction."""
+    """Active-provider model IDs for the classifier and its review, search digestion, and compaction."""
 
     model_config = ConfigDict(extra="forbid")
 
     safety_classifier: str | None = None
+    safety_review: str | None = None  # the classifier's careful second stage; unset: the active model
     search_digest: str | None = None
     compaction: str | None = None
 
@@ -101,9 +106,9 @@ class ExtensionSettings(BaseModel):
     """`[extensions]`: which extensions to load, and a table of settings for each.
 
     [extensions]
-    enabled = ["web", "agents"]
-    [extensions.web]
-    max_results = 5
+    enabled = ["agents", "hello"]
+    [extensions.hello]
+    greeting = "hi"
     """
 
     model_config = ConfigDict(extra="allow")

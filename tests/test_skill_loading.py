@@ -111,9 +111,7 @@ async def test_invoked_skill_registers_its_exact_network_set(session):
     skill.network_hosts = ["assets.example.com", "fonts.example.com"]
     play(session, ["ok"])
     await events(session, "please use /claude-design-skill")
-    assert session.gate.network_bundles == {
-        "claude-design-skill": ("assets.example.com", "fonts.example.com")
-    }
+    assert session.gate.network_bundles["claude-design-skill"] == ("assets.example.com", "fonts.example.com")
 
 
 async def test_the_model_reading_a_skill_file_is_shown(session):

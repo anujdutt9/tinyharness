@@ -56,6 +56,22 @@ def profile(policy: SandboxPolicy) -> str:
             '(allow network-bind network-inbound (local ip "localhost:*"))',
             '(allow network-outbound (remote ip "localhost:*"))',
         ]
+    if policy.write_roots:
+        # Unix sockets the command makes itself, in folders it may write: ZMQ `ipc://`,
+        # multiprocessing and language servers. `network*` covers them too, and SGLang's
+        # engine failed to reach its own scheduler (seen live). Sockets elsewhere, such as
+        # Docker's ~/.docker/run/docker.sock, stay closed. (A port can't be carved back out of
+        # loopback: Seatbelt lets `localhost:*` win over a later `localhost:2375` deny.)
+        lines.append(
+            _rule(
+                "allow network-bind network-outbound",
+                [
+                    f"({end} unix-socket {_subpath(root)})"
+                    for root in policy.write_roots
+                    for end in ("local", "remote")
+                ],
+            )
+        )
     lines += ["", "; writes: only inside the write roots", "(deny file-write*)"]
     lines.append(_rule("allow file-write*", [*map(_subpath, policy.write_roots), _DEVICES]))
     if policy.protected:

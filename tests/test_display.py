@@ -202,12 +202,101 @@ def test_who_allowed_a_call_without_asking_is_credited_under_it(renderer):
     assert row.endswith("no output") and credit.strip() == "⎿ auto mode · read-only listing"
 
 
-def test_failed_commands_show_why_underneath(renderer):
+def test_nonzero_commands_are_neutral_and_keep_their_evidence(renderer):
+    """Seen live: every nonzero subprocess looked like a tinyharness crash to new users."""
     output = "> build\nsrc/app.ts(12,5): error TS2322: bad type\n(exit code 2)"
     replay(renderer, ("Bash(npm run build)", "Bash", {"command": "npm run build"}, output, False))
     row, *why = shown(renderer)
-    assert row.startswith("✗ Bash    npm run build") and row.endswith("exit 2")
+    assert row.startswith("· Bash    npm run build") and row.endswith("exit 2")
     assert [line.strip() for line in why] == ["⎿ > build", "src/app.ts(12,5): error TS2322: bad type"]
+
+
+def test_no_output_nonzero_command_is_neutral(renderer):
+    """Seen live: a grep with no match showed as a red `exit 1` though the tool worked."""
+    command = 'cd sglang && grep -rn "apple silicon" docs'
+    output = "(no output)\n(exit code 1)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    row, *preview = shown(renderer)
+    assert row.startswith("· Bash") and row.endswith("exit 1")
+    assert preview == []
+
+
+def test_status_queries_need_no_command_specific_outcome_parser(renderer):
+    for command in ("which missing && which python", "grep -rn x docs"):
+        replay(renderer, (f"Bash({command})", "Bash", {"command": command}, "(exit code 1)", False))
+    rows = shown(renderer)
+    assert all(row.startswith("· Bash") and row.endswith("exit 1") for row in rows)
+
+
+def test_installing_pytest_is_not_a_test_run(renderer):
+    """Seen live: `uv pip install -e ".[srt_mps]" pytest pre-commit` counted as a test run,
+    so a failed build showed `exit 1` (not `build failed`) and the footer said tests ✗."""
+    command = 'cd python && uv pip install -e ".[srt_mps]" pytest pre-commit 2>&1 | tail -15'
+    output = "hint: Build failures usually indicate a problem with the package\n(exit code 1)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    renderer.handle(Done())
+    lines = shown(renderer)
+    assert lines[0].endswith("build failed") and "tests" not in lines[-1]
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["pytest -q", "uv run pytest -x", ".venv/bin/python -m pytest tests", "cd py && python3.12 -m unittest",
+     "FOO=1 npx jest", "npm test", "cargo test", "ls && ../.venv/bin/pytest --co | tail -3"],
+)  # fmt: skip
+def test_a_step_that_runs_tests_is_a_test_run(command):
+    from tinyharness.cli.render import _is_test_command, _RunningTool
+
+    assert _is_test_command(_RunningTool(f"Bash({command})", {"command": command}))
+
+
+def test_a_sandbox_block_in_a_command_that_runs_tests_is_still_a_block(renderer):
+    """Seen live: `import sglang` hit ~/.cache/sglang in a command that also ran
+    `pytest --co`; the tests never ran, so the row should say the sandbox blocked it."""
+    from pathlib import Path
+
+    blocked = Path.home() / ".cache" / "sglang"
+    command = ".venv/bin/python -c 'import sglang'; .venv/bin/python -m pytest test --co"
+    output = (
+        f"PermissionError: Operation not permitted: '{blocked}'\n"
+        f"[tinyharness:filesystem_or_process_denied path={blocked}] This command stayed sandboxed.\n"
+        "(exit code 1)"
+    )
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    assert shown(renderer)[0].endswith("sandbox blocked a write to ~/.cache/sglang")
+
+
+def test_a_protected_path_block_says_only_the_user_can(renderer):
+    command = ".venv/bin/pre-commit install"
+    output = (
+        "PermissionError: [Errno 1] Operation not permitted: '.git/hooks/pre-commit'\n"
+        "[tinyharness:protected_path_denied path=.git/hooks/pre-commit] This command stayed sandboxed.\n"
+        "(exit code 3)"
+    )
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    row, *why = shown(renderer)
+    assert row.startswith("⊘ Bash") and row.endswith("sandbox blocked a write to .git/hooks/pre-commit")
+    assert "only you can change them" in " ".join(line.strip() for line in why)
+
+
+def test_tests_that_passed_before_a_later_step_failed_count_as_passed(renderer):
+    """Seen live: `...; .venv/bin/pytest | tail -15; ls -a | grep pre-commit` printed
+    `1 passed`, then the grep found nothing, and the footer said tests ✗."""
+    command = ".venv/bin/pytest 2>&1 | tail -15; ls -a | grep pre-commit"
+    output = "1 passed in 0.01s\n(exit code 1)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    renderer.handle(Done())
+    lines = shown(renderer)
+    assert lines[0].startswith("· Bash") and lines[0].endswith("exit 1")
+    assert "tests ✓" in lines[-1]
+
+
+def test_a_failed_setup_step_keeps_its_error_without_becoming_a_harness_failure(renderer):
+    command = "cd /missing && grep -rn x docs"
+    output = "bash: line 1: cd: /missing: No such file or directory\n(exit code 1)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    row, preview = shown(renderer)
+    assert row.startswith("· Bash") and preview.strip().startswith("⎿ bash: line 1: cd:")
 
 
 def test_rejected_and_denied_calls(renderer):
@@ -240,7 +329,20 @@ def test_the_footer_sums_up_the_turn(renderer):
 def test_a_failing_test_run_is_a_red_cross(renderer):
     replay(renderer, ("Bash(pytest)", "Bash", {"command": "pytest -x"}, "1 failed\n(exit code 1)", False))
     renderer.handle(Done())
-    assert "tests ✗" in shown(renderer)[-1]
+    lines = shown(renderer)
+    assert lines[0].endswith("1 failed") and "exit 1" not in lines[0]
+    assert "tests ✗" in lines[-1]
+
+
+def test_a_direct_python_test_file_failure_has_a_semantic_outcome(renderer):
+    """Seen live: a unittest file piped through grep showed raw `exit 120` four rows into
+    diagnosing the same macOS-only failure, although the meaningful outcome was test failure."""
+    command = "python test/registered/unit/mem_cache/test_radix_cache_unit.py 2>&1 | grep -m1 Error"
+    output = "RuntimeError: native hash is only supported on Linux\n(exit code 120)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    row, detail = shown(renderer)
+    assert row.endswith("tests failed") and "exit 120" not in row
+    assert "RuntimeError" in detail
 
 
 def test_plain_answers_get_no_footer(renderer):
@@ -323,8 +425,8 @@ def test_the_status_bar_says_what_matters(repl):
     bar = text(repl._status(200))
     assert "OpenAI · GPT / gpt-6-sol" in bar
     assert "⎇ main" in bar and "38% context" in bar and "300 out" in bar and "$0.42" in bar
-    # "no sandbox" when there's none (as when tinyharness itself runs in one: they don't nest)
-    assert ("no sandbox" in bar) == (repl.session.sandbox is None)
+    # "sandbox off" when there's none (as when tinyharness itself runs in one: they don't nest)
+    assert ("sandbox off" in bar) == (repl.session.sandbox is None)
 
 
 async def test_context_status_refreshes_after_each_model_call(repl):
@@ -551,10 +653,75 @@ def test_a_sandboxed_test_run_that_fails_shows_as_failed(renderer):
     row = next(line for line in lines if line.startswith("✗ Bash"))
     first = next(line for line in lines if "PermissionError" in line)
     footer = lines[-1]
-    assert row.startswith("✗ Bash") and "exit 1" in row
+    assert row.startswith("✗ Bash") and "8 failed" in row and "exit 1" not in row
     assert first.strip() == "⎿ E   PermissionError: Operation not permitted"
     assert any(line.strip() == "8 failed, 462 passed in 10.29s" for line in lines)
     assert "tests ✗" in footer
+
+
+def test_a_sandbox_block_is_its_own_row_not_a_crash(renderer):
+    """Seen live: a blocked write to ~/.cache/sglang showed as a red `exit 1` under a
+    40-line traceback, which read as SGLang being broken."""
+    from pathlib import Path
+
+    blocked = Path.home() / ".cache" / "sglang"
+    output = (
+        f"Traceback (most recent call last):\n  ...\nPermissionError: Operation not permitted: '{blocked}'\n"
+        f"[tinyharness:filesystem_or_process_denied path={blocked}] This command stayed sandboxed.\n"
+        "(exit code 1)"
+    )
+    command = "python -c 'import sglang'"
+    for _ in range(2):
+        replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    lines = shown(renderer)
+    rows = [line for line in lines if line.startswith("⊘ Bash")]
+    assert len(rows) == 2 and rows[0].endswith("sandbox blocked a write to ~/.cache/sglang")
+    said = " ".join(line.strip() for line in lines if not line.startswith("⊘"))
+    assert said.count("/sandbox") == 1 and "runs later, unsandboxed" in said  # said once
+    assert "Traceback" not in said  # folded: the model has it
+
+
+def test_a_nonzero_pipeline_status_is_neutral(renderer):
+    command = "git branch -a | head -3"
+    output = "main\n(exit code 141)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    text = "\n".join(shown(renderer))
+    assert "· Bash" in text and "exit 141" in text and "pipeline stopped" not in text
+
+
+def test_package_build_failure_has_a_semantic_outcome(renderer):
+    """Seen live: a missing Cargo toolchain appeared only as a scary raw `exit 1`."""
+    command = "cd python && uv pip install -e ."
+    output = (
+        "RuntimeError: cargo is required to discover the Rust extension modules\n"
+        "hint: Build failures usually indicate a problem with the package or the build environment\n"
+        "[tinyharness:venv_uses_sandbox_python path=.venv] Tell the user about the cache.\n"
+        "(exit code 1)"
+    )
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    text = "\n".join(shown(renderer))
+    assert "build failed" in text and "exit 1" not in text
+
+
+def test_github_cli_auth_failure_has_a_semantic_outcome(renderer):
+    """Seen live: probing public issues with an unauthenticated gh CLI showed raw exit 4."""
+    command = 'gh issue list -R org/repo -l "good first issue"'
+    output = "To get started with GitHub CLI, please run:  gh auth login\n(exit code 4)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    row, *preview = shown(renderer)
+    assert row.endswith("GitHub login required") and "exit 4" not in row
+    assert preview == ["  ⎿ To get started with GitHub CLI, please run:  gh auth login"]
+
+
+def test_the_spinner_shows_minutes_and_seconds(renderer, monkeypatch):
+    import tinyharness.cli.render as render
+    from tinyharness.events import ToolInputStreaming
+
+    now = [100.0]
+    monkeypatch.setattr(render.time, "monotonic", lambda: now[0])
+    renderer.handle(ToolInputStreaming("Bash", 10))
+    now[0] += 515
+    assert "8m 35s · ctrl+c to interrupt" in Text.from_ansi(renderer.live_ansi(100)).plain
 
 
 def test_an_app_that_crashes_in_the_sandbox_says_to_run_it_outside():
@@ -962,3 +1129,26 @@ def test_a_passing_test_row_needs_no_output_under_it():
     renderer._stop_live()
     out = console.export_text()
     assert "3 passed" in out and "Ran 3 tests" not in out
+
+
+@pytest.mark.parametrize(
+    ("verdict", "label"),
+    [
+        (
+            "auto review held this call back (high risk: it posts project data). It did not run",
+            "auto review held back",
+        ),
+        ("auto review denied this call (it sends .env away). It did not run", "auto review denied"),
+        (
+            "auto review couldn't run (the review couldn't run: TimeoutError). It did not run",
+            "auto review couldn't run",
+        ),
+    ],
+)
+def test_a_call_auto_review_stopped_says_how_and_why(renderer, verdict, label):
+    """Seen live: "denied by classifier: Pattern…" for calls that were only held back, with
+    the reason cut off at 60 characters."""
+    replay(renderer, ("WebFetch(https://x.dev)", "WebFetch", {}, f"denied by classifier: {verdict}", True))
+    row, reason = shown(renderer)
+    assert row.startswith("⊘ WebFetch") and row.rstrip().endswith(label)
+    assert verdict.split("(", 1)[1].split(")")[0] in reason

@@ -240,8 +240,6 @@ async def test_run_agent_names_the_agents_it_knows(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("name", "tools", "section"),
     [
-        ("web", ["WebSearch", "WebFetch"], "# Web"),
-        ("pdf", ["Pdf"], None),
         ("todo", ["TodoWrite"], "# Planning"),
     ],
 )
@@ -441,5 +439,16 @@ async def test_th_run_gets_the_extensions_folders_and_hosts_once_approved(
         assert notes.resolve() not in before_roots and "api.example.com" not in before_hosts
         assert notes.resolve() in after_roots and "api.example.com" in after_hosts
         assert "pypi.org" in after_hosts and result.code == 0 and result.output == "ok\n"
+    finally:
+        session.close()
+
+
+def test_a_config_that_still_lists_pdf_or_web_loads_without_an_error(tmp_path, monkeypatch):
+    """Both moved into the core (Read reads PDFs; the web tools are core): an older config
+    must not report them as broken."""
+    session = make_session(tmp_path, monkeypatch, ["pdf", "web"])
+    try:
+        assert session.extension_errors == [] and "Pdf" not in session.tools.names()
+        assert {"WebSearch", "WebFetch"} <= set(session.tools.names())
     finally:
         session.close()

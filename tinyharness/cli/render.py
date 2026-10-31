@@ -77,6 +77,7 @@ from tinyharness.events import (
     ToolUse,
 )
 from tinyharness.llm.usage import Usage, UsageMeter
+from tinyharness.paths import pretty_path
 from tinyharness.permissions import Decision, PermissionRequest
 
 WAITING = "Working"
@@ -92,8 +93,27 @@ _COMPACTION_MESSAGES = {
 
 _EDIT_STATS = re.compile(r", -(\d+)/\+(\d+) lines$")
 _WRITE_STATS = re.compile(r", (\d+) lines$")
+# A call auto mode's review stopped (permissions/gate.py `_auto_verdict`).
+_AUTO_REVIEW = re.compile(
+    r"denied by classifier: auto review (held this call back|denied this call|couldn't run) \((.*?)\)\. ",
+    re.DOTALL,
+)
+_SANDBOX_BLOCKED = re.compile(
+    r"\[tinyharness:(filesystem_or_process|protected_path)_denied(?: path=([^\]]+))?\]"
+)
+# A test run's own result line: when it is there, the tests ran and their outcome counts.
+_RAN_TESTS = re.compile(r"\b\d+ (?:passed|failed|errors?)\b|^Ran \d+ tests?", re.MULTILINE)
+# What can run a command on a test runner's behalf: `uv run pytest`, `FOO=1 npx jest`.
+_RUN_PREFIX = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+|(?:env|time|nohup|npx|bunx|"
+    r"(?:uv|poetry|pipenv|hatch|pdm|pnpm)\s+(?:run|exec))\s+)+"
+)
 _EXIT_CODE = re.compile(r"\(exit code (\d+)\)\s*$")
 _TIMEOUT = re.compile(r"\(timed out after \d+s; the command was killed\)\s*$")
+_BUILD_FAILED = re.compile(
+    r"(?im)^hint: Build failures usually indicate|failed to build|subprocess-exited-with-error"
+)
+_GH_LOGIN_REQUIRED = re.compile(r"(?im)^To get started with GitHub CLI, please run:\s+gh auth login")
 _MATCH_HEADER = re.compile(r"^\d+ (total )?match\(es\)|^\d+ files?\b")
 # Commands that run a test suite, so the turn's footer can say whether the tests passed.
 _TEST_COMMAND = re.compile(
@@ -101,7 +121,8 @@ _TEST_COMMAND = re.compile(
     r"|\b(npm|pnpm|yarn|bun)\s+(run\s+)?test\b"
     r"|\b(go|cargo|mix|dotnet|swift|deno)\s+test\b"
     r"|\bmake\s+(test|check)\b"
-    r"|\bpython3?\s+-m\s+(pytest|unittest)\b"
+    r"|\bpython[\d.]*\s+-m\s+(pytest|unittest)\b"
+    r"|\bpython[\d.]*\s+(?:-\S+\s+)*(?:\S*/)?test[^/\s]*\.py(?:\s|$)"
 )
 NAME_WIDTH = 6  # tool names are padded to this, so what follows lines up
 RECENT_CALLS = 3  # a running subagent's latest tool calls, shown under it
@@ -126,6 +147,28 @@ def summarize_output(tool: str, output: str) -> str:
         return "no matches" if text.startswith("(") else lines[0].rstrip(":")
     first = lines[0]
     return first if len(first) <= 100 else first[:99] + "…"
+
+
+def _is_test_command(tool: _RunningTool) -> bool:
+    """Whether a step runs a test suite, not merely names one (`uv pip install pytest`)."""
+    for segment in re.split(r"[;&|\n()]+", str(tool.args.get("command", ""))):
+        words = _RUN_PREFIX.sub("", segment.strip())
+        words = re.sub(r"^\S*/(?=\S)", "", words)  # .venv/bin/pytest, ../.venv/bin/python
+        if _TEST_COMMAND.match(words):
+            return True
+    return False
+
+
+def _tests_passed(text: str) -> bool:
+    return not re.search(r"\b\d+ (?:failed|errors?)\b|^FAILED\b", text, re.MULTILINE)
+
+
+def _sandbox_block(tool: _RunningTool, text: str) -> re.Match[str] | None:
+    """The sandbox note, unless tests ran: then their result is what the row reports."""
+    blocked = _SANDBOX_BLOCKED.search(text) if tool.name == "Bash" else None
+    if blocked and _is_test_command(tool) and _RAN_TESTS.search(text):
+        return None
+    return blocked
 
 
 def _preview_line(tool: _RunningTool, line: str, failed: bool) -> Text:
@@ -207,6 +250,7 @@ class Renderer:
         self.show_thinking = False  # print the model's reasoning, or just how long it took
         self.last_thought = ""  # the latest reasoning, for ctrl+t to show after the fact
         self.last_thought_shown = False  # already on screen: ctrl+t won't print it again
+        self._sandbox_explained = False  # the first sandbox block says why; later ones don't
         self._thought: list[str] = []  # reasoning so far in this model call
         self._thought_since: float | None = None
         # Embedded: the REPL keeps its input box up during a turn and draws the live region
@@ -279,7 +323,7 @@ class Renderer:
                     (self._activity, BRAND),
                     (detail, "muted"),
                     ("…", BRAND),
-                    (f" {elapsed}s · ctrl+c to interrupt", "subtle"),
+                    (f" {_duration(elapsed)} · ctrl+c to interrupt", "subtle"),
                 )
             )
             parts.append(self._spinner)
@@ -390,7 +434,7 @@ class Renderer:
         room = width - fixed - (right.cell_len + 2 if right.cell_len else 0) - 1
         line = Text(indent).append_text(glyph).append(" ")
         line.append(label.ljust(NAME_WIDTH), style=tool_style(name))
-        path = tool.args.get("path") if name in ("Read", "Edit", "Write", "Pdf", "Open") else None
+        path = tool.args.get("path") if name in ("Read", "Edit", "Write", "Open") else None
         style = Style(color=MUTED) + (file_link(self._absolute(str(path))) if path else Style())
         line.append("  ").append(ellipsize(detail, max(room, 8)), style=style)
         if right.cell_len:
@@ -497,15 +541,26 @@ class Renderer:
             return []
         lines = [line.rstrip() for line in output.strip().splitlines()]
         if tool.name == "Bash":  # the harness's own notes; the row says exit code / timeout
-            lines = [line for line in lines if not (line.startswith("(") and line.endswith(")"))]
+            lines = [
+                line
+                for line in lines
+                if not (line.startswith("(") and line.endswith(")")) and not line.startswith("[tinyharness:")
+            ]
         elif lines and _MATCH_HEADER.match(lines[0]):  # "3 match(es):" is on the row already
             lines = lines[1:]
         while lines and not lines[-1].strip():
             lines.pop()
         if not lines or lines == ["(no output)"]:
             return []
-        failed = is_error or bool(_EXIT_CODE.search(output)) or bool(_TIMEOUT.search(output))
-        shown = lines[-PREVIEW_LINES:] if failed else lines[:PREVIEW_LINES]
+        if _sandbox_block(tool, output):
+            return []  # the row names what was blocked; the traceback is for the model
+        ended_nonzero = bool(_EXIT_CODE.search(output))
+        failed = is_error or bool(_TIMEOUT.search(output))
+        failed = failed or bool(
+            ended_nonzero
+            and ((_is_test_command(tool) and not _tests_passed(output)) or _BUILD_FAILED.search(output))
+        )
+        shown = lines[-PREVIEW_LINES:] if failed or ended_nonzero else lines[:PREVIEW_LINES]
         room = max(self.console.width - 6, 20)
         out = [_preview_line(tool, _cut(line.expandtabs(4), room), failed) for line in shown]
         if (more := len(lines) - len(shown)) > 0:
@@ -533,9 +588,23 @@ class Renderer:
         name, text = tool.name, output.strip()
         if output == _REJECTED:
             return Text(DENIED, style="warn"), Text("rejected", style="warn"), None
+        if is_error and (review := _AUTO_REVIEW.match(text)):
+            # Seen live: "denied by classifier: Pattern…" for a call that was only held
+            # back, with the reason cut off. Say which it was, and show the reason in full.
+            kind, concern = review.groups()
+            what = {
+                "held this call back": "held back",
+                "denied this call": "denied",
+                "couldn't run": "couldn't run",
+            }
+            return (
+                Text(DENIED, style="warn"),
+                Text(f"auto review {what[kind]}", style="warn"),
+                Text(ellipsize(concern, 200), style="subtle"),
+            )
         if is_error and text.startswith("denied by"):
             return Text(DENIED, style="warn"), Text(ellipsize(text, 60), style="warn"), None
-        if is_error and name in ("Read", "Pdf") and "file not found" in text.splitlines()[0]:
+        if is_error and name == "Read" and "file not found" in text.splitlines()[0]:
             # Looking for a file that isn't there is routine (the model checks for a README,
             # an AGENTS.md): the model gets the error; the user just sees it wasn't there.
             return Text(FAILED, style="subtle"), Text("not found", style="muted"), None
@@ -566,16 +635,47 @@ class Renderer:
     def _bash_outcome(self, tool: _RunningTool, text: str) -> tuple[Text, Text, Text | None]:
         lines = [line for line in text.splitlines() if line.strip() and not line.startswith("(")]
         last = lines[-1].strip() if lines else ""
-        is_test = bool(_TEST_COMMAND.search(str(tool.args.get("command", ""))))
+        is_test = _is_test_command(tool)
         if _TIMEOUT.search(text):
             if is_test:
                 self._turn.tests_passed = False
             return Text(FAILED, style="err"), Text("timed out", style="warn"), None
         if m := _EXIT_CODE.search(text):
+            if blocked := _sandbox_block(tool, text):
+                # The sandbox did its job; nothing crashed. The model has the full output.
+                protected = blocked.group(1) == "protected_path"
+                path = blocked.group(2)
+                where = f" a write to {pretty_path(path)}" if path else " a write"
+                under = None
+                if protected:  # said every time: only the user can do this step
+                    under = Text(
+                        "git hooks, editor tasks and agent settings run code outside the sandbox: "
+                        "only you can change them",
+                        style="subtle",
+                    )
+                elif not self._sandbox_explained:
+                    self._sandbox_explained = True
+                    under = Text(
+                        "writes stay in the project and a private cache: other folders can hold "
+                        "code that runs later, unsandboxed · /sandbox",
+                        style="subtle",
+                    )
+                return Text(DENIED, style="warn"), Text(f"sandbox blocked{where}", style="warn"), under
             if is_test:
-                self._turn.tests_passed = False
-            under = Text(ellipsize(last, 200), style="err") if last else None
-            return Text(FAILED, style="err"), Text(f"exit {m.group(1)}", style="err"), under
+                # The tests' own result line, when there is one: a later step (`ls | grep x`)
+                # can fail after they passed.
+                self._turn.tests_passed = _tests_passed(text) if _RAN_TESTS.search(text) else False
+                if not self._turn.tests_passed:
+                    under = Text(ellipsize(last, 200), style="err") if last else None
+                    return Text(FAILED, style="err"), Text(_test_failure_summary(text), style="err"), under
+            if _GH_LOGIN_REQUIRED.search(text):
+                return Text(FAILED, style="warn"), Text("GitHub login required", style="warn"), None
+            if _BUILD_FAILED.search(text):
+                return Text(FAILED, style="err"), Text("build failed", style="err"), None
+            # The Bash tool completed normally and gave the model the exact subprocess
+            # result. A nonzero child status is useful evidence, not a harness crash.
+            under = Text(ellipsize(last, 200), style="muted") if last else None
+            return Text("·", style="subtle"), Text(f"exit {m.group(1)}", style="muted"), under
         if is_test:
             self._turn.tests_passed = True
             if summary := _test_summary(text):  # the result on the row: `212 passed in 4.1s`
@@ -856,6 +956,8 @@ class Renderer:
 
 _PASSED = re.compile(r"\b\d+ passed\b[^=\n]*")
 _UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in [\d.]+s\s*\n\s*\nOK\b", re.MULTILINE)
+_FAILED_COUNT = re.compile(r"\b\d+ (?:failed|errors?)\b")
+_UNITTEST_FAILED = re.compile(r"^FAILED \(([^)]+)\)", re.MULTILINE)
 
 
 def _test_summary(output: str) -> str:
@@ -865,6 +967,16 @@ def _test_summary(output: str) -> str:
         return f"{m.group(1)} passed"
     found = _PASSED.findall(output)
     return found[-1].strip(" ,") if found else ""
+
+
+def _test_failure_summary(output: str) -> str:
+    """A semantic row label for a failed suite; the full error remains in its preview."""
+    if found := _FAILED_COUNT.findall(output):
+        return found[-1]
+    if match := _UNITTEST_FAILED.search(output):
+        counts = [part.strip().replace("=", " ") for part in match.group(1).split(",")]
+        return ", ".join(counts)
+    return "tests failed"
 
 
 def _one_line(text: str) -> str:

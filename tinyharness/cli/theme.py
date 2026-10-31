@@ -134,7 +134,6 @@ TOOL_KIND = {
     "Read": "read",
     "Glob": "read",
     "Grep": "read",
-    "Pdf": "read",
     "Edit": "edit",
     "Write": "edit",
     "Bash": "run",

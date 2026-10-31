@@ -78,6 +78,7 @@ from tinyharness.tools.base import Tool, ToolContext, ToolError, file_version
 from tinyharness.tools.bash import BashInput, BashTool
 from tinyharness.tools.registry import default_registry
 from tinyharness.tools.todo import normalize_todo_ids
+from tinyharness.tools.web import WebFetchTool, WebSearchTool
 from tinyharness.trust import TrustStore
 from tinyharness.workspace import Scratch, Workspace
 
@@ -330,6 +331,7 @@ class Session:
             extra_write=self.config.sandbox.allow_write,
             allow_localhost=self.config.sandbox.allow_localhost,
             allowed_hosts=self.config.sandbox.allow_hosts,
+            shared_caches=self.config.sandbox.share_caches,
         )
         hosts = self.config.sandbox.allow_hosts
         self.proxy = (
@@ -357,6 +359,7 @@ class Session:
             hooks=self.hooks,
             callback=_one_at_a_time(self.options.permission_callback),
             session_network_hosts=self._session_network_hosts,
+            allowed_hosts=self.sandbox_policy.allowed_hosts,
             scratch=self.scratch,
             # Files that would run code outside the sandbox: writing them always asks.
             protected=(
@@ -380,6 +383,7 @@ class Session:
         self._agent_writes = asyncio.Lock()
         self.resume_report: world.ResumeReport | None = None  # what changed while away, when resumed
         self._resume_note = ""
+        self._sandbox_note = ""  # told to the model with the next prompt (see set_sandbox)
         if saved is not None:
             self._restore(saved)
             try:
@@ -486,7 +490,10 @@ class Session:
             calibration=self._calibration,
         )
         self.llm.show_reasoning = cfg.show_thinking
-        self.gate.classifier = AutoModeClassifier(self.llm, model=cfg.role_model("safety_classifier"))
+        # Unset, the review uses whatever model the session is on now (it follows /model).
+        self.gate.classifier = AutoModeClassifier(
+            self.llm, model=cfg.role_model("safety_classifier"), review_model=cfg.models.roles.safety_review
+        )
         self.compactor = Compactor(
             self.llm,
             context_window=lambda: self.context_window,
@@ -653,6 +660,10 @@ class Session:
                     session_hosts=self._session_network_hosts,
                 )
             )
+        # Reading the web is core: WebFetch works with any provider, WebSearch only where the
+        # provider has built-in search (`WebSearchTool.offered`).
+        self.tools.register(WebSearchTool(lambda: self.llm, lambda: self.config.role_model("search_digest")))
+        self.tools.register(WebFetchTool())
         for tool in self.options.tools:  # before the Agent tool, so subagents can use them too
             self.tools.register(tool)
         for ext in self.extensions:
@@ -723,7 +734,9 @@ class Session:
     def prefix_tokens(self) -> int:
         """Tokens sent before the conversation on every request: the system prompt and the
         tool definitions. The provider caches them, as long as they stay the same."""
-        tools = [t.spec().__dict__ for t in self.tools.available(self.mode)]
+        tools = [
+            t.spec().__dict__ for t in self.tools.available(self.mode, None, self.gate.rules.hidden_tools())
+        ]
         return count_tokens(self._system_prompt() + json.dumps(tools, default=str))
 
     def extension_tokens(self, ext: Extension) -> int:
@@ -781,6 +794,42 @@ class Session:
         """For the session and its subagents, including ones already running."""
         self.gate.set_mode(PermissionMode.parse(mode))
         self.transcript.write("mode", mode=self.gate.mode.value)
+
+    def set_sandbox(self, on: bool) -> str:
+        """Turn the sandbox on or off for the rest of the session, subagents included.
+
+        Returns why it couldn't, or "". The Bash tool's description changes with it, so the
+        next request rebuilds the provider's prompt cache once.
+        """
+        if on and self.sandbox is None:
+            backend = detect_sandbox()
+            if backend is None:
+                return f"no sandbox backend is available here: {setup_hint()}"
+        elif not on and self.sandbox is not None:
+            if self.config.sandbox.required:
+                return "sandbox.required is true in config.toml"
+            backend = None
+        else:
+            return ""
+        if self.proxy is not None:
+            self.proxy.close()
+        self.sandbox = backend
+        hosts = self.config.sandbox.allow_hosts
+        self.proxy = (
+            AllowlistProxy(tuple(hosts))
+            if backend is not None and not getattr(backend, "manages_network", False) and hosts
+            else None
+        )
+        bash = self.tools.get("Bash")
+        if isinstance(bash, BashTool):
+            bash.set_sandbox(backend, self.proxy)
+        self._sandbox_note = (
+            "The user turned the sandbox back on: commands are contained again (see the Bash tool)."
+            if on
+            else "The user turned the sandbox off: commands now run unsandboxed (see the Bash tool)."
+        )
+        self.transcript.write("sandbox", enabled=on, backend=backend.name if backend else None)
+        return ""
 
     def set_show_thinking(self, show: bool) -> None:
         """Ask for the model's reasoning where a provider only sends it when asked (OpenAI's
@@ -943,6 +992,9 @@ class Session:
         if self._resume_note:  # tell the model once what changed while the session was away
             prompt = f"<session-resumed>\n{self._resume_note}\n</session-resumed>\n\n{prompt}"
             self._resume_note = ""
+        if self._sandbox_note:
+            prompt = f"<sandbox-changed>{self._sandbox_note}</sandbox-changed>\n\n{prompt}"
+            self._sandbox_note = ""
 
         deps = LoopDeps(
             llm=self.llm,
@@ -1133,7 +1185,9 @@ class Session:
         else:
             messages.append(Message(role="user", content=note))
         allowed = set(self.options.allowed_tools) if self.options.allowed_tools else None
-        available = {t.name: t.spec() for t in self.tools.available(self.mode, allowed)}
+        available = {
+            t.name: t.spec() for t in self.tools.available(self.mode, allowed, self.gate.rules.hidden_tools())
+        }
         text: list[str] = []
         called = False
         usage: Usage | None = None

@@ -75,7 +75,7 @@ In the session, type `/` to autocomplete commands. The ones you'll use most:
 | `/effort` | how hard the model reasons, `low` … `max`, the same for every model |
 | `/skills`, `/<skill>` | find or run skills |
 | `/extensions` | what's on and what it costs per request; `/extensions on web` |
-| `/sandbox` | what commands can write, read and reach |
+| `/sandbox` | turn the sandbox on or off; what commands can write, read and reach |
 | `/btw <question>` | a quick side question, even while the agent works; not added to the conversation |
 | `/sessions`, `/context`, `/clear` | switch conversations, inspect context, or start fresh |
 | `/key [provider]` | manually add or replace an API key saved in `auth.json` |
@@ -123,7 +123,7 @@ hooks, skills, subagents on different models, an extension, and a post-turn eval
 | | |
 |---|---|
 | **Agent loop** | Streaming, parallel read-only tools, argument validation and repair, recovery from cut-off and empty replies, retries with backoff |
-| **Tools** | Core: `Read` `Write` `Edit` `Glob` `Grep` `Bash` `Open`. Built-in extensions you turn on: `web` (WebSearch, WebFetch), `pdf`, `todo`, `agents` (Agent, Team) |
+| **Tools** | Core: `Read` (text, PDFs, images) `Write` `Edit` `Glob` `Grep` `Bash` `Open` `WebFetch`, and `WebSearch` where the provider can search. Built-in extensions you turn on: `todo`, `memory`, `agents` (Agent, Team) |
 | **Extensions** | One Python file with `setup(th)` adds tools, prompt sections, slash commands and event handlers ([docs/extension-api.md](docs/extension-api.md)); `/extensions on|off` |
 | **Permissions** | Routine work in the project and the sandbox doesn't ask; anything beyond it asks, with a diff for edits. Modes `default`, `auto` (an LLM classifier for unclear cases), `plan`, `ask` (every edit and command) and `bypassPermissions`; persistent allow/deny rules |
 | **Sandbox** | Native Seatbelt on macOS; optional Sandbox Runtime on Linux, Windows and as a fallback. Commands have narrow writes, blocked credential reads (SRT covers the home and project neighborhoods) and allowlisted network access; `/sandbox` shows it |

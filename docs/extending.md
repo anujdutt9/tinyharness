@@ -150,7 +150,7 @@ SessionOptions(evaluators=[tests_passed], evaluator_timeout=10.0)
 Subagents and teams come with the `agents` extension (`/extensions on agents`). The
 `Agent` tool runs a task in a fresh context and returns only the final answer.
 The model uses it on its own when a job is big enough. It comes with four built-in
-agents: `explore`, `plan` and `researcher` (read-only; `researcher` searches the web when the `web` extension is on)
+agents: `explore`, `plan` and `researcher` (read-only; `researcher` searches the web where the provider can search)
 and `general-purpose`. Several agents started in one reply run in parallel, writers
 included: their calls that change things (Bash, Edit, Write) take turns, so two never
 write at once, while their model calls overlap. To add your own, put a Markdown file in

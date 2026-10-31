@@ -117,7 +117,7 @@ def test_btw_can_be_asked_while_the_agent_works():
 def test_the_suggestion_shows_in_the_empty_input_box(repl):
     repl.suggestion = "commit it"
     shown = "".join(text for _, text in repl._placeholder())
-    assert shown.startswith("commit it") and "tab" in shown
+    assert shown == "commit it"
 
 
 async def test_a_new_message_drops_the_suggestion(repl):

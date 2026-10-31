@@ -35,7 +35,7 @@ def test_missing_variable_is_an_error():
 
 
 def test_json_braces_are_left_alone():
-    assert '{"decision": "allow"' in load_prompt("classifier")
+    assert '{"risk": "low"' in load_prompt("classifier")
 
 
 def test_system_prompt_includes_agents_md(tmp_path):
@@ -123,6 +123,14 @@ def test_pages_are_written_the_usual_way(tmp_path):
     assert "offline" not in prompt and "bundled" not in prompt and "Screenshot" not in prompt
     assert "non-interactive tool" in prompt and "private cache and $TMPDIR" in prompt
     assert "network_host" in prompt and "playwright" not in prompt.lower()
+
+
+def test_declared_installs_are_kept_separate_and_use_the_venv_directly():
+    """Seen live: bundling activation, Git/file setup and an editable install made its
+    downloads look unrelated, so Auto asked about every later install and network read."""
+    prompt = load_prompt("system", **{v: f"<{v}>" for v in PROMPT_VARIABLES["system"]})
+    assert "declared dependency install in its own Bash call" in prompt
+    assert "--python .venv/bin/python" in prompt
 
 
 def test_reading_a_file_is_not_described_as_showing_it_to_the_user():

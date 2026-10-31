@@ -41,7 +41,8 @@ class GrepTool(Tool[GrepInput]):
     name = "Grep"
     description = (
         "Search file contents with a regular expression. Skips binaries, hidden directories, "
-        "common build/dependency directories and secret-shaped files."
+        "common build/dependency directories and secret-shaped files. Use it instead of grep or rg "
+        "in Bash."
     )
     Input = GrepInput
     read_only = True

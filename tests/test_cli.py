@@ -320,7 +320,7 @@ async def test_a_run_without_a_terminal_denies_approvals_instead_of_prompting(mo
     assert seen == {"callback": None, "interactive": False}
 
 
-def test_sandbox_and_extensions_commands_show_config_names_literally(tmp_path, monkeypatch):
+async def test_sandbox_and_extensions_commands_show_config_names_literally(tmp_path, monkeypatch):
     """`[sandbox]` in a Rich string is markup and vanished from the hint."""
     import io
 
@@ -339,16 +339,30 @@ def test_sandbox_and_extensions_commands_show_config_names_literally(tmp_path, m
     repl.session = Session(SessionOptions(working_dir=tmp_path / "w", config_path=tmp_path / "c.toml"))
     repl.console = Console(file=io.StringIO(), width=200, theme=THEME, color_system=None)
     try:
-        COMMANDS["/sandbox"].handler(repl, "")
+        await COMMANDS["/sandbox"].handler(repl, "on")
         COMMANDS["/extensions"].handler(repl, "on todo")
         repl.session.extensions[0].needs = ["network:api.example.com"]
         COMMANDS["/extensions"].handler(repl, "")
         out = repl.console.file.getvalue()
         if repl.session.sandbox is not None:
             assert "[sandbox] allow_hosts" in out and "pypi.org" in out
+            assert "cache" in out and "share_caches" in out
         assert "[extensions] enabled" in out and "needs network:api.example.com" in out
     finally:
         repl.session.close()
+
+
+def test_sandbox_cache_summary_has_a_work_budget(tmp_path, monkeypatch):
+    """Seen live: inspecting a large package/model cache must not freeze the REPL."""
+    from tinyharness.cli import commands
+
+    cache = tmp_path / "cache"
+    (cache / "uv").mkdir(parents=True)
+    (cache / "uv" / "one").write_bytes(b"1")
+    (cache / "uv" / "two").write_bytes(b"22")
+    monkeypatch.setattr(commands, "_CACHE_SCAN_FILES", 1)
+    summary = commands._cache_summary(cache)
+    assert "at least" in summary and "partial scan" in summary
 
 
 def test_cost_shows_the_latest_calls_cache_hits_and_the_fixed_prefix(tmp_path, monkeypatch):
@@ -377,5 +391,46 @@ def test_cost_shows_the_latest_calls_cache_hits_and_the_fixed_prefix(tmp_path, m
         out = repl.console.file.getvalue()
         assert "98% of its 9,200 input tokens read from the cache" in out
         assert "fixed prefix" in out and "system prompt and tools" in out
+    finally:
+        repl.session.close()
+
+
+async def test_sandbox_off_and_on_from_the_command_line(tmp_path, monkeypatch):
+    """`/sandbox off` makes commands work like other harnesses for the rest of the session."""
+    import io
+
+    from rich.console import Console
+
+    from tinyharness import Session, SessionOptions
+    from tinyharness.cli.commands import COMMANDS
+    from tinyharness.cli.theme import THEME
+    from tinyharness.sandbox import Sandbox
+
+    class Fake(Sandbox):
+        name = "fake"
+
+        @classmethod
+        def available(cls):
+            return True
+
+        def wrap(self, argv, policy):
+            return argv
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("tinyharness.session.detect_sandbox", lambda: Fake())
+
+    class Repl:
+        pass
+
+    repl = Repl()
+    repl.session = Session(SessionOptions(working_dir=tmp_path / "w", config_path=tmp_path / "c.toml"))
+    repl.console = Console(file=io.StringIO(), width=200, theme=THEME, color_system=None)
+    try:
+        await COMMANDS["/sandbox"].handler(repl, "off")
+        assert repl.session.sandbox is None and "Sandbox off" in repl.console.file.getvalue()
+        await COMMANDS["/sandbox"].handler(repl, "on")
+        assert isinstance(repl.session.sandbox, Fake)
+        await COMMANDS["/sandbox"].handler(repl, "maybe")
+        assert "usage: /sandbox [on|off]" in repl.console.file.getvalue()
     finally:
         repl.session.close()

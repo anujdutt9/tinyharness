@@ -12,8 +12,12 @@ without an argument.
 
 from __future__ import annotations
 
+import contextlib
+import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.markup import escape
@@ -37,7 +41,6 @@ from tinyharness.config import forget_model, remember_model, save_theme
 from tinyharness.llm.types import ModelInfo
 from tinyharness.paths import pretty_path
 from tinyharness.permissions import PermissionMode
-from tinyharness.sandbox import setup_hint
 from tinyharness.security import redact
 from tinyharness.session import MissingAPIKeyError, list_sessions
 
@@ -651,23 +654,121 @@ async def mode(repl: Repl, arg: str) -> None:
 @command("/tools", "list tools available to the model", group="Tools & skills")
 def tools(repl: Repl, arg: str) -> None:
     table = _grid()
-    for tool in repl.session.tools.available(repl.session.mode):
+    for tool in repl.session.tools.available(repl.session.mode, None, repl.session.gate.rules.hidden_tools()):
         badge = "[subtle]read-only[/]" if tool.read_only else "[warn]asks[/]" if tool.needs_permission else ""
         table.add_row(f"  [bold default]{tool.name}[/]", f"{_short(tool.description, 64)}  {badge}")
     repl.console.print(table)
 
 
-@command("/sandbox", "what sandboxed commands can write, read and reach", group="Tools & skills")
-def sandbox(repl: Repl, arg: str) -> None:
+_CACHE_SCAN_FILES = 50_000
+_CACHE_SCAN_SECONDS = 0.25
+
+
+def _cache_summary(cache: Path) -> str:
+    """Where the sandbox cache is, how big, and its largest parts (uv, pip, huggingface...)."""
+    sizes: dict[str, int] = {}
+    entries_seen = 0
+    deadline = time.monotonic() + _CACHE_SCAN_SECONDS
+    partial = False
+    try:
+        with os.scandir(cache) as children:
+            for child in children:
+                total = 0
+                pending = [Path(child.path)]
+                while pending and not partial:
+                    current = pending.pop()
+                    try:
+                        if current.is_dir() and not current.is_symlink():
+                            with os.scandir(current) as entries:
+                                for entry in entries:
+                                    entries_seen += 1
+                                    if entry.is_dir(follow_symlinks=False):
+                                        pending.append(Path(entry.path))
+                                    else:
+                                        with contextlib.suppress(OSError):
+                                            total += entry.stat(follow_symlinks=False).st_size
+                                    if entries_seen >= _CACHE_SCAN_FILES or time.monotonic() >= deadline:
+                                        partial = True
+                                        break
+                        else:
+                            entries_seen += 1
+                            total += current.lstat().st_size
+                    except OSError:
+                        continue
+                sizes[child.name] = total
+                if partial:
+                    break
+    except OSError:
+        if not sizes:
+            return pretty_path(cache)
+        partial = True
+    if not sizes or (not partial and not sum(sizes.values())):
+        return f"{pretty_path(cache)} [muted]· empty[/]"
+    largest = sorted(sizes, key=sizes.__getitem__, reverse=True)[:4]
+    parts = ", ".join(f"{name} {_bytes(sizes[name])}" for name in largest if sizes[name])
+    qualifier = "at least " if partial else ""
+    suffix = ", partial scan" if partial else ""
+    return f"{pretty_path(cache)} [muted]· {qualifier}{_bytes(sum(sizes.values()))} ({parts}{suffix})[/]"
+
+
+def _bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+_SANDBOX_CHOICES = [
+    ("on", "on    commands write only in the project and reach only allowed hosts"),
+    ("off", "off   commands run as you, like other harnesses; deleting, sudo and credentials still ask"),
+]
+
+
+@command(
+    "/sandbox",
+    "turn the sandbox on or off, and show what commands can write, read and reach",
+    group="Tools & skills",
+    usage="[on|off]",
+)
+async def sandbox(repl: Repl, arg: str) -> None:
     session = repl.session
+    choice = arg.strip().lower()
+    if choice not in ("", "on", "off"):
+        _fail(repl, "usage: /sandbox [on|off]")
+        return
+    if not choice:
+        picked = await pick("Sandbox", _SANDBOX_CHOICES, "on" if session.sandbox is not None else "off")
+        if picked is None:
+            return
+        choice = picked
+    if (choice == "on") != (session.sandbox is not None):
+        if why := session.set_sandbox(choice == "on"):
+            _fail(repl, f"Sandbox stays {'off' if session.sandbox is None else 'on'}: {why}.")
+            return
+        _ok(
+            repl,
+            f"Sandbox {choice} for this session [muted]· [sandbox] enabled in config.toml sets the default[/]",
+        )
     if session.sandbox is None:
-        repl.console.print("  [warn]No sandbox[/] [muted]· every command asks before it runs[/]")
-        repl.console.print(f"  [muted]Setup: {setup_hint()}.[/]")
+        repl.console.print(
+            "  [warn]Sandbox off[/] [muted]· commands run as you and can reach any folder or host. "
+            "Auto mode reviews them; deleting files, sudo, credentials and files that run code later "
+            "(git hooks, editor settings) ask you.[/]"
+        )
         return
     policy = session.sandbox_policy
     table = _grid(12)
     table.add_row("  [bold default]writes[/]", ", ".join(pretty_path(p) for p in policy.write_roots[:4]))
     table.add_row("  [bold default]reads[/]", "anything except credential files (.env, keys, auth.json)")
+    if policy.cache_dir is not None:
+        table.add_row("  [bold default]cache[/]", _cache_summary(policy.cache_dir))
+    if policy.shared_caches:
+        table.add_row(
+            "  [bold default]shared[/]",
+            f"{', '.join(policy.shared_caches)} [muted]· written in your own caches, not a private copy[/]",
+        )
     network = ", ".join(policy.allowed_hosts) or "none"
     table.add_row("  [bold default]network[/]", network)
     if session.session_network_hosts:
@@ -677,6 +778,12 @@ def sandbox(repl: Repl, arg: str) -> None:
         "  [muted]Bash cannot disable containment. Allow a blocked exact host once or for the "
         "session; session approvals carry forward. Stable hosts: \\[sandbox] allow_hosts.[/]"
     )
+    if policy.cache_dir is not None:
+        repl.console.print(
+            "  [muted]Downloads and builds made in the sandbox stay in its cache, apart from your own "
+            "terminal's; a virtualenv made here may use a Python stored there. To share some: "
+            '\\[sandbox] share_caches = ["uv", "pip", "npm", "huggingface", "torch"].[/]'
+        )
     if session.ctx.outside:
         repl.console.print(
             f"  [warn]Outside content in this conversation:[/] {', '.join(session.ctx.outside[:5])} "

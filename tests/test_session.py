@@ -73,6 +73,38 @@ def test_required_sandbox_fails_closed_before_a_callback_can_approve(tmp_path, m
         Session(SessionOptions(permission_callback=lambda request: None), config=config)
 
 
+def test_the_sandbox_can_be_switched_off_and_on_mid_session(tmp_path, monkeypatch):
+    """The Bash tool every agent shares follows the switch, and the model is told."""
+    from tinyharness.sandbox import Sandbox
+
+    class Fake(Sandbox):
+        name = "fake"
+
+        @classmethod
+        def available(cls):
+            return True
+
+        def wrap(self, argv, policy):
+            return argv
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr("tinyharness.session.detect_sandbox", lambda: Fake())
+    session = Session(config=Config(working_dir=tmp_path))
+    try:
+        bash = session.tools.get("Bash")
+        assert session.set_sandbox(False) == "" and session.sandbox is None and bash.sandbox is None
+        assert "turned the sandbox off" in bash.description and "sandbox off" in session._sandbox_note
+        assert session.set_sandbox(True) == "" and isinstance(bash.sandbox, Fake)
+        assert "runs in a sandbox" in bash.description
+    finally:
+        session.close()
+    required = Session(config=Config(working_dir=tmp_path, sandbox={"required": True}))
+    try:
+        assert "sandbox.required" in required.set_sandbox(False) and required.sandbox is not None
+    finally:
+        required.close()
+
+
 def test_session_wires_background_models_by_role(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
     config = Config(

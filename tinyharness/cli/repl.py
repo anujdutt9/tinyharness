@@ -291,7 +291,7 @@ class Repl:
         if session.sandbox is not None:
             parts.append((3, [("class:toolbar.ok", "sandbox")]))
         elif "Bash" in session.tools.names():
-            parts.append((4, [("class:toolbar.err", "no sandbox")]))
+            parts.append((4, [("class:toolbar.warn", "sandbox off")]))
         if self.git is not None:
             branch, dirty = self.git
             parts.append(
@@ -504,7 +504,7 @@ class Repl:
         if self.turn_running:
             return [(SUBTLE, "Message the agent: it gets this before its next step")]
         if self.suggestion:
-            return [(SUBTLE, self.suggestion), ("class:toolbar.dim", "  · tab to use")]
+            return [(SUBTLE, self.suggestion)]
         return [(SUBTLE, "Ask anything, or type / for commands")]
 
     # -- side calls -------------------------------------------------------------

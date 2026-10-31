@@ -78,3 +78,23 @@ def test_a_blocked_host_is_named_in_the_commands_output():
     )
     assert "network_destination_denied host=example.com" in out and out.endswith("(exit code 56)")
     assert "PyPI, npm), GitHub and common CDNs" in tool.description
+
+
+async def test_an_allowed_name_that_points_at_this_machine_is_refused():
+    """Whoever runs an allowed name's DNS decides where it points. Anthropic's Sandbox
+    Runtime refuses local answers, including the cloud metadata service."""
+    for answer in ("127.0.0.1", "169.254.169.254", "::ffff:127.0.0.1"):
+
+        async def resolve(host, port, answer=answer):
+            return [answer]
+
+        proxy = AllowlistProxy(("rebind.example",), resolve=resolve)
+        try:
+            proxy_port = await proxy.start()
+            reader, writer = await _connect(proxy_port, "rebind.example:443")
+            reply = await reader.read()
+            assert reply.startswith(b"HTTP/1.1 403") and b"resolves to a local address" in reply
+            assert proxy.denied == ["rebind.example"] and proxy.reached == []
+            writer.close()
+        finally:
+            proxy.close()

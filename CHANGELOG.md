@@ -33,13 +33,126 @@ the SDK, and every break is listed here.
   standard local endpoints, then checks the selected model before starting a session.
   When the standard endpoint is unavailable, it can connect and remember a remote or
   custom endpoint with an optional server key.
+- `[sandbox] share_caches` lets uv, pip, npm, Hugging Face and torch use your own cache
+  locations from inside the sandbox, so nothing is downloaded or compiled twice. It is
+  off by default: a sandboxed command can then change what those tools load later.
 
 ### Changed
 - `/model` shows the complete model catalog for the active provider instead of a
   mixed-provider recent list. The banner and status bar identify the provider separately
   from its model.
+- Fewer permission prompts in the sandbox. Installing what the project already declares
+  (`uv sync`, `pip install -e .`, `pip install -r requirements.txt`, `npm ci`) no longer
+  asks. Naming a new package can be approved once per ecosystem for the session, and in
+  auto mode the classifier reviews whether the install serves the request.
+  `[permissions] allow = ["Bash(capability:software:Python package)"]` pre-approves one.
+- Installing the project's declared dependencies (`uv pip install -e .`, `uv sync`,
+  `npm ci`) no longer marks the conversation as holding outside content, so later
+  commands don't all ask: it is authorized project setup inside the sandbox. This holds
+  only when every other step in the command is setup (`cd`, making a venv, activating
+  it) or a local reader; any other step keeps the downloads as outside content.
+  Installing a new package by name still counts, since its build and code can print or
+  plant text. Known local inspection (`which`, `ls`, local `git` reads) stays quiet even
+  then, because it cannot send anything.
+- Bash now uses ordinary shell semantics instead of forcing `set -e` and `pipefail`.
+  Independent probes continue, dependent steps use `&&`, and unknown nonzero child
+  exits are shown neutrally while known test/build failures, timeouts and sandbox
+  blocks stay prominent.
+- In auto mode, uncertain or denied classifier decisions go back to the agent so it can
+  recover without interrupting the user. Three consecutive blocks or twenty total
+  blocks fall back to a person, preventing silent loops. Project-declared installs stay
+  routine; newly named packages are reviewed even after outside content was read.
+- Auto mode's review now always sees your request, however many tool calls came
+  before it, and judges only the call in front of it, not its neighbors or its topic.
+  A call it holds back says so (not the sandbox, nothing ran) and the agent may try a
+  narrower one; a call it denies tells the agent not to try it another way.
+- Auto mode's review has two stages. A quick check on the provider's small model can only
+  allow; anything it doesn't allow gets a careful review on your session's model (or
+  `[models.roles] safety_review`) that reasons before it answers. It rates how risky a
+  call is apart from whether you asked for it, so a low-risk call no longer needs your
+  request to spell it out. The same call for the same request gets the same answer, and a
+  review that couldn't run says so instead of reading as "unsafe". In the CLI, its row
+  reads `auto review held back`, `denied` or `couldn't run`, with the reason underneath
+  in full, instead of "denied by classifier: Pattern…".
+- After a web page or download is in the conversation, plain downloads no longer wait on
+  a review: `curl`/`wget` reads of allowed hosts, read-only `gh` commands, and text filters
+  such as `jq` or a `python3 -c` that only parses JSON. Neither does reading a page on a
+  host you named yourself or one on the sandbox allowlist. Anything that could carry data
+  out (a request body, an upload, headers, a new host, a script) is still reviewed.
+- In auto mode a command that needs a host outside the allowlist can be approved by the
+  review for that one command, instead of asking you. With outside content in the
+  conversation, you are still asked: a new destination is how that content could get data
+  sent out.
+- WebFetch and WebSearch are core tools, as in other harnesses; the `web` extension is
+  gone (a config that still lists it loads without an error). WebSearch is offered only
+  where the provider has built-in search (Anthropic, OpenAI, Gemini, xAI, OpenRouter),
+  following `/model`; WebFetch works with any provider. To turn the web off,
+  `[permissions] deny = ["WebFetch", "WebSearch"]`: a tool denied outright is no longer
+  offered to the model at all.
+- Read reads PDFs, as their text page by page with a `page N of M` line before each
+  page, so every session can read them. The `pdf` extension and its Pdf tool are gone; a
+  config that still lists `pdf` loads without an error. Before, with the extension off
+  (the default), Read told the model to use a Pdf tool it didn't have.
+- `/sandbox` turns the sandbox on or off for the session, from a picker or with
+  `/sandbox on|off`. With it off, tinyharness works like other harnesses: commands run as
+  you anywhere on your machine, reads run, `default` mode asks before other commands and
+  auto mode's review decides them. Deleting files, `sudo`, touching credential files and
+  changing files that run code later (git hooks, editor settings, `.envrc`) still ask you,
+  and "don't ask again" doesn't cover them. Before, every command asked once the sandbox
+  was off, even in auto mode, and even `bypassPermissions` asked.
+- Programs that talk to their own helper processes over Unix sockets work in the sandbox:
+  ZMQ `ipc://`, multiprocessing managers, language servers. A command may use sockets in
+  the folders it can write (the project and its private temp folder); others, such as
+  Docker's, stay closed. SGLang's engine couldn't reach its own scheduler before.
+- Loopback (`localhost`) is decided by auto mode's review even after outside content was
+  read, since it never leaves your machine, and an approval lasts for the session.
+- Approving `huggingface.co` opens Hugging Face's download hosts with it, so a model
+  download that redirects to `cas-server.xethub.hf.co` or a CDN doesn't stop again.
+- The sandbox also keeps editor tasks and settings (`.vscode/`, `.idea/`), `.envrc`,
+  `.gitmodules`, `.mcp.json` and Claude Code's settings, commands and agents read-only:
+  each runs code outside the sandbox when you open or enter the project. An allowed host
+  name that resolves to this machine, its link (such as the cloud metadata service) or no
+  one is refused.
+- Three blocked retries are counted per action, so unrelated parallel calls cannot
+  combine into an unexpected prompt.
+
+- A write the sandbox blocks shows as its own amber row, `⊘ sandbox blocked a write to
+  ~/.cache/sglang`, instead of a red failure under a long traceback. The first one in a
+  session says why in one line. The model is told which folder was blocked and to point
+  the tool's own cache variable under `$XDG_CACHE_HOME`, and to save it with the Memory
+  tool when that is on.
+- `/sandbox` shows where the sandbox cache is, how big it is, and its largest parts.
+- When a virtualenv made in the sandbox uses a Python stored in the sandbox cache, the
+  model tells you, since clearing that cache would break it.
+- The working spinner shows long waits as minutes and seconds (`8m 35s`).
+- The next-message suggestion stands on its own without repeating `tab to use` beside it.
 
 ### Fixed
+- Piping downloaded JSON into a local `python -c` parser no longer looks like downloading
+  and executing a program. Piping a script into Python, or explicitly evaluating the
+  downloaded input, still requires software-acquisition approval. An unauthenticated
+  GitHub CLI call says `GitHub login required` instead of raw `exit 4`.
+- Auto mode no longer asks about known local inspection merely because it discards output
+  with `2>/dev/null`. The agent keeps declared installs in their own command and addresses
+  virtualenvs directly, preserving precise download provenance and avoiding later prompts.
+- Failed test commands show `13 errors`, `1 failed`, or `tests failed` instead of a raw
+  shell code such as `exit 1` or Python's broken-pipe `exit 120`; the error preview and
+  failing-tests footer remain visible.
+- A command counts as a test run only when a step runs the tests, so installing pytest
+  (`uv pip install pytest`) no longer turns a failed build into `exit 1` or the footer
+  into `tests ✗`. A sandbox block in a command whose tests never ran shows as a block.
+- A sandboxed command that tries to change a protected path, such as `pre-commit
+  install` writing `.git/hooks`, shows `sandbox blocked a write to .git/hooks/pre-commit`,
+  and the model is told to give you the command to run yourself instead of retrying.
+- A failed package build says `build failed` instead of raw `exit 1`, and internal
+  harness notes no longer occupy its visible error preview. Shell redirections such as
+  `2>&1` no longer make a local editable install look like a new package acquisition.
+- Auto-approved software installs are identified as classifier decisions in the UI and
+  session log. A sourced script or shell command substitution beside a declared install
+  no longer hides registry downloads from outside-content tracking.
+- Unknown nonzero shell exits are neutral instead of being guessed from command text.
+  The footer judges tests by their own result line, so tests that passed before a later
+  independent probe returned nonzero still count as passed.
 - Ollama setup reads each model's native capabilities and automatically uses text-based
   tool calls when a model such as `gemma3:270m` does not accept API tool definitions.
 - GitHub Copilot setup uses the account-specific API endpoint returned by GitHub and lets

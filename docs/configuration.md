@@ -131,7 +131,8 @@ Background model work is configured by role rather than one catch-all model:
 
 ```toml
 [models.roles]
-safety_classifier = "claude-haiku-4-5"
+safety_classifier = "claude-haiku-4-5"  # auto mode's quick check
+safety_review = "claude-sonnet-5"       # its careful second look; unset: the session's model
 search_digest = "claude-haiku-4-5"
 compaction = "claude-sonnet-5"
 ```

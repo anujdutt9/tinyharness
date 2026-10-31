@@ -252,7 +252,10 @@ async def _run_agent_loop(
 
         # 1. Ask the model, streaming text to the caller as it arrives. If the provider
         #    says the conversation no longer fits, summarize it and ask once more.
-        available = {t.name: t for t in deps.tools.available(deps.gate.mode, deps.allowed_tools)}
+        available = {
+            t.name: t
+            for t in deps.tools.available(deps.gate.mode, deps.allowed_tools, deps.gate.rules.hidden_tools())
+        }
         turn = _Turn()
         try:
             async for event in _ask_model(history, available, deps, turn):
@@ -516,7 +519,10 @@ async def _wrap_up(history: History, deps: LoopDeps) -> AsyncGenerator[Event, No
     history.append(Message(role="user", content=STEP_LIMIT_NOTE))
     # The tools are still described (some APIs require that once tool calls are in the
     # history); any it calls anyway are dropped.
-    available = {t.name: t for t in deps.tools.available(deps.gate.mode, deps.allowed_tools)}
+    available = {
+        t.name: t
+        for t in deps.tools.available(deps.gate.mode, deps.allowed_tools, deps.gate.rules.hidden_tools())
+    }
     turn = _Turn()
     try:
         async for event in _ask_model(history, available, deps, turn):
@@ -912,7 +918,7 @@ async def _prepare_call(
             target_host=tool.target_host(args),
             approval_boundary=tool.approval_boundary(args),
             summary=summary,
-            history_tail=_tail(history),
+            history_tail=_tail(history, current=call.id),
         )
         deps.transcript.write(
             "permission",
@@ -1062,14 +1068,34 @@ def _shrink_images(history: History) -> int:
     return changed
 
 
-def _tail(history: History, items: int = 8, chars: int = 500) -> str:
-    """Recent context for the auto-mode classifier: the user's messages and the agent's
-    tool calls. Not tool output, the agent's own text or teammates' messages: a web page
-    or file could say "the user already approved this", and the classifier would read it."""
-    lines: list[str] = []
+def _tail(
+    history: History, current: str = "", calls: int = 6, chars: int = 500, request_chars: int = 2000
+) -> str:
+    """Context for the auto-mode classifier: what the user asked, then what the agent did.
+
+    Only the user's messages and the agent's tool calls. Not tool output, the agent's own
+    text or teammates' messages: a web page or file could say "the user already approved
+    this", and the classifier would read it. Each part has its own budget, so a long run of
+    tool calls can't push the user's request out (seen live: after 13 calls the classifier
+    blocked the setup the user asked for). The call under review (`current`) is left out,
+    and the calls beside it in the same step are labeled as context: they were read as
+    part of the decision, and one fetch was blocked as "a repeated call" of itself.
+    """
+    requests: list[str] = []
+    earlier: list[str] = []
+    same_step: list[str] = []
     for m in history.messages:
         if m.role == "user" and m.content and not m.content.startswith(TEAMMATE_NOTE):
-            lines.append(f"[user] {m.content[:chars]}")
-        elif m.role == "assistant":
-            lines += [f"[agent called] {c.name}({c.arguments[:200]})" for c in m.tool_calls]
-    return "\n".join(lines[-items:])
+            requests.append(m.content)
+        elif m.role == "assistant" and m.tool_calls:
+            step = current and any(c.id == current for c in m.tool_calls)
+            for c in m.tool_calls:
+                if c.id == current:
+                    continue
+                (same_step if step else earlier).append(f"{c.name}({c.arguments[:200]})")
+    lines = [f"[user] {text[:chars]}" for text in requests[-3:-1]]
+    if requests:
+        lines.append(f"[user, latest request] {requests[-1][:request_chars]}")
+    lines += [f"[agent called] {call}" for call in earlier[-calls:]]
+    lines += [f"[same step, not under review] {call}" for call in same_step[:calls]]
+    return "\n".join(lines)

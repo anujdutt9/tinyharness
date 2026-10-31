@@ -294,3 +294,38 @@ def test_anthropic_server_search_is_not_mistaken_for_a_tool_call():
     }
     chunks = parser.feed(start) + parser.feed(delta)
     assert not any(c.tool_call_delta for c in chunks)
+
+
+@pytest.mark.parametrize(
+    ("provider", "offered"), [("anthropic", True), ("openrouter", True), ("deepseek", False)]
+)
+def test_web_search_is_offered_only_where_the_provider_can_search(provider, offered):
+    """A core tool that fails on every call with a local model would just mislead it."""
+    assert WebSearchTool(lambda: FakeLLM(provider)).offered() is offered
+
+
+def test_web_tools_are_core_and_a_deny_rule_hides_them(tmp_path, monkeypatch):
+    """Web reading is standard in other harnesses; turning it off is one deny rule, and the
+    model isn't offered a tool every call of which would be refused."""
+    from tinyharness import Session
+    from tinyharness.config import Config
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    session = Session(config=Config(working_dir=tmp_path))
+    try:
+        offered = {
+            t.name for t in session.tools.available(session.mode, None, session.gate.rules.hidden_tools())
+        }
+        assert {"WebSearch", "WebFetch"} <= offered
+    finally:
+        session.close()
+    session = Session(
+        config=Config(working_dir=tmp_path, permissions={"deny": ["WebFetch", "WebSearch", "Read(*.env)"]})
+    )
+    try:
+        offered = {
+            t.name for t in session.tools.available(session.mode, None, session.gate.rules.hidden_tools())
+        }
+        assert not {"WebSearch", "WebFetch"} & offered and "Read" in offered  # a narrower rule hides nothing
+    finally:
+        session.close()

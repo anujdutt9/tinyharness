@@ -125,8 +125,8 @@ class ToolContext:
     # The user's latest message, so agents started on its behalf know what it's for.
     request: str = ""
     # Where content from other machines in this conversation came from ("WebFetch
-    # docs.python.org"): once there is any, calls that can send data out need a person's
-    # yes (permissions/gate.py). Shared with subagents; changed in place, never replaced.
+    # docs.python.org"): once there is any, calls that can send data out are reviewed
+    # again (permissions/gate.py). Shared with subagents; changed in place, never replaced.
     outside: list[str] = field(default_factory=list)
     # Trusted correlation metadata for durable tool records. Tools must not ask the
     # model to supply these: the session sets them itself.
@@ -225,6 +225,11 @@ class Tool(ABC, Generic[InputT]):
     def approval_boundary(self, args: InputT) -> ApprovalBoundary | None:
         """A contained capability that still needs explicit user approval, if any."""
         return None
+
+    def offered(self) -> bool:
+        """Whether to offer this tool to the model now (WebSearch: only where the provider
+        can search). Checked on every request, so it can follow /model."""
+        return True
 
     def outside_source(self, args: InputT) -> str | None:
         """Where this call's result comes from, if it's another machine (and so could carry

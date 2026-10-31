@@ -427,3 +427,52 @@ async def test_a_failed_localhost_request_gets_no_server_advice(ctx, tmp_path):
     tool = BashTool(object(), SandboxPolicy(write_roots=(tmp_path,), allow_localhost=True))
     text = tool._report("psql: connection refused", 2, False, BashInput(command="psql -h localhost"), True)
     assert text == "psql: connection refused\n(exit code 2)"
+
+
+def text_pdf(path: Path, pages: list[str]) -> None:
+    """A small PDF whose pages hold `pages` as text."""
+    objects = ["<< /Type /Catalog /Pages 2 0 R >>", ""]
+    kids = []
+    for text in pages:
+        content = f"BT /F1 12 Tf 72 712 Td ({text}) Tj ET".encode() if text else b""
+        objects.append(f"<< /Length {len(content)} >>\nstream\n{content.decode()}\nendstream")
+        objects.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {len(objects)} 0 R "
+            "/Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> >>"
+        )
+        kids.append(f"{len(objects)} 0 R")
+    objects[1] = f"<< /Type /Pages /Kids [{' '.join(kids)}] /Count {len(pages)} >>"
+    body, offsets = b"%PDF-1.4\n", []
+    for i, obj in enumerate(objects, 1):
+        offsets.append(len(body))
+        body += f"{i} 0 obj\n{obj}\nendobj\n".encode()
+    xref = f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n" + "".join(
+        f"{o:010d} 00000 n \n" for o in offsets
+    )
+    trailer = f"trailer\n<< /Root 1 0 R /Size {len(objects) + 1} >>\nstartxref\n{len(body)}\n%%EOF\n"
+    path.write_bytes(body + xref.encode() + trailer.encode())
+
+
+async def test_read_reads_a_pdf_as_text_page_by_page(ctx, tmp_path):
+    """Seen live: with the pdf extension off (the default), Read told the model to use a
+    Pdf tool it didn't have. Read now reads PDFs itself, like it shows images."""
+    text_pdf(tmp_path / "paper.pdf", ["Hello from alpha", "", "Goodbye from beta"])
+    out = await call(ReadTool(), {"path": "paper.pdf"}, ctx)
+    assert "----- page 1 of 3 -----" in out and "Hello from alpha" in out
+    assert "(no text on this page: it may be a scanned image)" in out
+    assert out.index("page 3 of 3") < out.index("Goodbye from beta")
+
+
+async def test_read_pages_through_a_long_pdf_without_extracting_all_of_it(ctx, tmp_path):
+    text_pdf(tmp_path / "book.pdf", [f"Chapter {n}" for n in range(1, 51)])
+    out = await call(ReadTool(), {"path": "book.pdf", "limit": 4}, ctx)
+    assert "Chapter 2" in out and "Chapter 3" not in out
+    assert out.endswith("(showing lines 1-4, up to page 2 of 50; continue with offset=4)")
+    out = await call(ReadTool(), {"path": "book.pdf", "offset": 4, "limit": 2}, ctx)
+    assert "page 3 of 50" in out and "Chapter 3" in out
+
+
+async def test_read_explains_a_broken_pdf(ctx, tmp_path):
+    (tmp_path / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really")
+    with pytest.raises(ToolError, match="not a readable PDF"):
+        await call(ReadTool(), {"path": "broken.pdf"}, ctx)

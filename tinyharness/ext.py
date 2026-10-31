@@ -555,6 +555,8 @@ def load_extensions(
     errors: list[LoadError] = []
     sources: list[tuple[str, ModuleType | Setup | None]] = []
     for name in dict.fromkeys(names):
+        if name in _NOW_CORE:  # an older config: what it added is built in now
+            continue
         try:
             sources.append((name, find_module(name, session.workspace.root, project=project)))
         except Exception as e:
@@ -590,6 +592,10 @@ def load_extensions(
             log.warning("extension %s failed to load: %s", name, e)
             errors.append(LoadError(name, f"{type(e).__name__}: {e}"))
     return loaded, errors
+
+
+# Extensions whose feature moved into the core, so a config that names them still loads.
+_NOW_CORE = frozenset({"pdf", "web"})  # Read reads PDFs; WebSearch and WebFetch are core
 
 
 def builtin_names() -> list[str]:

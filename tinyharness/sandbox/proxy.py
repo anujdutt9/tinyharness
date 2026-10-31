@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import logging
-from collections.abc import Iterable
+import socket
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -49,6 +51,33 @@ DEFAULT_ALLOWED_HOSTS = (
     "playwright.download.prss.microsoft.com",
 )
 
+# Hosts a package manager installs from. Installing what the project declares from
+# them is authorized setup, not outside content (tools/bash.py); a new package name is.
+PACKAGE_REGISTRY_HOSTS = ("pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "registry.yarnpkg.com")
+
+# Services whose downloads hop across several exact hosts. Approving one of them opens the
+# set, so a redirect isn't one more blocked command and one more prompt (seen live: a model
+# download went from huggingface.co to cas-server.xethub.hf.co). Exact names, no wildcards.
+SERVICE_HOSTS: dict[str, tuple[str, ...]] = {
+    "Hugging Face": (
+        "huggingface.co",
+        "cdn-lfs.huggingface.co",
+        "cdn-lfs.hf.co",
+        "cdn-lfs-us-1.hf.co",
+        "cdn-lfs-eu-1.hf.co",
+        "cas-bridge.xethub.hf.co",
+        "cas-server.xethub.hf.co",
+        "transfer.xethub.hf.co",
+    ),
+}
+
+
+def service_hosts(host: str) -> tuple[str, ...]:
+    """The known service set `host` belongs to, or just `host`."""
+    host = host.lower().rstrip(".")
+    return next((hosts for hosts in SERVICE_HOSTS.values() if host in hosts), (host,))
+
+
 READ_LIMIT = 64 * 1024  # bytes of request head we'll read before giving up
 
 
@@ -65,11 +94,28 @@ def host_allowed(host: str, allowed: Iterable[str]) -> bool:
     return False
 
 
+async def _resolve(host: str, port: int) -> list[str]:
+    infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return list(dict.fromkeys(str(info[4][0]) for info in infos))
+
+
+def _local(address: str) -> bool:
+    """This machine, its link (the cloud metadata service at 169.254.169.254) or no one.
+
+    Private ranges stay reachable: an allowlisted company mirror may live there.
+    """
+    ip = ipaddress.ip_address(address.split("%", 1)[0])
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast or ip.is_reserved
+
+
 @dataclass
 class AllowlistProxy:
     allowed: tuple[str, ...] = DEFAULT_ALLOWED_HOSTS
     denied: list[str] = field(default_factory=list)  # hosts refused, newest last
     reached: list[str] = field(default_factory=list)  # hosts connected to, newest last
+    resolve: Callable[[str, int], Awaitable[list[str]]] = field(default=_resolve, repr=False)
     _server: asyncio.base_events.Server | None = None
     port: int = 0
 
@@ -166,9 +212,32 @@ class AllowlistProxy:
                 "to [sandbox] allow_hosts in config.toml if you trust it.",
             )
             return None
+        # The allowlist matches names, and whoever runs a name's DNS decides where it points.
+        # Look it up once, refuse local answers, and connect to that same address, so a
+        # second lookup can't point the connection somewhere else (DNS rebinding).
+        address = host
+        try:
+            ipaddress.ip_address(host)  # an address listed on purpose is the user's choice
+        except ValueError:
+            try:
+                addresses = await asyncio.wait_for(self.resolve(host, port), timeout=30)
+            except (OSError, TimeoutError) as e:
+                await _reply(writer, 502, f"tinyharness sandbox: couldn't resolve {host}: {e}")
+                return None
+            if not addresses or any(_local(a) for a in addresses):
+                self.denied.append(host)
+                log.info("sandbox proxy blocked %s: it resolves to a local address", host)
+                await _reply(
+                    writer,
+                    403,
+                    f"tinyharness sandbox: {host} resolves to a local address ({', '.join(addresses)}); "
+                    "an allowed name can't reach this machine or its network.",
+                )
+                return None
+            address = addresses[0]
         self.reached.append(host)
         try:
-            return await asyncio.wait_for(asyncio.open_connection(host, port), timeout=30)
+            return await asyncio.wait_for(asyncio.open_connection(address, port), timeout=30)
         except (OSError, TimeoutError) as e:
             await _reply(writer, 502, f"tinyharness sandbox: couldn't reach {host}:{port}: {e}")
             return None

@@ -39,12 +39,20 @@ class ToolRegistry:
         """A copy with more tools (e.g. a team's board for its members)."""
         return ToolRegistry([*self._tools.values(), *extra])
 
-    def available(self, mode: PermissionMode, allowed: set[str] | None = None) -> list[AnyTool]:
-        """Tools to offer the model: filtered by an allow-list and, in plan mode, to read-only tools."""
+    def available(
+        self, mode: PermissionMode, allowed: set[str] | None = None, hidden: Iterable[str] = ()
+    ) -> list[AnyTool]:
+        """Tools to offer the model: filtered by an allow-list, by `hidden` (tools a deny rule
+        refuses outright, so the model doesn't try them), to the ones that work right now
+        (`Tool.offered`) and, in plan mode, to read-only tools."""
+        hidden = set(hidden)
         return [
             tool
             for name, tool in self._tools.items()
-            if (allowed is None or name in allowed) and (mode != PermissionMode.PLAN or tool.read_only)
+            if (allowed is None or name in allowed)
+            and name not in hidden
+            and tool.offered()
+            and (mode != PermissionMode.PLAN or tool.read_only)
         ]
 
 
