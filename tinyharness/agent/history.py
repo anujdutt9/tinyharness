@@ -19,6 +19,17 @@ from typing import Any, Literal
 Role = Literal["system", "user", "assistant", "tool"]
 
 INTERRUPTED = "(interrupted by user)"
+# Notes the session puts before the user's words (session.py: plan mode, an approved plan,
+# the sandbox switched, what changed while away). They're for the model, not the user.
+HARNESS_NOTES = re.compile(
+    r"\A(?:\s*<(plan-mode|approved-plan|sandbox-changed|session-resumed)\b[^>]*>.*?</\1>)+\s*",
+    re.DOTALL,
+)
+
+
+def typed_text(content: str) -> str:
+    """A user message as the user typed it, without the notes the session added."""
+    return HARNESS_NOTES.sub("", content)
 
 
 def new_id() -> str:

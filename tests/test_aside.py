@@ -323,3 +323,22 @@ async def test_a_message_typed_during_compact_is_sent_when_it_finishes(boxed, mo
     await boxed._turn
     assert sent == ["is the suite green?"]
     assert "Compacted" in boxed.console.file.getvalue()
+
+
+async def test_esc_then_a_slash_still_types_a_command(tmp_path):
+    """Seen in review: Esc, then "/cost" 0.4s later, and the agent got "cost" as a prompt:
+    prompt_toolkit's Meta+/ (Esc waits for a second key) took the slash."""
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    session, _ = scripted(tmp_path, [])
+    console = Console(file=io.StringIO(), width=100, theme=THEME)
+    repl = Repl(session, console, Renderer(console))
+    try:
+        with create_pipe_input() as keys, create_app_session(input=keys, output=DummyOutput()):
+            prompt = repl._prompt_session()
+            keys.send_text("\x1b/cost\r")
+            assert await asyncio.wait_for(prompt.prompt_async(), 3) == "/cost"
+    finally:
+        session.close()

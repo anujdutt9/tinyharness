@@ -49,6 +49,7 @@ class GrepTool(Tool[GrepInput]):
     )
     Input = GrepInput
     read_only = True
+    taken_from_json = True
 
     def describe(self, args: GrepInput) -> str:
         return f"Grep({args.pattern!r} in {args.path or '.'})"

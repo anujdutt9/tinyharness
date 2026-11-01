@@ -122,7 +122,7 @@ class PlanSaved:
     title: str
     path: str
     text: str
-    in_reply: bool = False  # it came from <plan> tags in the reply, already on screen
+    in_reply: bool = False  # it came from the reply (session.plan_in_reply), already on screen
 
 
 @dataclass(frozen=True)

@@ -182,6 +182,27 @@ def mark_seen(ctx: ToolContext, path: Path) -> None:
         ctx.seen_versions[str(path)] = version
 
 
+def _decode_json_fields(raw: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    """A list or object argument that arrived as its JSON text, decoded. Seen live: Llama
+    3.1 8B sent Ask's `questions` as the string "[{...}]", and the call was refused. Only
+    fields the schema says aren't strings, so text the tool takes as given (a file's
+    content, a command) is never touched."""
+    properties = schema.get("properties") or {}
+    fixed = dict(raw)
+    for key, value in raw.items():
+        prop = properties.get(key) or {}
+        kinds = {prop.get("type")} | {option.get("type") for option in prop.get("anyOf", [])}
+        if not isinstance(value, str) or "string" in kinds or not kinds & {"array", "object"}:
+            continue
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, list | dict):
+            fixed[key] = decoded
+    return fixed
+
+
 class Tool(ABC, Generic[InputT]):
     """Define the interface implemented by every tool.
 
@@ -199,6 +220,10 @@ class Tool(ABC, Generic[InputT]):
     # What it saves is read by every later session as context (the agent's memory), so
     # instructions planted by outside content could outlive this conversation.
     persists: ClassVar[bool] = False
+    # A call to it written as plain JSON in a reply, with no call marker, is run (see
+    # llm/textcalls.py). Only for tools that change nothing and reach nothing outside: such
+    # JSON may be an example the user asked for, and running one of those must cost nothing.
+    taken_from_json: ClassVar[bool] = False
 
     @abstractmethod
     async def run(self, args: InputT, ctx: ToolContext) -> str | ToolOutput:
@@ -324,7 +349,7 @@ class Tool(ABC, Generic[InputT]):
         InputT
             Validated input model.
         """
-        return self.Input.model_validate(raw)
+        return self.Input.model_validate(_decode_json_fields(raw, self.input_schema()))
 
     def input_schema(self) -> dict[str, Any]:
         """Return the provider-ready JSON schema for this tool's input."""

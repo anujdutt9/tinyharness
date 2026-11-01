@@ -19,10 +19,12 @@ itself. Every line here should change what you do.
 - `llm/client.py`: HTTP, streaming, retries, stop-reason normalization.
   `llm/adapters/`: one per wire format (chat, responses, anthropic, gemini).
   `llm/textcalls.py`: repairing malformed or text-written tool calls.
-- `tools/`: one file per tool. The core offers Read, Write, Edit, Glob, Grep and Bash;
-  the rest are turned on through extensions. `prompts/system.md`: the core system prompt.
+- `tools/`: one file per tool. The core offers Read (text, PDFs, images), Write, Edit,
+  Glob, Grep, Bash, Job, Open, WebFetch and WebSearch, plus Plan (plan mode) and Ask (when
+  someone can answer); the rest are turned on through extensions. `prompts/system.md`:
+  the core system prompt.
 - `ext.py`: the extension API (`setup(th)`; docs/extension-api.md). `extensions/`: the
-  built-in ones (web, pdf, open, todo, agents). New features go here, not in the core.
+  built-in ones (todo, memory, agents). New features go here, not in the core.
 - `sandbox/`: Seatbelt profile and `proxy.py`, the allowlist proxy that is a sandboxed
   command's only network. `permissions/`: the gate and modes.
 - `subagents/`, `tools/team.py`: subagents and teams (the `agents` extension).

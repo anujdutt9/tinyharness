@@ -451,15 +451,20 @@ class LLMClient:
                 found.extend(page)
             if self.provider.model_catalog == "ollama":
                 await asyncio.gather(*(self._read_ollama_capabilities(client, model) for model in found))
+                await self._read_ollama_served_context(client, found)
         return found
 
-    async def _read_ollama_capabilities(self, client: httpx.AsyncClient, model: ModelInfo) -> None:
-        """Add metadata Ollama exposes through `/api/show` but not its `/v1/models`."""
+    def _ollama_url(self, endpoint: str) -> str:
+        """An Ollama API endpoint (`/api/show`) beside its OpenAI-compatible `/v1`."""
         parts = urlsplit(self._base_url)
         path = parts.path.rstrip("/")
         if path.endswith("/v1"):
             path = path[:-3]
-        url = urlunsplit(parts._replace(path=f"{path}/api/show", query="", fragment=""))
+        return urlunsplit(parts._replace(path=f"{path}{endpoint}", query="", fragment=""))
+
+    async def _read_ollama_capabilities(self, client: httpx.AsyncClient, model: ModelInfo) -> None:
+        """Add metadata Ollama exposes through `/api/show` but not its `/v1/models`."""
+        url = self._ollama_url("/api/show")
         try:
             response = await client.post(url, json={"model": model.id}, headers=self._headers())
             response.raise_for_status()
@@ -480,6 +485,40 @@ class LLMClient:
         model.native_tools = "tools" in names
         model.images = "vision" in names
         model.reasoning = "thinking" in names  # what /effort offers for it
+
+    async def _read_ollama_served_context(self, client: httpx.AsyncClient, models: list[ModelInfo]) -> None:
+        """The window Ollama serves this client's model with, from `/api/ps`.
+
+        Without a num_ctx in the Modelfile, that's Ollama's own default (4,096 tokens, more with
+        OLLAMA_CONTEXT_LENGTH or a large GPU), known only once the model is loaded. Seen in
+        review: plain qwen3:4b was taken for its architecture's 262k, so the conversation was
+        never compacted while Ollama silently cut its start at 4k. It's loaded here the way
+        tinyharness's requests load it (no options): a model another client loaded with a
+        larger num_ctx is reloaded at the default by the next such request (seen live)."""
+        model = next((m for m in models if m.id in (self.model, f"{self.model}:latest")), None)
+        if model is None:
+            return
+        try:
+            # An empty request loads the model without generating anything.
+            load = await client.post(
+                self._ollama_url("/api/generate"),
+                json={"model": model.id},
+                headers=self._headers(),
+                timeout=120,
+            )
+            load.raise_for_status()
+            response = await client.get(self._ollama_url("/api/ps"), headers=self._headers())
+            response.raise_for_status()
+            served = {
+                str(m.get("model") or m.get("name")): int(m["context_length"])
+                for m in response.json().get("models", [])
+                if m.get("context_length")
+            }
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as error:
+            log.debug("could not read the context Ollama serves %s with: %s", model.id, error)
+            return
+        if context := served.get(model.id):
+            model.context = context
 
     async def _ensure_model_list(self) -> None:
         """Load the model list once per client, so requests can use what it says about the model."""

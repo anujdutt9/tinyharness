@@ -768,8 +768,9 @@ class BashInput(ToolInput):
     )
     background: bool = Field(
         default=False,
-        description="Run it in the background and return at once with a job id: for servers, "
-        "watchers, and long work whose result you don't need for your next step",
+        description="Run it in the background and return at once with a job id: for servers "
+        "(sandboxed, a server needs network_host='localhost' to listen), watchers, and long work "
+        "whose result you don't need for your next step",
     )
     outside_sandbox: bool = Field(
         default=False,

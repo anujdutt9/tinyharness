@@ -18,7 +18,7 @@ from rich.table import Table
 from rich.text import Text
 
 from tinyharness import SessionInfo, __version__
-from tinyharness.agent.history import Message
+from tinyharness.agent.history import Message, typed_text
 from tinyharness.cli import scout
 from tinyharness.cli.render import Renderer
 from tinyharness.cli.repl import Repl, report_error
@@ -425,7 +425,7 @@ def print_resumed(console: Console, session: Session) -> None:
     console.print(f"  [brand]↻[/] [bold]Resumed[/] [muted]· {report.summary()}[/]")
     for role, prefix in (("user", "❯"), ("assistant", "●")):
         if (m := last.get(role)) is not None:
-            text = " ".join((m.content or "").rpartition("</session-resumed>")[2].split())
+            text = " ".join(typed_text(m.content or "").split())
             console.print(f"  [subtle]{prefix}[/] [muted]{text[:160]}{'…' if len(text) > 160 else ''}[/]")
     if report.anything_changed:
         console.print("  [warn]The model will be told what changed before your next message.[/]")

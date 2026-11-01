@@ -27,10 +27,12 @@ from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from tinyharness import trust
 from tinyharness.agent import world
 from tinyharness.agent.compaction import SUMMARY_MARK, Compactor
-from tinyharness.agent.history import History, Image, Message
+from tinyharness.agent.history import History, Image, Message, ToolCall
 from tinyharness.agent.loop import LoopDeps, record_usage, run_agent_loop, summary_notes
 from tinyharness.agent.prompts import build_system_prompt, load_instructions
 from tinyharness.agent.sessionlog import (
@@ -50,10 +52,10 @@ from tinyharness.hooks import Hook, HookRunner, load_hooks
 from tinyharness.jobs import JobTable
 from tinyharness.llm import identity
 from tinyharness.llm.calibration import CalibrationStore
-from tinyharness.llm.client import LLMClient, Ping
+from tinyharness.llm.client import LLMClient, Ping, ToolCallAccumulator
 from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.providers import DEFAULT_CONTEXT, Provider
-from tinyharness.llm.textcalls import recover_calls
+from tinyharness.llm.textcalls import recover_calls, repair_arguments
 from tinyharness.llm.tokens import count_tokens, estimate_tokens, model_counter
 from tinyharness.llm.types import Effort
 from tinyharness.llm.usage import Usage, UsageMeter
@@ -75,7 +77,7 @@ from tinyharness.sandbox.proxy import AllowlistProxy
 from tinyharness.skills import Skill, SkillRegistry, build_skill_prompt, load_skills, skills_section
 from tinyharness.subagents import AgentSpec, load_agents
 from tinyharness.subagents.runner import run_subagent
-from tinyharness.tools.ask import AskTool, QuestionCallback
+from tinyharness.tools.ask import AskQuestion, AskTool, QuestionCallback
 from tinyharness.tools.base import Tool, ToolContext, ToolError, file_version
 from tinyharness.tools.bash import BashInput, BashTool
 from tinyharness.tools.job import JobTool
@@ -86,6 +88,14 @@ from tinyharness.tools.web import WebFetchTool, WebSearchTool
 from tinyharness.trust import TrustStore
 from tinyharness.workspace import Scratch, Workspace
 
+# A line that asks something: the reply ends its turn with questions for the user.
+_ASKS = re.compile(r"\?\s*(?:\*\*|\*|_)?\s*$", re.MULTILINE)
+QUESTIONS_NOTE = (
+    "Your last reply asked the user questions in writing. Call the Ask tool once with exactly "
+    "those questions: a one- or two-word header each, the question, and its options with the "
+    "one you recommend first (for a yes/no question, the two answers). Don't add, drop or "
+    "change any, call no other tool, and write nothing else."
+)
 MAX_SUGGESTION = 120  # chars: a longer "next message" is the model explaining, not a suggestion
 # Reasoning a model wrote into its reply instead of a separate field (open models served
 # without a reasoning parser); unclosed when the reply ended mid-thought.
@@ -94,6 +104,50 @@ INLINE_REASONING = re.compile(r"^\s*<think>.*?(?:</think>|\Z)", re.DOTALL)
 # on (`_plan_note_says_planning`). Leaving plan mode is the user's switch, as in opencode.
 PLAN_TAG = "<plan-mode>"
 PLAN_BLOCK = re.compile(r"<plan>\s*(.*?)\s*</plan>", re.DOTALL)  # a plan in the reply (_plan_in_reply)
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})\s*([\w+-]*)")
+# A plan's title line: "# Title", and as Gemma 3 also wrote it, "**# Title**" or "**Title: …**".
+PLAN_TITLE = re.compile(r"^\*{0,2}(?:# |Title:\s*)(\S.*?)\*{0,2}\s*$")
+
+
+def plan_in_reply(text: str) -> str:
+    """The plan in a plan-mode reply that didn't call Plan, or "".
+
+    Whatever is between <plan> tags (no title needed), or else Markdown from a '# Title' line
+    on, as the Plan tool asks for (inside a ```markdown fence, it ends with the fence). Seen
+    live: Gemma 3 12B wrote its plans that way, fenced or not, its title also as '**# Title**'
+    or '**Title: …**', and they were lost. A '# ' line in a code block is a comment, and
+    replies that only asked questions never had a title line."""
+    tagged = [block.strip() for block in PLAN_BLOCK.findall(text) if block.strip()]
+    titled = _titled_plan(PLAN_BLOCK.sub("", text))
+    # Whatever is between the tags is the plan, unless it's one line beside a whole plan
+    # written above it (seen live: qwen3-4b-2507 wrote its plan, then "<plan>done</plan>").
+    if tagged and ("\n" in tagged[-1] or not titled):
+        return tagged[-1]
+    return titled
+
+
+def _titled_plan(text: str) -> str:
+    """Markdown from a plan's title line on, outside code blocks; "" when there's none."""
+    lines = text.splitlines()
+    fence = ""  # the open fence's marker, while in a code block
+    markdown = False
+    for i, line in enumerate(lines):
+        if found := FENCE.match(line):
+            if not fence:
+                fence, markdown = found.group(1), found.group(2).lower() in ("", "markdown", "md")
+            elif line.strip() == fence:
+                fence = ""
+            continue
+        if (fence and not markdown) or not (title := PLAN_TITLE.match(line)):
+            continue
+        rest = lines[i + 1 :]
+        if fence:
+            end = next((j for j, after in enumerate(rest) if after.strip() == fence), len(rest))
+            rest = rest[:end]
+        return "\n".join([f"# {title.group(1).strip('* ')}", *rest]).strip()
+    return ""
+
+
 # The order (look, ask, plan, revise) follows what plan modes people like share: Claude
 # Code, Codex, addyosmani's planning skill, better-plan-mode (docs/plans-design.md).
 PLAN_ON = (
@@ -511,7 +565,14 @@ class Session:
         self.history = history
         self.ctx.todos = normalize_todo_ids(saved.todos)
         self.plan_tool.restore(saved.plan)
-        if self.plan_tool.current is not None and self.plan_tool.current.approved:
+        if self.plan_tool.current is not None and not self.plan_tool.current.approved:
+            # It was waiting for review. Resumed in another mode, every write was refused as
+            # unapproved, and only Shift+Tab into plan mode and out again approved it (seen
+            # in review). Back in plan mode, leaving it approves the plan, as before.
+            if self.mode != PermissionMode.PLAN:
+                self.mode_before_plan = self.mode
+                self.gate.set_mode(PermissionMode.PLAN)
+        elif self.plan_tool.current is not None:
             plan = self.plan_tool.current
             self.ctx.plan_summary = (
                 f"[approved plan] {plan.path} revision {plan.approved}; follow its steps in order "
@@ -923,23 +984,20 @@ class Session:
         return notice
 
     async def _plan_in_reply(self) -> PlanSaved | None:
-        """Save a plan the model put in its reply between <plan> tags, as if it had called Plan.
+        """Save a plan the model put in its reply (`plan_in_reply`), as if it had called Plan.
 
         Seen live: Qwen 4B planned well in its replies but never called Plan; putting the
-        answer into a tool's long text argument is a habit only models trained on it have.
-        Only tagged text counts, so a turn that asks questions is never taken for a plan."""
+        answer into a tool's long text argument is a habit only models trained on it have."""
         allowed = self.options.allowed_tools
         if self.mode != PermissionMode.PLAN or (allowed and self.plan_tool.name not in allowed):
             return None
         last = next((m for m in reversed(self.history.messages) if m.role == "assistant"), None)
-        blocks = (
-            PLAN_BLOCK.findall(last.content) if last is not None and isinstance(last.content, str) else []
-        )
-        if not blocks or not blocks[-1].strip():
+        found = plan_in_reply(last.content) if last is not None and isinstance(last.content, str) else ""
+        if not found:
             return None
         if self.plan_tool.current is not None and self.plan_tool.current.edited():
             return None  # the user's hand edit wins; the Plan tool shows it to the model
-        await self.plan_tool.run(PlanInput(plan=blocks[-1]), self.ctx)
+        await self.plan_tool.run(PlanInput(plan=found), self.ctx)
         self.ctx.hand_back = ""  # the turn is already over
         plan = self.plan_tool.current
         if plan is None or (text := plan.text()) is None:
@@ -1350,10 +1408,10 @@ class Session:
         question = question.strip()
         if not question:
             raise ValueError("ask a question, e.g. /btw why this approach?")
-        answer, wanted_tool, _ = await self._side_call(
+        answer, wanted_tools, _ = await self._side_call(
             f"{load_prompt('aside')}\n\nQuestion: {question}", "aside"
         )
-        if not answer and wanted_tool:
+        if not answer and wanted_tools:
             return "That needs a tool (reading or running something): ask it in the conversation instead."
         return answer or "(no answer)"
 
@@ -1370,12 +1428,12 @@ class Session:
         line = line.strip("\"'` ")
         return line if len(line) <= MAX_SUGGESTION else ""
 
-    async def _side_call(self, note: str, kind: str) -> tuple[str, bool, str | None]:
+    async def _side_call(self, note: str, kind: str) -> tuple[str, list[ToolCall], str | None]:
         """One model call on a copy of the conversation plus `note`, kept out of the
         conversation. It sends the agent's own system prompt and tool definitions, so the
-        provider's cached prefix covers nearly all of it; any tool call is dropped.
-        Returns the reply's text, whether the model tried to call a tool, and the normalized
-        finish reason."""
+        provider's cached prefix covers nearly all of it; no tool call is run.
+        Returns the reply's text, the calls it made (written as text ones too), and the
+        normalized finish reason."""
         messages = list(self.history.messages) or [Message(role="system", content=self._system_prompt())]
         last = messages[-1]
         if last.role == "user":  # a turn that just started: one user message, not two
@@ -1388,20 +1446,55 @@ class Session:
             t.name: t.spec() for t in self.tools.available(self.mode, allowed, self.gate.rules.hidden_tools())
         }
         text: list[str] = []
-        called = False
+        native = ToolCallAccumulator()
         usage: Usage | None = None
         finish: str | None = None
         async for chunk in self.llm.stream(messages, list(available.values())):
             text.append(chunk.text)
-            called = called or chunk.tool_call_delta is not None
+            if chunk.tool_call_delta:
+                native.add(chunk.tool_call_delta)
             usage = chunk.usage or usage
             finish = chunk.finish_reason or finish
         if usage is not None:
             record_usage(usage, self.llm, self.ctx, self.transcript, kind=kind)
         answer, calls = recover_calls(
-            "".join(text), lambda name: available[name].parameters if name in available else None
+            "".join(text),
+            lambda name: available[name].parameters if name in available else None,
+            lambda name: True,  # nothing in a side call runs: its calls are only read
         )
-        return answer.strip(), called or bool(calls), finish
+        return answer.strip(), native.calls() + calls, finish
+
+    async def questions_in_reply(self) -> list[AskQuestion]:
+        """The questions the agent's last reply asked in prose, as Ask questions for the
+        picker: one extra model call that only restates them as an Ask call. [] when the
+        last reply has none, Ask isn't offered, or they can't be read.
+
+        Seen live: models that write their questions instead of calling Ask (Ministral 8B
+        in 5 of 6 plan-mode runs, Qwen3 4B in some) left the user to type the answers.
+        Restating questions is far easier for a small model than choosing to call Ask
+        while planning, and the reply to it is never shown or kept.
+        """
+        ask = self.tools.get("Ask")
+        last = self.history.messages[-1] if self.history.messages else None
+        if (
+            ask is None
+            or not ask.offered()
+            or last is None
+            or last.role != "assistant"
+            or last.tool_calls
+            or not _ASKS.search(last.content or "")
+        ):
+            return []
+        _, calls, finish = await self._side_call(QUESTIONS_NOTE, "questions")
+        for call in calls:
+            if call.name != ask.name or finish == "length":
+                continue
+            try:
+                raw = json.loads(repair_arguments(call.arguments) or call.arguments)
+                return list(ask.parse(raw).questions)
+            except (json.JSONDecodeError, ValidationError, TypeError):
+                continue
+        return []
 
     async def run_skill(self, name: str, args: str = "") -> AsyncGenerator[Event, None]:
         """Run an installed skill as a turn.

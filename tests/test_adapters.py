@@ -1098,6 +1098,8 @@ async def test_ollama_model_discovery_reads_native_capabilities(tmp_path):
         requests.append((request.method, request.url.path, json.loads(request.content or b"{}")))
         if request.url.path == "/v1/models":
             return httpx.Response(200, json={"data": [{"id": "gemma3:270m"}, {"id": "qwen3:8b"}]})
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": [{"model": "gemma3:270m", "context_length": 4096}]})
         model = json.loads(request.content)["model"]
         capabilities = (
             ["completion"] if model == "gemma3:270m" else ["completion", "tools", "vision", "thinking"]
@@ -1122,6 +1124,8 @@ async def test_ollama_model_discovery_reads_native_capabilities(tmp_path):
         ("GET", "/v1/models", {}),
         ("POST", "/api/show", {"model": "gemma3:270m"}),
         ("POST", "/api/show", {"model": "qwen3:8b"}),
+        ("POST", "/api/generate", {"model": "gemma3:270m"}),  # loaded as its requests load it
+        ("GET", "/api/ps", {}),  # then the window it's served with
     ]
 
 
@@ -1153,6 +1157,37 @@ async def test_an_ollama_model_run_without_its_tag_is_the_listed_latest(tmp_path
     assert info is not None and info.id == "qwen3:latest" and info.reasoning and info.native_tools
     assert info.context == 32768  # the window Ollama serves it with: past it, Ollama drops the start
     assert llm.model_info("qwen3:4b") is None  # another tag is another model
+
+
+async def test_an_ollama_model_without_num_ctx_gets_the_window_it_is_served_with(tmp_path):
+    """Seen in review: plain qwen3:4b (no num_ctx in its Modelfile) was taken for its
+    architecture's 262k context while Ollama served it with 4k, so the conversation was never
+    compacted and Ollama silently cut its start. /api/ps says what it's served with, once
+    the model is loaded, so it's loaded first, the way tinyharness's requests load it."""
+    loaded: list[dict] = []
+    requests = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "qwen3:4b"}]})
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={"capabilities": ["tools"], "parameters": "top_k 20"})
+        if request.url.path == "/api/generate":
+            loaded.append({"model": "qwen3:4b", "context_length": 4096})
+            return httpx.Response(200, json={"done": True})
+        return httpx.Response(200, json={"models": loaded})
+
+    llm = LLMClient(
+        load_catalog()["ollama"],
+        "",
+        "qwen3:4b",
+        transport=httpx.MockTransport(answer),
+        models=ModelDirectory(tmp_path),
+    )
+    [model] = await llm.fetch_models()
+    assert model.context == 4096
+    assert requests == ["/v1/models", "/api/show", "/api/generate", "/api/ps"]
 
 
 # ---- a model that takes no images (text-only, or served without its vision encoder) ----

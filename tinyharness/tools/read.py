@@ -118,6 +118,7 @@ class ReadTool(Tool[ReadInput]):
     )
     Input = ReadInput
     read_only = True
+    taken_from_json = True
 
     async def run(self, args: ReadInput, ctx: ToolContext) -> str | ToolOutput:
         path = resolve_readable(args, args.path, ctx)

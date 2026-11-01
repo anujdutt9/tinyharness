@@ -32,7 +32,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from tinyharness.agent.history import History, Message
+from tinyharness.agent.history import History, Message, typed_text
 from tinyharness.agent.transcript import Transcript, lock_is_held
 from tinyharness.paths import state_dir
 
@@ -258,7 +258,7 @@ def _describe(path: Path) -> SessionInfo | None:
             count += 1
             message = r.get("message", {})
             if not title and message.get("role") == "user":
-                title = " ".join(str(message.get("content") or "").split())[:80]
+                title = " ".join(typed_text(str(message.get("content") or "")).split())[:80]
     if not title:
         return None
     active = lock_is_held(path.with_name(f".{path.stem}.lock"))

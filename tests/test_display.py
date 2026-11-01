@@ -644,6 +644,14 @@ def test_reasoning_is_hidden_by_default_but_kept(renderer):
     assert renderer.last_thought == "The bug is in the retry loop."
 
 
+def test_a_thought_under_a_second_gets_no_row(renderer):
+    """Seen in review: "∴ Thought for 0s" rows, which say nothing; ctrl+t still shows it."""
+    think(renderer, "Easy.", seconds=0.2)
+    renderer.handle(AssistantText("Done."))
+    assert not any("Thought" in line for line in shown(renderer))
+    assert renderer.last_thought == "Easy."
+
+
 def test_reasoning_can_be_shown(renderer):
     renderer.show_thinking = True
     think(renderer, "The bug is in the retry loop.")
@@ -890,6 +898,7 @@ def test_writing_a_file_is_not_called_thinking(renderer):
 
     renderer.wait("Working")
     renderer.handle(Reasoning("Planning the deck."))
+    renderer._thought_since -= 3  # as if it took that long
     assert renderer._activity == "Thinking"
     renderer.handle(ToolInputStreaming("Write", 0))
     assert renderer._activity == "Writing a file"
@@ -1287,6 +1296,26 @@ def test_a_job_row_shows_where_the_job_got_to():
     assert summarize_output("Job", "(job j1 finished: exit 0, no output)").startswith("(job j1")
 
 
+def test_a_stopped_job_row_says_stopped():
+    """Seen in review: a stopped server's row showed the last request it logged."""
+    from tinyharness.cli.render import summarize_output
+
+    out = "GET / 200\n(job j3 stopped: python3 -m http.server · stopped it)"
+    assert summarize_output("Job", out) == "stopped"
+
+
+def test_a_command_that_moved_to_the_background_does_not_look_finished(renderer):
+    """Seen in review: a command still running at its 5s timeout became job j3, and its row
+    read "✓ Bash … 5s" as if it had finished."""
+    out = (
+        "building...\n(still running after 5s, so it moved to the background as job j3 instead "
+        "of being killed; you'll get a note when it ends. Job(id='j3', action='wait') waits.)"
+    )
+    replay(renderer, ("Bash(make)", "Bash", {"command": "make"}, out, False))
+    text = renderer.console.export_text()
+    assert "running in the background as j3" in text and "✓" not in text
+
+
 def test_files_changed_by_subagents_count_in_the_footer(renderer):
     """Seen live: two subagents changed files, and the footer said "1 file +3 −1"."""
     from tinyharness.events import SubagentUpdate
@@ -1390,3 +1419,18 @@ def test_printed_lines_end_where_their_text_ends():
     assert lines[0] == "  hello"  # was "  hello" and 73 spaces
     assert lines[1] == "\x1b[48;2;32;32;32mcode   \x1b[0m"
     assert lines[2] == "partial rest"
+
+
+def test_auto_modes_reason_stays_on_one_line():
+    """Seen in review: auto mode wrote two lines of review reasoning under each call."""
+    from tinyharness.events import PermissionDecision
+
+    renderer = Renderer(Console(width=60, record=True))
+    renderer.handle(ToolUse("Bash", {"command": "ls"}, "Bash(ls)"))
+    reason = "listing files in the project is read-only and matches what the user asked for here"
+    renderer.handle(PermissionDecision("Bash", True, "classifier", reason))
+    renderer.handle(ToolsDispatched(["Bash"], False))
+    renderer.handle(ToolResult("Bash", "a.py", False))
+    lines = renderer.console.export_text().splitlines()
+    [note] = [line for line in lines if "auto mode" in line]
+    assert "…" in note and len(lines) == 4  # blank, the row, its output, the one-line note

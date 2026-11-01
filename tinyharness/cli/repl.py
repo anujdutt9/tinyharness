@@ -335,6 +335,7 @@ class Repl:
         # Started with --mode auto counts as agreeing to it; otherwise it's asked once.
         self.auto_confirmed = session.mode == PermissionMode.AUTO
         self._plan_ready = False  # the last turn ended with a plan to review (hand_off_plan)
+        self._last_done = ""  # why the last turn ended (events.Done.reason)
         self.auto_declined = False  # said no once: Shift+Tab skips auto mode (/mode auto still asks)
         self.git = git_status(session.workspace.root)  # refreshed after each turn, not on every redraw
         self._prompt: _CompactPrompt | None = None
@@ -344,6 +345,7 @@ class Repl:
         self._sending_now = False  # Esc stopped the turn to send the waiting messages
         self.suggestion = ""  # the likely next message, shown in the empty input box (Tab takes it)
         self._suggesting: asyncio.Task[None] | None = None
+        self._offering: asyncio.Task[None] | None = None  # questions from a prose reply (_offer_questions)
         self.aside: Aside | None = None  # the /btw answer shown above the input box (Esc closes it)
         self._answering: asyncio.Task[None] | None = None
         self._live_input_tokens = 0  # estimated current call, until its TokenUsage arrives
@@ -390,6 +392,10 @@ class Repl:
             parts.append((3, [("class:toolbar.ok", "sandbox")]))
         elif "Bash" in session.tools.names():
             parts.append((4, [("class:toolbar.warn", "sandbox off")]))
+        if running := len(session.jobs.running()):
+            parts.append(
+                (4, [("class:toolbar.brand", f"{running} job{'s' if running != 1 else ''} · /jobs")])
+            )
         if self.git is not None:
             branch, dirty = self.git
             parts.append(
@@ -460,6 +466,17 @@ class Repl:
             if self._turn is not None:
                 self._turn.cancel()
 
+        @keys.add("escape", "/")
+        def _escape_then_slash(event: KeyPressEvent) -> None:
+            """Esc, then / before Esc's wait for a second key ran out (Alt+key arrives as
+            Esc and the key). Seen in review: prompt_toolkit's Meta+/ took both keys, so
+            "/cost" went to the agent as "cost". Esc does what it does, then / is typed."""
+            if self.aside is not None:
+                _close_aside(event)
+            elif self.turn_running and self.session.pending_steering:
+                _send_now(event)
+            event.current_buffer.insert_text("/")
+
         @keys.add("escape", "enter")
         @keys.add("c-j")
         def _newline(event: KeyPressEvent) -> None:
@@ -483,6 +500,12 @@ class Repl:
                     buffer.apply_completion(completion)
             elif is_command(buffer.text):
                 buffer.start_completion(select_first=False)
+
+        @keys.add("c-b", filter=Condition(lambda: self.session.jobs.has_foreground()))
+        def _to_background(event: KeyPressEvent) -> None:
+            """Move the running command to the background: it keeps going as a job, and the
+            agent carries on (Ctrl+B otherwise moves the cursor back, as in Emacs)."""
+            self.session.jobs.detach_foreground()
 
         @keys.add("c-t")
         def _toggle_thinking(event: KeyPressEvent) -> None:
@@ -682,6 +705,32 @@ class Repl:
             self.console.print(self._aside_panel(aside, body, note), width=width, highlight=False)
         return without_links(captured.get().rstrip("\n"))
 
+    def _offer_questions(self) -> None:
+        """A plan-mode turn that ended asking in prose: the same picker Ask shows, once the
+        questions are read (`Session.questions_in_reply`), and the picks go as the next
+        message. Read in the background: typing or sending something first skips it, and
+        with no questions found the next message is suggested as usual."""
+
+        async def offer() -> None:
+            try:
+                questions = await self.session.questions_in_reply()
+            except Exception as e:  # a missed picker isn't worth an error panel
+                log.debug("no questions read from the reply: %s", e)
+                questions = []
+            typed = self._prompt is not None and bool(self._prompt.default_buffer.text.strip())
+            if not questions or typed or self.turn_running or not self.running:
+                if not questions and not typed and not self.turn_running:
+                    self._suggest()
+                return
+            answers = await self.renderer.ask_questions(questions)
+            if answers is None or self.turn_running:
+                return  # Esc: they'll answer in chat
+            line = "\n".join(f"{q.header}: {a}" for q, a in zip(questions, answers, strict=True))
+            self._echo(line)
+            await self._run(self.session.run(line))
+
+        self._offering = asyncio.create_task(offer())
+
     def _suggest(self) -> None:
         """Once a turn ends: guess the next message, to show in the empty input box."""
         if not self.session.config.prompt_suggestions or not self.running:
@@ -757,8 +806,12 @@ class Repl:
         while one runs is passed to the agent."""
         self._prompt = prompt = self._prompt_session()
         self.renderer.embedded = True  # the prompt draws the live region now
+        self.renderer.can_detach = self.session.jobs.has_foreground
         self.renderer.exclusive = self.exclusive
         with patch_stdout(raw=True):  # output scrolls above the input box
+            plan = self.session.plan_tool.current
+            if self.session.resume_report is not None and plan is not None and not plan.approved:
+                await self.hand_off_plan()  # left while it waited for review: ask again
             while self.running:
                 async with self._ui:
                     if self._questions:
@@ -1086,6 +1139,8 @@ class Repl:
             self._turn = asyncio.create_task(self._turn_in_background(self.session.run("\n\n".join(left))))
         elif finished and self.running and self._plan_ready:
             await self.hand_off_plan()
+        elif finished and suggest and self._last_done == "stop" and self.session.mode == PermissionMode.PLAN:
+            self._offer_questions()
         elif finished and suggest:
             self._suggest()
 
@@ -1156,6 +1211,7 @@ class Repl:
         async for event in events:
             if isinstance(event, Done):
                 self._plan_ready = event.reason == "plan_ready"
+                self._last_done = event.reason
             elif isinstance(event, TokenUsage):
                 if self.session.context_window:
                     self.context_used = (event.input + event.cached) / self.session.context_window

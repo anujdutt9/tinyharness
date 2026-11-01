@@ -341,7 +341,9 @@ async def _run_agent_loop(
         if not calls and text:
             # A call written as text (the server's tool-call parser failed on it) would
             # otherwise be taken for the final answer.
-            text, calls = recover_calls(text, functools.partial(_schema, available))
+            text, calls = recover_calls(
+                text, functools.partial(_schema, available), functools.partial(_from_json, available)
+            )
             if calls:
                 deps.transcript.write("recovered_calls", tools=[c.name for c in calls])
                 # Saved reasoning would be sent back in place of these calls, without them.
@@ -639,6 +641,11 @@ def _find_tool(available: dict[str, Tool[Any]], name: str) -> Tool[Any] | None:
 def _schema(available: dict[str, Tool[Any]], name: str) -> dict[str, Any] | None:
     tool = _find_tool(available, name)
     return tool.input_schema() if tool is not None else None
+
+
+def _from_json(available: dict[str, Tool[Any]], name: str) -> bool:
+    tool = _find_tool(available, name)
+    return tool is not None and tool.taken_from_json
 
 
 def _arguments(call: ToolCall, *, repair: bool) -> dict[str, Any] | json.JSONDecodeError:

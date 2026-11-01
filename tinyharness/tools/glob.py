@@ -39,6 +39,7 @@ class GlobTool(Tool[GlobInput]):
     )
     Input = GlobInput
     read_only = True
+    taken_from_json = True
 
     def describe(self, args: GlobInput) -> str:
         return f"Glob({args.pattern} in {args.path or '.'})"

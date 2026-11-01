@@ -113,6 +113,12 @@ _RUN_PREFIX = re.compile(
 )
 _EXIT_CODE = re.compile(r"\(exit code (\d+)\)\s*$")
 _TIMEOUT = re.compile(r"\(timed out after \d+s; the command was killed\)\s*$")
+# The Bash tool's own notes (tools/bash.py _moved_note): the command is now a background job.
+_MOVED = re.compile(
+    r"(?:^Started background job|moved to the background as job|moved this command to the background as job) "
+    r"(j\d+)",
+    re.MULTILINE,
+)
 _BUILD_FAILED = re.compile(
     r"(?im)^hint: Build failures usually indicate|failed to build|subprocess-exited-with-error"
 )
@@ -130,6 +136,7 @@ _TEST_COMMAND = re.compile(
 NAME_WIDTH = 6  # tool names are padded to this, so what follows lines up
 RECENT_CALLS = 3  # a running subagent's latest tool calls, shown under it
 PREVIEW_LINES = 3  # of a command's or search's output, under its row
+DETACH_HINT_SECONDS = 3  # a command running this long shows that Ctrl+B moves it to the background
 # Tools whose output is worth a glance: what a command printed, what a search found. A
 # Read, Edit or Write is summed up by its row (`212 lines`, `+4 −1`).
 _PREVIEWED = frozenset({"Bash", "Grep", "Glob"})
@@ -152,6 +159,8 @@ def summarize_output(tool: str, output: str) -> str:
     if tool == "Ask":  # the answers are on screen already, one line each
         return "answered" if text.startswith("The user answered") else "answering in chat"
     if tool == "Job":  # where the job got to: its latest line, not its first, nor the "(job …)" note
+        if lines[-1].endswith("· stopped it)"):
+            return "stopped"  # seen in review: a stopped server's row showed its last request
         # Seen live: a finished 18-epoch run showed "epoch 1/18 loss=1.7000" on its row.
         lines = [line for line in lines if line.strip() and not line.startswith("(")] or lines
         lines = lines[-1:]
@@ -271,6 +280,8 @@ class Renderer:
         # Embedded: the REPL keeps its input box up during a turn and draws the live region
         # itself (see `live_ansi`); rich's own Live display would fight it for the screen.
         self.embedded = False
+        # Whether Ctrl+B can move a running command to the background (set by the REPL).
+        self.can_detach: Callable[[], bool] = lambda: False
         # Taking the terminal for a question (a permission prompt) while the input box is up.
         self.exclusive: Callable[[], AbstractAsyncContextManager[None]] | None = None
         self._live: Live | None = None
@@ -316,6 +327,8 @@ class Renderer:
         for tool in self._running:
             elapsed = now - tool.started if tool.started else 0.0
             right = Text(_duration(elapsed), style="subtle") if elapsed >= 1 else Text()
+            if tool.name == "Bash" and elapsed >= DETACH_HINT_SECONDS and self.can_detach():
+                right.append(" · ctrl+b to background", style="subtle")
             parts.append(self._row(Text(frame, style=BRAND), tool, right))
         agents = list(self._agents.values())
         for i, agent in enumerate(agents):
@@ -550,7 +563,8 @@ class Renderer:
             under = None  # the preview already shows the line that would go here
         body = preview or ([under] if under else [])
         if tool.note:
-            credit = Text(tool.note, style="subtle")
+            # One line: seen in review, auto mode's reasoning wrapped to two under every call.
+            credit = Text(ellipsize(tool.note, max(self.console.width - 6, 20)), style="subtle")
             credit.stylize("italic")
             body.append(credit)
         for i, line in enumerate(body):
@@ -662,6 +676,14 @@ class Renderer:
         lines = [line for line in text.splitlines() if line.strip() and not line.startswith("(")]
         last = lines[-1].strip() if lines else ""
         is_test = _is_test_command(tool)
+        if moved := _MOVED.search(text):
+            # Seen in review: a command that hit its timeout and kept running as a job showed
+            # "✓ Bash … 5s", as if it had finished.
+            return (
+                Text("·", style="subtle"),
+                Text(f"running in the background as {moved.group(1)}", style="muted"),
+                None,
+            )
         if _TIMEOUT.search(text):
             if is_test:
                 self._turn.tests_passed = False
@@ -909,7 +931,7 @@ class Renderer:
         if self.show_thinking and thought:
             if rest:
                 self._print_thought(rest, first=not started)
-        elif thought or elapsed >= 1:
+        elif elapsed >= 1:  # seen in review: "∴ Thought for 0s" rows said nothing (ctrl+t still shows it)
             line = Text(f"∴ Thought for {_duration(elapsed)}", style="subtle")
             if thought:
                 line.append(" · ctrl+t to show", style="subtle")

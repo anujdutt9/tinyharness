@@ -36,10 +36,10 @@ framework underneath, so you can read the whole thing in an afternoon.
   then run normally, and bare Python installs use a project `.venv`. API keys never reach
   the model. Once outside content is
   in the conversation, anything that could send data out asks a person first.
-- **Small and fast.** Seven core tools and a short prompt (about 3k tokens before your
+- **Small and fast.** A few core tools and a short prompt (about 3k tokens before your
   instructions) that stays the same from call to call, so the provider's cache hits.
 - **Extensible.** One Python file with `setup(th)` adds tools, prompt sections, commands
-  and hooks. Web search, PDFs, subagents and parallel teams are built-in extensions you
+  and hooks. Todo lists, memory, subagents and parallel teams are built-in extensions you
   turn on.
 
 ## Quickstart
@@ -74,7 +74,7 @@ In the session, type `/` to autocomplete commands. The ones you'll use most:
 | `/mode` | change the permission mode (or press Shift+Tab) |
 | `/effort` | how hard the model reasons, `low` … `max`, the same for every model |
 | `/skills`, `/<skill>` | find or run skills |
-| `/extensions` | what's on and what it costs per request; `/extensions on web` |
+| `/extensions` | what's on and what it costs per request; `/extensions on agents` |
 | `/sandbox` | turn the sandbox on or off; what commands can write, read and reach |
 | `/btw <question>` | a quick side question, even while the agent works; not added to the conversation |
 | `/sessions`, `/context`, `/clear` | switch conversations, inspect context, or start fresh |
@@ -123,7 +123,7 @@ hooks, skills, subagents on different models, an extension, and a post-turn eval
 | | |
 |---|---|
 | **Agent loop** | Streaming, parallel read-only tools, argument validation and repair, recovery from cut-off and empty replies, retries with backoff |
-| **Tools** | Core: `Read` (text, PDFs, images) `Write` `Edit` `Glob` `Grep` `Bash` `Open` `WebFetch`, and `WebSearch` where the provider can search. Built-in extensions you turn on: `todo`, `memory`, `agents` (Agent, Team) |
+| **Tools** | Core: `Read` (text, PDFs, images) `Write` `Edit` `Glob` `Grep` `Bash` `Open` `WebFetch` `Job` (background commands), `WebSearch` where the provider can search, `Plan` in plan mode, and `Ask` where someone can answer. Built-in extensions you turn on: `todo`, `memory`, `agents` (Agent, Team) |
 | **Extensions** | One Python file with `setup(th)` adds tools, prompt sections, slash commands and event handlers ([docs/extension-api.md](docs/extension-api.md)); `/extensions on|off` |
 | **Permissions** | Routine work in the project and the sandbox doesn't ask; anything beyond it asks, with a diff for edits. Modes `default`, `auto` (an LLM classifier for unclear cases), `plan` (read-only; Shift+Tab to build), `ask` (every edit and command) and `bypassPermissions`; persistent allow/deny rules |
 | **Sandbox** | Native Seatbelt on macOS; optional Sandbox Runtime on Linux, Windows and as a fallback. Commands have narrow writes, blocked credential reads (SRT covers the home and project neighborhoods) and allowlisted network access; `/sandbox` shows it |

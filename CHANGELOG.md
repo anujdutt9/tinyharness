@@ -8,12 +8,22 @@ the SDK, and every break is listed here.
 ## Unreleased
 
 ### Added
+- `/jobs` lists background commands with their status and log, and `/jobs stop <id>` stops
+  one (the agent is told). The status bar shows how many are running, and Ctrl+B moves a
+  command that's running now to the background; its row says so once it has run a few
+  seconds.
+- A plan the agent writes in its reply under a `# Title`, fenced or not, is saved for review
+  as if it had called Plan, and you get the same "Build this plan?" question. Gemma 3 12B
+  planned this way and lost half its plans.
 - Plan mode asks its questions one at a time, as a picker: "Question 1 of 3 · Format",
   the recommended answer first and selected, so Enter takes it. Number keys or arrows pick
   another, the last row lets you type your own, and Esc lets you answer in chat instead.
   Each answer stays on screen as one line, and the agent goes on to write the plan in the
   same turn. A model that doesn't use the new Ask tool still asks in its reply, as before.
   The SDK gets it through `SessionOptions(question_callback=...)`.
+- Models that write their plan-mode questions instead of using the picker get the picker
+  anyway: one short extra call restates the questions, and your picks are sent as your
+  next message. Strong models already use the picker, so they never make that call.
 - Plan mode works like Claude Code's, with tinyharness's guarantees on top. The agent
   looks at the code briefly, asks at most three questions (each with options and a
   recommended default), then writes the plan in Markdown and hands it to you: it's shown
@@ -86,6 +96,10 @@ the SDK, and every break is listed here.
   off by default: a sandboxed command can then change what those tools load later.
 
 ### Changed
+- With Ollama, the context window is the one the model is actually served with: a model
+  with no `num_ctx` in its Modelfile runs at Ollama's default (4,096 tokens on most Macs),
+  not its architecture's 262k, so conversations get compacted before Ollama silently cuts
+  their start. Set `OLLAMA_CONTEXT_LENGTH` for Ollama to serve more.
 - When a request names a library, model or product the agent doesn't recognize, it looks it
   up on the web before asking you or guessing, then answers your question with what it
   learned instead of reporting the research back.
@@ -198,6 +212,24 @@ the SDK, and every break is listed here.
 - The next-message suggestion stands on its own without repeating `tab to use` beside it.
 
 ### Fixed
+- Two questions from the agent in one reply are asked one after the other, not both at once.
+- Resuming a session that ended while its plan was waiting for review comes back in plan
+  mode and asks "Build this plan?" again. Before, every write was refused as unapproved.
+- The resume preview and the `/resume` list show what you typed, not the notes tinyharness
+  adds before it (`<plan-mode>…`).
+- Esc followed quickly by `/` no longer drops the slash (the agent got "cost" for `/cost`).
+- A Job wait no longer says a job that matched its line and then crashed is "still
+  running"; a stopped job's row says "stopped"; a command that hit its timeout and moved to
+  the background says so on its row instead of looking finished.
+- No more "Thought for 0s" rows, and auto mode's reason for allowing a call stays on one line.
+- Tool calls from smaller models work more often. A list argument sent as JSON text is
+  decoded (Llama 3.1 8B sent Ask's questions this way). Calls written as JSON in the reply,
+  in the API's own shape or with the arguments beside the tool's name, are recovered
+  (Gemma 3 12B wrote all its plans this way, so every one was lost), but only for Read,
+  Glob, Grep, Plan and Ask: JSON with no call marker may be an example you asked for, so a
+  Bash or Write call written that way is never run. And broken JSON syntax
+  in arguments is repaired with json-repair, but only when no text the tool receives
+  would change and the arguments weren't cut off.
 - Resizing the terminal no longer leaves broken copies of the input box behind (seen in
   iTerm2 when dragging the window edge). tinyharness waits for the size to settle, then
   erases the box's lines as the terminal rewrapped them and redraws it once, in place,

@@ -209,6 +209,39 @@ def context(repl: Repl, arg: str) -> None:
     repl.console.print(f"  [muted]{used:,} of {window:,} tokens · {n} messages[/]")
 
 
+@command("/jobs", "list background commands, or stop one", group="Session", usage="[stop <id>]")
+async def jobs(repl: Repl, arg: str) -> None:
+    table = repl.session.jobs
+    action, _, job_id = arg.strip().partition(" ")
+    if action == "stop":
+        job = table.jobs.get(job_id.strip())
+        if job is None or not job.running:
+            repl.console.print(f"  [muted]No running job {escape(job_id.strip())!r}. /jobs lists them.[/]")
+            return
+        await table.stop(job)  # the agent gets a note that it stopped
+        repl.console.print(f"  [ok]✓[/] Stopped {job.id} [muted]· {escape(job.short_command(60))}[/]")
+        return
+    if action:
+        repl.console.print("  [muted]Usage: /jobs, or /jobs stop <id>[/]")
+        return
+    if not table.jobs:
+        repl.console.print(
+            "  [muted]No background jobs. The agent starts them for servers and long work; "
+            "ctrl+b moves a running command to the background.[/]"
+        )
+        return
+    rows = _grid(first_width=4)
+    for job in table.jobs.values():
+        style = "ok" if job.running else "muted"
+        rows.add_row(
+            f"[{style}]{job.id}[/]",
+            f"{escape(job.short_command(60))} [muted]· {job.describe()} · {pretty_path(job.log)}[/]",
+        )
+    repl.console.print(Padding(rows, (0, 0, 0, 2)))
+    if table.running():
+        repl.console.print("  [muted]/jobs stop <id> stops one; the agent is told.[/]")
+
+
 @command("/cost", "show tokens and cost for this session", group="Session")
 def cost(repl: Repl, arg: str) -> None:
     meter = repl.session.ctx.usage
