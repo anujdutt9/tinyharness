@@ -413,6 +413,10 @@ class LLMClient:
         model = model or self.model
         configured = next((m for m in self.provider.models if m.id == model), None)
         listed = self.directory.info(self.provider.name, model) if self.directory else None
+        if listed is None and self.directory and self.provider.model_catalog == "ollama" and ":" not in model:
+            # Ollama lists "qwen3:latest" for what you run as "qwen3": the same model. Seen live:
+            # without this, an Ollama model's context window, tools and reasoning were unknown.
+            listed = self.directory.info(self.provider.name, f"{model}:latest")
         return configured or listed or self._routed.get(model)
 
     async def list_models(self, *, refresh: bool = False) -> list[ModelInfo]:
@@ -459,15 +463,23 @@ class LLMClient:
         try:
             response = await client.post(url, json={"model": model.id}, headers=self._headers())
             response.raise_for_status()
-            capabilities = response.json().get("capabilities")
+            shown = response.json()
+            capabilities = shown.get("capabilities")
+            parameters = str(shown.get("parameters") or "")
         except (httpx.HTTPError, ValueError, AttributeError) as error:
             log.debug("could not read Ollama capabilities for %s: %s", model.id, error)
             return
+        # The window Ollama serves the model with, when its Modelfile sets one: past it,
+        # Ollama silently drops the start of the conversation. (The architecture's own
+        # context_length is what it could do, not what it's served with.)
+        if served := re.search(r"^num_ctx\s+(\d+)\s*$", parameters, re.MULTILINE):
+            model.context = int(served.group(1))
         if not isinstance(capabilities, list):
             return
         names = {str(capability) for capability in capabilities}
         model.native_tools = "tools" in names
         model.images = "vision" in names
+        model.reasoning = "thinking" in names  # what /effort offers for it
 
     async def _ensure_model_list(self) -> None:
         """Load the model list once per client, so requests can use what it says about the model."""

@@ -8,6 +8,7 @@ again, and only the block still being written stays live.
 
 from __future__ import annotations
 
+import re
 from typing import ClassVar
 
 from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
@@ -71,5 +72,9 @@ def _blank(line: list[Segment]) -> bool:
     return not "".join(seg.text for seg in line).strip()
 
 
+PLAN_TAGS = re.compile(r"</?plan>")
+
+
 def render(text: str) -> RenderableType:
+    text = PLAN_TAGS.sub("", text)  # plan mode's <plan> markers: the harness's, not the reader's
     return _Trimmed(ChatMarkdown(text)) if text.strip() else Text()

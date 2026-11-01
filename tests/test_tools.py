@@ -42,10 +42,16 @@ async def test_edit_requires_unique_match(ctx, tmp_path):
     assert (tmp_path / "a.txt").read_text() == "baz bar baz"
 
 
-async def test_edit_requires_read_first(ctx, tmp_path):
-    (tmp_path / "a.txt").write_text("foo")
-    with pytest.raises(ToolError, match="before editing"):
-        await call(EditTool(), {"path": "a.txt", "old_string": "foo", "new_string": "bar"}, ctx)
+async def test_edit_without_a_read_needs_text_found_once_word_for_word(ctx, tmp_path):
+    """Seen live: Sonnet looked at a file with `cat` in Bash, and its Edit was refused and
+    redone after a Read. Text found exactly once shows it has the current text; anything
+    less still asks for a Read."""
+    (tmp_path / "a.txt").write_text("foo = 1\nbar = 2\nbar = 2\n")
+    for old in ("baz = 3", "bar = 2", "foo  = 1", ""):  # missing, twice, close but not exact, empty
+        with pytest.raises(ToolError, match="before editing"):
+            await call(EditTool(), {"path": "a.txt", "old_string": old, "new_string": "x"}, ctx)
+    await call(EditTool(), {"path": "a.txt", "old_string": "foo = 1", "new_string": "foo = 9"}, ctx)
+    assert (tmp_path / "a.txt").read_text().startswith("foo = 9\n")
 
 
 async def test_edit_missing_file(ctx):
@@ -476,3 +482,46 @@ async def test_read_explains_a_broken_pdf(ctx, tmp_path):
     (tmp_path / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really")
     with pytest.raises(ToolError, match="not a readable PDF"):
         await call(ReadTool(), {"path": "broken.pdf"}, ctx)
+
+
+async def test_a_file_outside_the_project_has_its_secret_settings_hidden(tmp_path):
+    """Seen live: auto mode read a user's ~/.zshrc to add an alias, and Edit's "the changed
+    lines as they are now" showed a key from it. Keys this session doesn't know are hidden
+    in what any tool returns for a file outside the project; the file still edits."""
+    import json
+
+    from tinyharness.permissions import Decision
+    from tinyharness.testing import scripted_session
+
+    async def allow(request):
+        return Decision(True, "ok", "user")
+
+    project, home = tmp_path / "project", tmp_path / "home"
+    home.mkdir()
+    rc = home / ".zshrc"
+    rc.write_text(
+        "export PATH=$HOME/bin:$PATH\nexport ACME_API_KEY=acme-live-9f8e7d6c5b4a\nalias ll='ls -la'\n"
+    )
+    edit = {
+        "path": str(rc),
+        "old_string": "alias ll='ls -la'",
+        "new_string": "alias ll='ls -la'\nalias gs='git status'",
+    }
+    turns = [
+        [("Read", json.dumps({"path": str(rc)}))],
+        [("Edit", json.dumps(edit))],
+        [("Read", json.dumps({"path": "notes.sh"}))],
+        "done",
+    ]
+    session = scripted_session(project, turns, permission_callback=allow)
+    (project / "notes.sh").write_text("export TEST_API_KEY=fixture-value-1234\n")
+    try:
+        [event async for event in session.run("add a gs alias to my zshrc")]
+        results = [m.content for m in session.history.messages if m.role == "tool"]
+        assert len(results) == 3 and all("acme-live" not in r for r in results[:2])
+        assert "ACME_API_KEY=[REDACTED]" in results[0] and "alias ll='ls -la'" in results[0]
+        assert "leave those lines out of old_string" in results[1]
+        assert "acme-live-9f8e7d6c5b4a" in rc.read_text() and "alias gs" in rc.read_text()
+        assert "fixture-value-1234" in results[2]  # the project's own files show as they are
+    finally:
+        session.close()

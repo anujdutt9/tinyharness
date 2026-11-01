@@ -757,6 +757,15 @@ async def test_known_argument_slips_are_repaired(tmp_path, arguments):
     assert history.messages[2].tool_calls[0].arguments == '{"seconds": 1}'  # valid JSON kept
 
 
+async def test_a_json_call_that_switches_to_an_xml_parameter_is_repaired(tmp_path):
+    """Seen live: a Plan call from a hosted parser ended its JSON with an Anthropic-style
+    `<parameter name=...>` field, costing a second model call before the plan was saved."""
+    arguments = '{"unused": 1\n<parameter name="seconds">2}'
+    events, history = await run(tmp_path, ScriptedLLM([[("Read", arguments)], "done"]), [Echo()])
+    assert [e.output for e in events if isinstance(e, ToolResult)] == ["read 2.0"]
+    assert json.loads(history.messages[2].tool_calls[0].arguments) == {"unused": 1, "seconds": 2}
+
+
 async def test_a_tool_name_in_the_wrong_case_still_runs(tmp_path):
     events, history = await run(tmp_path, ScriptedLLM([[("read", '{"seconds": 1}')], "done"]), [Echo()])
     assert [e.output for e in events if isinstance(e, ToolResult)] == ["read 1.0"]

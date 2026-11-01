@@ -1099,7 +1099,9 @@ async def test_ollama_model_discovery_reads_native_capabilities(tmp_path):
         if request.url.path == "/v1/models":
             return httpx.Response(200, json={"data": [{"id": "gemma3:270m"}, {"id": "qwen3:8b"}]})
         model = json.loads(request.content)["model"]
-        capabilities = ["completion"] if model == "gemma3:270m" else ["completion", "tools", "vision"]
+        capabilities = (
+            ["completion"] if model == "gemma3:270m" else ["completion", "tools", "vision", "thinking"]
+        )
         return httpx.Response(200, json={"capabilities": capabilities})
 
     provider = load_catalog()["ollama"]
@@ -1112,15 +1114,45 @@ async def test_ollama_model_discovery_reads_native_capabilities(tmp_path):
     )
     models = await llm.fetch_models()
 
-    assert [(model.id, model.native_tools, model.images) for model in models] == [
-        ("gemma3:270m", False, False),
-        ("qwen3:8b", True, True),
+    assert [(model.id, model.native_tools, model.images, model.reasoning) for model in models] == [
+        ("gemma3:270m", False, False, False),
+        ("qwen3:8b", True, True, True),
     ]
     assert requests == [
         ("GET", "/v1/models", {}),
         ("POST", "/api/show", {"model": "gemma3:270m"}),
         ("POST", "/api/show", {"model": "qwen3:8b"}),
     ]
+
+
+async def test_an_ollama_model_run_without_its_tag_is_the_listed_latest(tmp_path):
+    """Seen live: Ollama lists "qwen3-4b-2507-32k:latest" for the model run as
+    "qwen3-4b-2507-32k", so its context window, tools and reasoning were unknown and /effort
+    said the endpoint "does not advertise effort support"."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "qwen3:latest"}, {"id": "qwen3:8b"}]})
+        return httpx.Response(
+            200,
+            json={
+                "capabilities": ["completion", "tools", "thinking"],
+                "parameters": "num_ctx    32768\ntop_k 20",
+            },
+        )
+
+    llm = LLMClient(
+        load_catalog()["ollama"],
+        "",
+        "qwen3",
+        transport=httpx.MockTransport(answer),
+        models=ModelDirectory(tmp_path),
+    )
+    await llm.list_models()
+    info = llm.model_info()
+    assert info is not None and info.id == "qwen3:latest" and info.reasoning and info.native_tools
+    assert info.context == 32768  # the window Ollama serves it with: past it, Ollama drops the start
+    assert llm.model_info("qwen3:4b") is None  # another tag is another model
 
 
 # ---- a model that takes no images (text-only, or served without its vision encoder) ----

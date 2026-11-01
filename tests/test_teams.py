@@ -841,7 +841,8 @@ def test_a_running_subagents_status_stays_on_one_row_during_a_multi_line_command
 
 
 async def test_a_subagent_keeps_its_own_record_of_the_files_it_has_read(tmp_path):
-    (tmp_path / "notes.txt").write_text("hello")
+    # Twice, so the Edit can't go ahead on an exact unique match: only a Read would do.
+    (tmp_path / "notes.txt").write_text("hello\nhello")
     ctx = make_ctx(tmp_path)
     ctx.read_paths.add(str(tmp_path / "notes.txt"))  # the lead read it, the subagent didn't
     llm = ScriptedLLM(
@@ -849,7 +850,7 @@ async def test_a_subagent_keeps_its_own_record_of_the_files_it_has_read(tmp_path
     )
     gate = PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS)
     await run_subagent(WRITER_EDIT, "edit", ctx=ctx, llm=llm, tools=default_registry(), gate=gate)
-    assert (tmp_path / "notes.txt").read_text() == "hello"  # refused: read it first
+    assert (tmp_path / "notes.txt").read_text() == "hello\nhello"  # refused: read it first
     assert "before editing it" in llm.requests[1][-1].content
     assert ctx.read_paths == {str(tmp_path / "notes.txt")}  # the lead's record is untouched
 

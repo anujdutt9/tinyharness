@@ -1,5 +1,6 @@
 """The Bash and Open tools, and how the permission gate treats them."""
 
+import asyncio
 import os
 import sys
 import time
@@ -18,6 +19,7 @@ from tinyharness.permissions import Decision, PermissionGate, PermissionMode, Pe
 from tinyharness.permissions.classifier import ClassifierDecision
 from tinyharness.permissions.rules import CAPABILITY
 from tinyharness.sandbox import Sandbox, SandboxPolicy
+from tinyharness.sandbox.proxy import AllowlistProxy
 from tinyharness.testing import scripted_session
 from tinyharness.tools import bash
 from tinyharness.tools.base import ToolError, ToolOutput
@@ -126,6 +128,31 @@ async def test_localhost_denial_explains_the_scoped_retry(tmp_path):
     out = await run(tool, "echo 'bind on address 127.0.0.1: Operation not permitted'; exit 1", tmp_path)
     assert "tinyharness:localhost_denied" in out
     assert "network_host='localhost'" in out
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "    self.socket.bind(self.server_address)\nPermissionError: [Errno 1] Operation not permitted",
+        "listen tcp :8080: bind: operation not permitted",
+        "Error: listen EPERM: operation not permitted 0.0.0.0:3000",
+    ],
+)
+def test_a_server_refused_its_port_gets_the_localhost_hint(error):
+    """Seen live: Python's http.server failed to bind in the sandbox (no address in the
+    message) and got the filesystem hint, so the model gave up instead of using
+    network_host='localhost'."""
+    assert "localhost_denied" in bash.sandbox_notes(error, "serve", 1, True, [])
+    assert "localhost_denied" not in bash.sandbox_notes("open: Operation not permitted", "x", 1, True, [])
+
+
+@pytest.mark.parametrize("host", ["::", "::1", "0.0.0.0", "127.0.0.1", "localhost"])
+def test_a_refused_loopback_address_points_at_network_host_localhost(host):
+    """Seen live: curl http://[::]:8765 (the address http.server prints) was refused, and the
+    hint said network_host='::', which the input validator rejects."""
+    notes = bash.sandbox_notes("", "curl", 7, True, [host])
+    assert "network_host='localhost'" in notes
+    assert host == "localhost" or f"network_host={host!r}" not in notes
 
 
 async def test_semicolon_keeps_independent_probes_running(tmp_path):
@@ -306,7 +333,8 @@ def test_python_install_creates_a_project_environment_when_none_is_active(tmp_pa
     assert env["VIRTUAL_ENV"] == str(environment)
     assert env["PATH"].split(os.pathsep)[0] == str(environment_python(environment).parent)
     boundary = sandboxed_bash(tmp_path).approval_boundary(BashTool.Input(command="pip install requests"))
-    assert boundary is not None and str(environment) in boundary.warning
+    # Seen live: the full path ran to 180 characters in the approval card.
+    assert boundary is not None and boundary.warning.endswith("write only to the project's .venv")
 
 
 def test_a_command_that_makes_its_own_environment_is_not_preceded_by_one(tmp_path, monkeypatch):
@@ -839,10 +867,11 @@ async def test_session_network_approvals_accumulate_in_later_sandboxes(tmp_path,
     class RecordingProxy:
         instances: ClassVar[list] = []
 
-        def __init__(self, allowed):
+        def __init__(self, allowed, ask=None):
             self.allowed = tuple(allowed)
             self.denied = []
             self.reached = []
+            self.asking_seconds = 0.0
             self.closed = False
             self.instances.append(self)
 
@@ -900,10 +929,11 @@ async def test_skill_network_set_needs_one_reviewed_session_approval(tmp_path, m
             return argv
 
     class RecordingProxy:
-        def __init__(self, allowed):
+        def __init__(self, allowed, ask=None):
             self.allowed = tuple(allowed)
             self.denied = []
             self.reached = []
+            self.asking_seconds = 0.0
 
         async def start(self):
             return 43123
@@ -1073,14 +1103,17 @@ def sandboxed_bash(tmp_path) -> BashTool:
     return BashTool(MarkingSandbox(), SandboxPolicy(write_roots=(tmp_path,), env={"POLICY_ENV": "set"}))
 
 
-def test_bash_schema_contains_no_containment_control(tmp_path):
-    """Seen live: a routine dependency install was proposed without containment."""
+def test_bash_schema_contains_no_general_containment_control(tmp_path):
+    """Seen live: a routine dependency install was proposed without containment. The one
+    way out reruns only a command the sandbox refused for a protected path, and asks."""
     tool = sandboxed_bash(tmp_path)
     assert set(tool.input_schema()["properties"]) == {
         "command",
         "timeout",
         "description",
         "network_host",
+        "background",  # when it runs, not how contained it is
+        "outside_sandbox",  # see test_outside_sandbox_is_refused_until_...
     }
 
 
@@ -1380,9 +1413,9 @@ def test_a_blocked_write_names_the_folder_and_how_to_move_it(tmp_path):
     assert "$XDG_CACHE_HOME" in out and "Memory tool" in out and out.endswith("(exit code 1)")
 
 
-def test_a_blocked_protected_path_says_the_user_must_run_it(tmp_path):
+def test_a_blocked_protected_path_says_the_user_must_approve_it(tmp_path):
     """Seen live: `pre-commit install` hit .git/hooks/pre-commit (relative), and the note
-    named no path and didn't say only the user can install hooks."""
+    named no path and didn't say what the user has to do."""
     for reported in (".git/hooks/pre-commit", str(tmp_path / ".git" / "hooks" / "pre-commit")):
         policy = SandboxPolicy.for_project(tmp_path)
         out = BashTool(MarkingSandbox(), policy)._report(
@@ -1393,7 +1426,8 @@ def test_a_blocked_protected_path_says_the_user_must_run_it(tmp_path):
             sandboxed=True,
         )
         assert f"[tinyharness:protected_path_denied path={reported}]" in out
-        assert "tell the user the exact command" in out and out.endswith("(exit code 3)")
+        assert "outside_sandbox=true" in out and "tell them the exact command" in out
+        assert out.endswith("(exit code 3)")
 
 
 def test_a_blocked_write_inside_a_writable_root_names_no_folder(tmp_path):
@@ -1424,3 +1458,191 @@ def test_a_venv_whose_python_is_in_the_sandbox_cache_is_pointed_out(tmp_path):
     assert tool._cached_python_notes("ls", since=0) == ()  # only after making a venv
     shared = BashTool(MarkingSandbox(), replace(policy, shared_caches=("uv",)))
     assert shared._cached_python_notes("uv venv", since=0) == ()
+
+
+# ---- a new host while the command runs ----
+
+
+async def test_each_command_gets_its_own_proxy_that_asks_its_own_agent(tmp_path, monkeypatch):
+    """The question names the command that asked, even with subagents running commands side
+    by side: each command's requests go through a proxy of its own."""
+    made = []
+
+    class RecordingProxy(AllowlistProxy):
+        def __init__(self, allowed, ask=None):
+            super().__init__(tuple(allowed), ask=ask)
+            made.append(self)
+
+    monkeypatch.setattr("tinyharness.tools.bash.AllowlistProxy", RecordingProxy)
+    tool = BashTool(FakeSandbox(), SandboxPolicy(write_roots=(tmp_path,)), proxy=AllowlistProxy(()))
+    ctx = make_ctx(tmp_path)
+    asked = []
+
+    async def ask_network(asking_tool, args, host):
+        asked.append((asking_tool, args["command"], host))
+        return False
+
+    ctx.ask_network = ask_network
+    await call(tool, {"command": "true"}, ctx)
+    [proxy] = made
+    assert await proxy.ask("s3.example") is False
+    assert asked == [(tool, "true", "s3.example")]
+
+
+async def test_time_spent_deciding_on_a_host_is_added_to_the_timeout():
+    task = asyncio.create_task(asyncio.sleep(1.5))
+    assert await bash._settle(task, None, 1.0, None, asked=lambda: 1.0) is None  # it finished
+
+
+async def test_a_command_that_keeps_retrying_a_refused_host_is_stopped_early(monkeypatch):
+    """Seen live: `load_dataset` retried a refused s3.amazonaws.com, printing nothing, until its
+    3-minute timeout."""
+    monkeypatch.setattr(bash, "STUCK_QUIET_SECONDS", 0.5)
+    proc = await asyncio.create_subprocess_exec("sleep", "30", start_new_session=True)
+    proxy = AllowlistProxy(())
+    proxy.denied += ["s3.example"] * 3
+    stuck: list[str] = []
+    await asyncio.wait_for(bash._stop_when_stuck(proc, proxy, bash._Capture(), 0, stuck), 10)
+    await proc.wait()
+    assert stuck == ["s3.example"] and proc.returncode is not None
+
+
+async def test_one_refusal_then_quiet_work_is_left_alone(monkeypatch):
+    """A tool that falls back after one refusal (pip trying an index, then building quietly)
+    isn't stuck: only repeated asking for the refused host is."""
+    monkeypatch.setattr(bash, "STUCK_QUIET_SECONDS", 0.5)
+    proc = await asyncio.create_subprocess_exec("sleep", "30", start_new_session=True)
+    proxy = AllowlistProxy(())
+    proxy.denied.append("pypi.example")
+    stuck: list[str] = []
+    watcher = asyncio.create_task(bash._stop_when_stuck(proc, proxy, bash._Capture(), 0, stuck))
+    await asyncio.sleep(2.5)
+    assert proc.returncode is None and stuck == []
+    watcher.cancel()
+    proc.kill()
+    await proc.wait()
+
+
+def test_a_stopped_command_says_why():
+    tool = BashTool(FakeSandbox(), SandboxPolicy(write_roots=()))
+    text = tool._report(
+        "", -15, False, BashInput(command="python get.py"), True, ["s3.example"], stuck="s3.example"
+    )
+    assert "network_host='s3.example'" in text and "stopped early: it kept retrying s3.example" in text
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS frameworks")
+def test_macos_framework_messages_come_out_as_utf8(monkeypatch):
+    """Seen live: Metal's "You don’t have permission" arrived as "You don‚Äôt have
+    permission": frameworks read C strings in the default encoding, Mac Roman unless set."""
+    from tinyharness.tools.bash import command_env
+
+    monkeypatch.setenv("__CF_USER_TEXT_ENCODING", "0x1F5:0x0:0x0")
+    assert command_env({})["__CF_USER_TEXT_ENCODING"] == "0x1F5:0x8000100:0x8000100"
+
+
+# ---- leaving the sandbox for a protected step ----
+
+GIT_REFUSAL = "echo 'error: could not write config file .git/config: Operation not permitted' >&2; exit 128"
+
+
+class WrapCounter(FakeSandbox):
+    def __init__(self):
+        self.wrapped = 0
+
+    def wrap(self, argv, policy):
+        self.wrapped += 1
+        return argv
+
+
+async def test_git_config_refusals_are_recognised_as_protected(tmp_path):
+    """Seen live: git's "could not write config file .git/config" was read as a write to
+    "/config", so "add a git remote" got the generic note and dead-ended."""
+    tool = BashTool(FakeSandbox(), SandboxPolicy.for_project(tmp_path))
+    out = await run(tool, GIT_REFUSAL, tmp_path)
+    assert "protected_path_denied path=.git/config" in out and "outside_sandbox=true" in out
+    assert tool.refused_commands == {GIT_REFUSAL}
+
+
+async def test_outside_sandbox_is_refused_until_the_sandbox_refused_a_protected_path(tmp_path):
+    sandbox = WrapCounter()
+    tool = BashTool(sandbox, SandboxPolicy.for_project(tmp_path))
+    args = {"command": "echo hi", "outside_sandbox": True}
+    assert tool.escapes(args) is None and tool.contained(args)  # no prompt: it stays inside
+    with pytest.raises(ToolError, match="only reruns, word for word"):
+        await run(tool, "echo hi", tmp_path, outside_sandbox=True)
+    assert sandbox.wrapped == 0  # nothing ran
+    await run(tool, GIT_REFUSAL, tmp_path)  # a refusal unlocks that command only
+    with pytest.raises(ToolError, match="only reruns, word for word"):
+        await run(tool, "uv pip install requests", tmp_path, outside_sandbox=True)
+
+
+@pytest.mark.parametrize("mode", [PermissionMode.AUTO, PermissionMode.BYPASS])
+async def test_after_a_protected_refusal_leaving_the_sandbox_asks_every_time(tmp_path, mode):
+    """The user approves each command that runs outside the sandbox: auto mode's review
+    and bypass mode can't, and the answer is never remembered."""
+    sandbox = WrapCounter()
+    tool = BashTool(sandbox, SandboxPolicy.for_project(tmp_path))
+    await run(tool, GIT_REFUSAL, tmp_path)
+    args = {"command": GIT_REFUSAL, "outside_sandbox": True}
+    assert not tool.contained(args) and tool.runs_unsandboxed(args)
+    assert not tool.rememberable_escape({**args, "network_host": "example.com"})
+    user = User()
+    gate = PermissionGate(workspace=Workspace(tmp_path), mode=mode, callback=user)
+    assert (await gate.check(tool, args, None)).allow
+    assert len(user.asked) == 1 and "outside the sandbox" in user.asked[0].warning
+    assert user.asked[0].remember_label == ""
+    before = sandbox.wrapped
+    out = await run(tool, GIT_REFUSAL, tmp_path, outside_sandbox=True)
+    assert sandbox.wrapped == before and "protected_path_denied" not in out  # ran without it
+
+
+class NamedDeleteReview:
+    """A review that allows a deletion only when told the user may have named it."""
+
+    def __init__(self, decision="allow"):
+        self.decision, self.notes = decision, []
+
+    def fast_filter(self, args):
+        return None
+
+    async def classify(self, tool_name, args, history_tail="", note=""):
+        self.notes.append(note)
+        return ClassifierDecision(self.decision, "the user asked to clean up build/")
+
+
+async def test_auto_mode_lets_the_review_allow_a_deletion_the_user_named(tmp_path):
+    """Seen live: "clean up the old build folder" still asked before `rm -r build` in auto
+    mode. Inside the sandbox, the review may allow a deletion the user asked for."""
+    review, user = NamedDeleteReview(), User()
+    gate = PermissionGate(
+        workspace=Workspace(tmp_path), mode=PermissionMode.AUTO, callback=user, classifier=review
+    )
+    decision = await gate.check(sandboxed_bash(tmp_path), {"command": "rm -r build"}, None)
+    assert decision.allow and user.asked == []
+    assert "named what to delete" in review.notes[0]
+
+
+@pytest.mark.parametrize(
+    "command, sandboxed, outside, decision",
+    [
+        ("rm -r build", True, False, "ask"),  # the review isn't sure the user asked
+        ("rm -r build", True, True, "allow"),  # outside content could have suggested it
+        ("rm -r build", False, False, "allow"),  # without the sandbox it can reach anything
+        ("git reset --hard", True, False, "allow"),  # throws away work: always the user's call
+        ("rm -r build && git clean -fd", True, False, "allow"),
+    ],
+)
+async def test_other_deletions_still_ask_in_auto_mode(tmp_path, command, sandboxed, outside, decision):
+    review, user = NamedDeleteReview(decision), User()
+    gate = PermissionGate(
+        workspace=Workspace(tmp_path),
+        mode=PermissionMode.AUTO,
+        callback=user,
+        classifier=review,
+        outside=lambda: ["WebFetch example.com"] if outside else [],
+    )
+    tool = sandboxed_bash(tmp_path) if sandboxed else unsandboxed(tmp_path)
+    assert (await gate.check(tool, {"command": command}, None)).allow
+    [request] = user.asked
+    assert "deletes" in request.reason or "discards" in request.reason

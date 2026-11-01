@@ -37,7 +37,7 @@ from tinyharness.cli.theme import (
     percent,
 )
 from tinyharness.cli.widgets import PaletteItem, ask, palette, pick
-from tinyharness.config import forget_model, remember_model, save_theme
+from tinyharness.config import forget_model, recent_models, remember_model, save_theme
 from tinyharness.llm.types import ModelInfo
 from tinyharness.paths import pretty_path
 from tinyharness.permissions import PermissionMode
@@ -277,8 +277,12 @@ async def compact(repl: Repl, arg: str) -> None:
     session = repl.session
     before = session.compactor.used(session.history)
     try:
-        with repl.console.status("[muted]Summarizing the conversation…[/]", spinner="dots"):
+        if repl.turn_running:  # under the input box (`_IN_BACKGROUND`): a spinner would fight it
+            repl.console.print("  [muted]Summarizing the conversation…[/]")
             done = await session.compact()
+        else:
+            with repl.console.status("[muted]Summarizing the conversation…[/]", spinner="dots"):
+                done = await session.compact()
     except Exception as e:  # e.g. the model is rate-limited; the conversation is untouched
         _fail(repl, f"Couldn't compact: {e}")
         return
@@ -316,24 +320,31 @@ async def model(repl: Repl, arg: str) -> None:
             return
         spec = requested
     else:
-        spec = await _pick_current_provider_model(repl)
+        spec = await _pick_model(repl, cfg.provider)
     if spec:
         await _switch(repl, spec)
 
 
-async def _pick_current_provider_model(repl: Repl) -> str:
-    """List models only from the selected provider."""
+async def _pick_model(repl: Repl, provider: str) -> str:
+    """List models only from `provider`."""
     cfg = repl.session.config
-    label = cfg.provider_info.label
-    with repl.console.status(f"[muted]Loading {escape(label)} models…[/]", spinner="dots"):
-        try:
-            models = await repl.session.client_for(cfg.provider).list_models()
-        except Exception as error:
-            repl.console.print(f"  [warn]Couldn't list {escape(label)} models ({type(error).__name__}).[/]")
-            return await ask("Model", hint=cfg.model)
+    label = cfg.providers[provider].label
+    current = cfg.model if provider == cfg.provider else ""
+    # Only the listing under the spinner. Seen live: when it failed, the spinner kept
+    # redrawing over the "Model" prompt that asked instead, and the line flickered.
+    try:
+        with repl.console.status(f"[muted]Loading {escape(label)} models…[/]", spinner="dots"):
+            models = await repl.session.client_for(provider).list_models()
+    except Exception as error:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+        why = f"HTTP {status}" if status else type(error).__name__
+        repl.console.print(
+            f"  [warn]Couldn't list {escape(label)} models ({why}). Type a model name instead.[/]"
+        )
+        return await ask("Model", hint=current)
     if not models:
         repl.console.print(f"  [warn]{escape(label)} reports no models.[/]")
-        return await ask("Model", hint=cfg.model)
+        return await ask("Model", hint=current)
     choices = [
         PaletteItem(
             item.id,
@@ -343,10 +354,15 @@ async def _pick_current_provider_model(repl: Repl) -> str:
         )
         for item in models
     ]
-    return await palette(f"Choose a model · {label}", choices, current=cfg.model) or ""
+    return await palette(f"Choose a model · {label}", choices, current=current) or ""
 
 
-@command("/provider", "pick a provider (uses its default model)", group="Model", usage="[name]")
+@command(
+    "/provider",
+    "pick a provider (its default model, or the one you used last)",
+    group="Model",
+    usage="[name]",
+)
 async def provider(repl: Repl, arg: str) -> None:
     repl.session.reload_keys()
     cfg = repl.session.config
@@ -355,8 +371,18 @@ async def provider(repl: Repl, arg: str) -> None:
         [PaletteItem(value, label) for value, label in _provider_options(repl)],
         cfg.provider,
     )
-    if name:
-        await _switch(repl, f"{name}:")
+    if name and (model := await _model_for(repl, name)):
+        await _switch(repl, f"{name}:{model}")
+
+
+async def _model_for(repl: Repl, provider: str) -> str:
+    """The model to use on `provider`: its default, else the one you used there last, else
+    one you pick from its list. Seen live: local providers (Ollama, LM Studio) have no
+    default, so switching to Ollama failed with the server's "model is required"."""
+    if default := repl.session.config.providers[provider].default_model:
+        return default
+    used = next((spec.partition(":")[2] for spec in recent_models() if spec.startswith(f"{provider}:")), "")
+    return used or await _pick_model(repl, provider)
 
 
 def _provider_options(repl: Repl) -> list[tuple[str, str]]:
@@ -643,11 +669,13 @@ async def mode(repl: Repl, arg: str) -> None:
         repl.console.print(f"  [muted]Still in {MODE_LABEL[repl.session.mode]} mode.[/]")
         return
     try:
-        repl.session.set_mode(arg)
+        notice = repl.session.set_mode(arg)
     except ValueError as e:
         _fail(repl, str(e))
         return
     m = repl.session.mode
+    if notice:
+        _ok(repl, notice)
     _ok(repl, f"Mode set to [bold {MODE_STYLE[m]}]{MODE_LABEL[m]}[/] [muted]· {MODE_HINT[m]}[/]")
 
 

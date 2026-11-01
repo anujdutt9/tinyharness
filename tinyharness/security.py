@@ -189,6 +189,32 @@ def redact_secrets(text: str, extra: dict[str, str] | None = None) -> str:
     return API_KEY_PATTERN.sub("[REDACTED API KEY]", mask_secrets(text, extra))
 
 
+# A secret-named setting and its value: `export OPENAI_API_KEY=sk-...` (sh), `set -gx
+# GH_TOKEN ...` (fish), `api_key = "..."` (TOML, YAML, .ini).
+# Also after a line number (Read, Edit: `     3\t`) or a Grep match's `file:3:`.
+_SECRET_SETTING = re.compile(
+    r"^((?:\s*\d+\t|[^\s:]+:\d+:)?"
+    r"(?:\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*[=:]\s*"
+    r"|\s*set\s+(?:-\w+\s+)*([A-Za-z_][A-Za-z0-9_]*)\s+))(\S.*)$",
+    re.MULTILINE,
+)
+_BARE_SECRET_NAMES = ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "PASSPHRASE")
+
+
+def redact_settings(text: str) -> str:
+    """Hide the values of secret-named settings and anything shaped like an API key, for
+    files outside the project such as ~/.zshrc. Seen live: auto mode read a user's
+    ~/.zshrc to add an alias, and keys that aren't in this session's environment (so
+    `mask_secrets` doesn't know them) would have reached the model."""
+
+    def hide(match: re.Match[str]) -> str:
+        name = (match.group(2) or match.group(3)).upper()
+        secret = _is_secret_env_name(name) or name in _BARE_SECRET_NAMES
+        return f"{match.group(1)}[REDACTED]" if secret else match.group(0)
+
+    return API_KEY_PATTERN.sub("[REDACTED API KEY]", _SECRET_SETTING.sub(hide, text))
+
+
 def find_api_key(text: str, extra: dict[str, str] | None = None) -> str | None:
     """Return a redacted preview of the first API key in ``text``, if present."""
     for value in known_secrets(extra).values():

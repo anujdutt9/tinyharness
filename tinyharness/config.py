@@ -85,6 +85,17 @@ class SandboxSettings(BaseModel):
         return self
 
 
+class JobSettings(BaseModel):
+    """`[jobs]`: Bash commands that run in the background (see tinyharness/jobs.py)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # A foreground command still running at its timeout moves to the background instead of
+    # being killed (its work isn't lost). False: the timeout kills it, as before.
+    background_on_timeout: bool = True
+    max_running: int = Field(default=8, ge=1)  # background jobs at once, subagents' included
+
+
 class ModelRoles(BaseModel):
     """Active-provider model IDs for the classifier and its review, search digestion, and compaction."""
 
@@ -151,6 +162,7 @@ class Config(BaseModel):
     permission_mode: PermissionMode = PermissionMode.DEFAULT
     permissions: PermissionSettings = Field(default_factory=lambda: PermissionSettings())
     sandbox: SandboxSettings = Field(default_factory=lambda: SandboxSettings())
+    jobs: JobSettings = Field(default_factory=lambda: JobSettings())
     models: ModelSettings = Field(default_factory=ModelSettings)
     extensions: ExtensionSettings = Field(default_factory=lambda: ExtensionSettings())
     scratch_max_age_hours: int = 24

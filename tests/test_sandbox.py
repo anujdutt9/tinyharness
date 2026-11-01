@@ -470,3 +470,14 @@ async def test_a_commands_own_unix_sockets_work_and_others_stay_closed(ws):
         server.close()
         outside.unlink()
     assert "own b'ping'" in out and "outside 1" in out
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS frameworks")
+def test_metal_may_write_its_own_scratch_folder_but_not_the_rest_of_the_users_temp(tmp_path):
+    """Seen live: PyTorch on Apple GPUs printed "You don't have permission to save the file
+    mpsgraph-..." on every graph: Metal writes there, under the user's own temp directory,
+    whatever TMPDIR says. Only that one folder opens up."""
+    policy = SandboxPolicy.for_project(tmp_path, scratch=tmp_path / "scratch")
+    metal = [r for r in policy.write_roots if r.name == "com.apple.MetalPerformanceShadersGraph"]
+    assert len(metal) == 1 and metal[0].parent.name == "T"
+    assert metal[0].parent not in policy.write_roots

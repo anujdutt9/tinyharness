@@ -325,6 +325,15 @@ class PermissionGate:
             return decision
         if risk is not None and self.classifier and (blocked := self.classifier.fast_filter(args)):
             return Decision(False, blocked.reason, "classifier")
+        if (
+            risk is not None
+            and self.classifier is not None
+            and not self.outside()  # outside content could have suggested the deletion
+            and (note := tool.nameable_risk(args)) is not None
+        ):
+            review = await self.classifier.classify(tool.name, args, history_tail=history_tail, note=note)
+            if review.decision == "allow":
+                return Decision(True, review.reason or "the user asked for this", review.provider)
 
         if self._in_scratch(path):
             return Decision(True, "agent scratch directory", "mode")
@@ -469,7 +478,12 @@ class PermissionGate:
             return Decision(True, "default: inside the working directory", "mode")
         if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO) and tool.contained(args):
             return Decision(True, f"{self.mode.value}: runs in the sandbox", "mode")
-        if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO) and _public_read(tool, args):
+        # Plan mode too: researching is what it's for. Seen live: in plan mode, reading the
+        # PyPI page of the package being planned for asked every time, though default and
+        # auto mode read it freely. Outside content still gets the review above.
+        if self.mode in (PermissionMode.DEFAULT, PermissionMode.AUTO, PermissionMode.PLAN) and _public_read(
+            tool, args
+        ):
             return Decision(True, f"{self.mode.value}: reading a public web page", "mode")
         if self.mode == PermissionMode.AUTO:
             return await self._auto(tool, args, path, trusted, history_tail)

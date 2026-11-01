@@ -23,7 +23,17 @@ from tinyharness.cli import scout
 from tinyharness.cli.render import Renderer
 from tinyharness.cli.repl import Repl, report_error
 from tinyharness.cli.setup import print_key_guide, run_setup
-from tinyharness.cli.theme import BRAND, LOGO, MODE_HINT, MODE_LABEL, MODE_STYLE, MUTED, THEME, wordmark
+from tinyharness.cli.theme import (
+    BRAND,
+    LOGO,
+    MODE_HINT,
+    MODE_LABEL,
+    MODE_STYLE,
+    MUTED,
+    THEME,
+    TrimmedConsole,
+    wordmark,
+)
 from tinyharness.cli.widgets import pick
 from tinyharness.config import note_launch, remember_model
 from tinyharness.paths import pretty_path, source_checkout
@@ -233,6 +243,8 @@ async def run(args: argparse.Namespace, console: Console) -> None:
         # No terminal to ask in (a script, a pipe): the gate denies what needs approval and
         # tells the model why. Prompting anyway crashed the run with OSError (Errno 22).
         permission_callback=renderer.ask_permission if sys.stdin.isatty() else None,
+        # Ask is offered only where someone can answer: not in a script, a pipe or -p.
+        question_callback=renderer.ask_questions if sys.stdin.isatty() and not args.prompt else None,
         on_event=renderer.handle,
         expose_skill_tool=False if args.no_skill_tool else None,
         use_last_model=True,
@@ -431,10 +443,11 @@ def _ago(when: datetime) -> str:
 async def first_run_setup(options: SessionOptions, console: Console, *, force: bool = False) -> bool:
     """For an installed copy, help a new user choose and connect a provider rather
     than starting with whichever credential happens to be set. A git checkout (development)
-    starts as before unless `force`. Returns False if the user backed out."""
-    if not force and source_checkout() is not None:
-        return True
+    starts as before unless `force`, or nothing it could start with is connected. Returns
+    False if the user backed out."""
     config = options.resolve_config()
+    if not force and source_checkout() is not None and config.has_key(config.provider):
+        return True
     endpoint_needs_discovery = (
         config.provider_info.local or config.provider_info.endpoint_setup
     ) and not config.model
@@ -469,7 +482,7 @@ def open_session(options: SessionOptions, console: Console, *, interactive: bool
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    console = Console(theme=THEME)
+    console = TrimmedConsole(theme=THEME)
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",

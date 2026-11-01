@@ -208,7 +208,7 @@ def repair_arguments(arguments: str) -> str | None:
     try:
         value, end = json.JSONDecoder().raw_decode(text)
     except json.JSONDecodeError:
-        return None
+        return _repair_hybrid_parameters(text)
     if isinstance(value, str):  # encoded twice: '"{\"path\": ...}"'
         return repair_arguments(value)
     if not isinstance(value, dict):
@@ -216,3 +216,31 @@ def repair_arguments(arguments: str) -> str | None:
     # Something after the object: a second object run together with it, or stray text.
     # The first object is the call; anything else is dropped.
     return json.dumps(value, ensure_ascii=False) if end < len(text) or text != arguments else arguments
+
+
+_HYBRID_PARAMETER = re.compile(
+    r'^(.*)\s*<parameter\s+name="([\w.-]+)">\s*(.*?)(?:</parameter>)?\s*$', re.DOTALL
+)
+
+
+def _repair_hybrid_parameters(text: str) -> str | None:
+    """Repair a native call that switches from JSON to an XML parameter for its last field.
+
+    Seen live: a hosted parser returned a Plan call whose object ended after `decisions`,
+    followed by `<parameter name="out_of_scope">[...]}`. Only accept it when the JSON prefix
+    becomes a complete object by adding one brace and the suffix is exactly one JSON value
+    followed by that object's closing brace.
+    """
+    match = _HYBRID_PARAMETER.fullmatch(text)
+    if match is None:
+        return None
+    prefix, name, suffix = match.groups()
+    try:
+        base = json.loads(prefix.rstrip().rstrip(",") + "}")
+        value, end = json.JSONDecoder().raw_decode(suffix)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(base, dict) or name in base or suffix[end:].strip() not in ("", "}"):
+        return None
+    base[name] = value
+    return json.dumps(base, ensure_ascii=False)

@@ -122,7 +122,7 @@ async def test_web_search_and_fetch_results_count_as_outside_content(tmp_path):
 async def test_a_commands_downloads_count_as_outside_content(tmp_path, monkeypatch):
     from tinyharness.sandbox import SandboxPolicy
 
-    async def downloaded(self, args, ctx):
+    async def downloaded(self, args, ctx, jobs=None):
         return Execution("ok", 0, False, True, [], ["pypi.org"])
 
     monkeypatch.setattr(BashTool, "execute", downloaded)
@@ -138,7 +138,7 @@ async def test_registry_download_by_package_manager_keeps_provenance(tmp_path, m
     still outside content even when a package manager performed the download."""
     from tinyharness.sandbox import SandboxPolicy
 
-    async def downloaded(self, args, ctx):
+    async def downloaded(self, args, ctx, jobs=None):
         return Execution("ok", 0, False, True, [], ["pypi.org", "files.pythonhosted.org", "github.com"])
 
     monkeypatch.setattr(BashTool, "execute", downloaded)
@@ -153,7 +153,7 @@ async def test_installing_the_projects_declared_dependencies_does_not_taint(tmp_
     project's declared dependencies are as trusted as its own code, which never taints."""
     from tinyharness.sandbox import SandboxPolicy
 
-    async def downloaded(self, args, ctx):
+    async def downloaded(self, args, ctx, jobs=None):
         return Execution("ok", 0, False, True, [], ["pypi.org", "files.pythonhosted.org"])
 
     monkeypatch.setattr(BashTool, "execute", downloaded)
@@ -180,7 +180,7 @@ async def test_local_steps_beside_a_declared_install_keep_it_setup(tmp_path, mon
     command asked."""
     from tinyharness.sandbox import SandboxPolicy
 
-    async def downloaded(self, args, ctx):
+    async def downloaded(self, args, ctx, jobs=None):
         return Execution("ok", 0, False, True, [], ["pypi.org", "files.pythonhosted.org"])
 
     monkeypatch.setattr(BashTool, "execute", downloaded)
@@ -203,7 +203,7 @@ async def test_sourcing_an_activate_script_outside_the_project_keeps_downloads_o
     `source /tmp/x/bin/activate; uv sync` hid whatever that script downloaded."""
     from tinyharness.sandbox import SandboxPolicy
 
-    async def downloaded(self, args, ctx):
+    async def downloaded(self, args, ctx, jobs=None):
         return Execution("ok", 0, False, True, [], ["pypi.org"])
 
     monkeypatch.setattr(BashTool, "execute", downloaded)
@@ -234,7 +234,7 @@ async def test_another_step_beside_a_declared_install_keeps_its_downloads_outsid
     (found in review) keeps them as outside content."""
     from tinyharness.sandbox import SandboxPolicy
 
-    async def downloaded(self, args, ctx):
+    async def downloaded(self, args, ctx, jobs=None):
         return Execution("ok", 0, False, True, [], ["pypi.org", "registry.npmjs.org"])
 
     monkeypatch.setattr(BashTool, "execute", downloaded)
@@ -374,3 +374,74 @@ async def test_with_the_sandbox_off_downloads_still_count_as_outside_content(tmp
     ctx = make_ctx(tmp_path)
     await bash.run(BashInput(command="echo local"), ctx)
     assert ctx.outside == []
+
+
+async def test_a_host_a_running_command_asks_for_goes_through_the_same_gate(tmp_path):
+    """The live question (the proxy holds the connection meanwhile) is the one a call naming
+    the host as network_host would get: the Rule of Two warning included."""
+    from tinyharness.testing import scripted_session
+
+    asked = []
+
+    async def answer(request):
+        asked.append(request)
+        return Decision(False, "no", "user")
+
+    session = scripted_session(tmp_path, ["ok"], permission_callback=answer)
+    try:
+        [e async for e in session.run("hi")]
+        bash = session.tools.get("Bash")
+        session.ctx.outside.append("WebFetch evil.example")
+        allowed = await session.ctx.ask_network(bash, {"command": "python get.py"}, "s3.example")
+        assert allowed is False
+        [request] = asked
+        assert "s3.example" in request.summary and "content from outside" in request.warning
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    ("url", "host", "outside", "asks"),
+    [
+        ("https://pypi.org/project/laya-finetune/", "pypi.org", ["WebSearch results"], False),  # allowlisted
+        ("https://example.com/docs", "example.com", [], False),  # nothing from outside yet
+        ("https://evil.example/notes", "evil.example", ["WebSearch results"], True),  # Rule of Two
+    ],
+)
+async def test_plan_mode_reads_public_pages_like_default_mode(tmp_path, url, host, outside, asks):
+    """Seen live: in plan mode, after a web search, reading the PyPI page of the package being
+    planned for asked every time; default and auto mode read it without asking."""
+    asked = []
+    gate = gate_with(tmp_path, outside, asked, PermissionMode.PLAN)
+    gate.allowed_hosts = ("pypi.org",)
+    decision = await gate.check(WebFetchTool(), {"url": url}, None, target_host=host)
+    assert decision.allow is not asks and len(asked) == int(asks)
+
+
+async def test_running_the_projects_own_checks_with_uv_run_does_not_taint(tmp_path, monkeypatch):
+    """Seen live: the first `uv run pytest` in a fresh project fetched pytest from PyPI, and
+    from then on every test run in default mode asked about outside content."""
+    from tinyharness.sandbox import SandboxPolicy
+
+    async def downloaded(self, args, ctx, jobs=None):
+        return Execution("ok", 0, False, True, [], ["pypi.org", "files.pythonhosted.org"])
+
+    monkeypatch.setattr(BashTool, "execute", downloaded)
+    tool = BashTool(object(), SandboxPolicy(write_roots=(tmp_path,), project_roots=(tmp_path,)))
+    for command in (
+        "uv run pytest -q 2>&1 | tail -15",
+        "(uv run pytest -q 2>&1 || python3 -m pytest -q 2>&1) | tail -15",
+        "uv run --group dev python -m pytest tests/ && uv run ruff check .",
+    ):
+        ctx = make_ctx(tmp_path)
+        await tool.run(BashInput(command=command), ctx)
+        assert ctx.outside == [], command
+    for command in (
+        "uv run --with requests pytest",  # a package the project doesn't declare
+        "uv run --index https://example.com/simple pytest",  # from somewhere else
+        "uv run python -c 'import urllib.request as u; print(u.urlopen(\"https://pypi.org\").read())'",
+        "uv run pytest && curl -s https://pypi.org/simple/",
+    ):
+        ctx = make_ctx(tmp_path)
+        await tool.run(BashInput(command=command), ctx)
+        assert ctx.outside, command

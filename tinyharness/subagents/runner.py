@@ -33,6 +33,7 @@ from tinyharness.llm.types import LLMError
 from tinyharness.subagents.specs import AgentSpec
 
 if TYPE_CHECKING:
+    from tinyharness.jobs import JobScope
     from tinyharness.llm.client import LLMClient
     from tinyharness.permissions import PermissionGate
     from tinyharness.tools.base import Tool, ToolContext
@@ -43,8 +44,8 @@ SPAWNING_TOOLS = frozenset({"Agent", "Team"})
 # The todo list is the main agent's plan, shown to the user; a subagent's TodoWrite would
 # replace it. A subagent's job is one piece of that plan, so it doesn't get one. Memory is
 # what the user and the main agent agree is worth keeping; a subagent sees too little of
-# the conversation to judge that.
-MAIN_AGENT_ONLY = frozenset({"TodoWrite", "Memory"})
+# the conversation to judge that. The plan is what the user reviews and approves.
+MAIN_AGENT_ONLY = frozenset({"TodoWrite", "Memory", "Plan", "Ask"})
 
 
 RECENT_CALLS = 3  # a subagent's latest tool calls, shown under it while it runs
@@ -89,6 +90,7 @@ async def run_subagent(
     extra_tools: Iterable[Tool[Any]] = (),
     inbox: Callable[[], list[str]] | None = None,
     write_lock: asyncio.Lock | None = None,
+    plan_guard: Callable[[Tool[Any], Any], str] | None = None,
 ) -> str:
     """Run the normal agent loop with a fresh history and return only the final answer.
 
@@ -104,14 +106,18 @@ async def run_subagent(
     # Its own record of the files it has read: what's in another agent's context isn't in
     # this one's, so a teammate's edit must count as a change it hasn't seen. The rest of
     # the context (usage meter, todos, the user's request, progress events) stays shared.
-    ctx = dataclasses.replace(ctx, read_paths=set(), seen_versions={})
+    run_id = uuid.uuid4().hex[:8]
+    # Its background jobs are its own: notes about them go to it, and they stop when it returns.
+    jobs = ctx.jobs.child(f"{spec.name}-{run_id}") if ctx.jobs is not None else None
+    ctx = dataclasses.replace(ctx, read_paths=set(), seen_versions={}, jobs=jobs)
     history = History([Message(role="system", content=subagent_system_prompt(spec, ctx))])
     extra = list(extra_tools)
     registry = tools.with_tools(extra) if extra else tools
     wanted = set(registry.names()) if spec.tools is None else set(spec.tools) | {t.name for t in extra}
+    if "Bash" in wanted:  # a job it starts, it must be able to wait for and stop
+        wanted.add("Job")
     allowed = wanted - SPAWNING_TOOLS - MAIN_AGENT_ONLY
 
-    run_id = uuid.uuid4().hex[:8]
     started = time.monotonic()
     short = " ".join((label or task).split())[:80]
     model_id = model or llm.model
@@ -141,6 +147,11 @@ async def run_subagent(
                     tool,
                     recent(),
                     log,
+                    tuple(
+                        call.summary
+                        for call in tool_calls
+                        if call.done and call.ok and call.summary.startswith(("Edit(", "Write("))
+                    ),
                 )
             )
 
@@ -182,8 +193,9 @@ async def run_subagent(
             allowed_tools=allowed,
             model=model,
             max_steps=max_steps,
-            inbox=inbox,
+            inbox=_with_job_notes(inbox, jobs),
             write_lock=write_lock,
+            plan_guard=plan_guard,
         )
         report("started")
         # Text since the last tool result: what it was saying, if it fails (see SubagentFailed).
@@ -214,6 +226,9 @@ async def run_subagent(
             if isinstance(e, Exception):  # not a cancellation: its work so far isn't lost
                 raise SubagentFailed(e, "".join(final), [c.summary for c in tool_calls], log) from e
             raise
+        finally:
+            if jobs is not None:  # nothing it started outlives it
+                await jobs.stop_all()
         # The answer is its last reply as kept in the history: not every streamed piece since
         # the last tool call (a reply the harness asked it to redo would be glued on).
         # A reply that made tool calls is narration ("Let me read..."), not an answer, unless
@@ -286,3 +301,12 @@ def _context_window(llm: Any, model: str | None) -> int:
     smaller model than the session)."""
     info = llm.model_info(model) if hasattr(llm, "model_info") else None
     return info.context if info is not None and info.context else DEFAULT_CONTEXT
+
+
+def _with_job_notes(
+    inbox: Callable[[], list[str]] | None, jobs: JobScope | None
+) -> Callable[[], list[str]] | None:
+    """Its inbox (teammates' messages), then notes about its own background jobs."""
+    if jobs is None:
+        return inbox
+    return lambda: [*(inbox() if inbox is not None else []), *jobs.take_notes()]

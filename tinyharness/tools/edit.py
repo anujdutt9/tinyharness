@@ -32,8 +32,8 @@ class EditTool(Tool[EditInput]):
         "Replace `old_string` with `new_string` in a file. `old_string` must match exactly "
         "and be unique unless replace_all=true; include surrounding lines to disambiguate. "
         "Copy it from the file without Read's line-number prefixes. Keep it small: the lines "
-        "that change plus enough around them to be unique. You must Read the file first in "
-        "this session."
+        "that change plus enough around them to be unique. Read the file first in this "
+        "session, unless you know old_string is in it exactly once as written."
     )
     Input = EditInput
 
@@ -52,8 +52,7 @@ class EditTool(Tool[EditInput]):
         path = approved_path(args, args.path, ctx)
         if path is None or not path.is_file():
             raise ToolError(f"file not found: {path or args.path}")
-        if str(path) not in ctx.read_paths:
-            raise ToolError(f"Read {path} before editing it")
+        unread = str(path) not in ctx.read_paths
         check_not_stale(ctx, path)
         if args.old_string == args.new_string:
             raise ToolError("old_string and new_string are identical")
@@ -72,6 +71,11 @@ class EditTool(Tool[EditInput]):
         old, new = args.old_string, args.new_string
         if crlf:
             old, new = old.replace("\r\n", "\n"), new.replace("\r\n", "\n")
+        # Without a Read, old_string found exactly once, word for word, shows the model has
+        # the current text it changes. Seen live: Sonnet looked with `cat` in Bash, and its
+        # first Edit was refused and redone after a Read, in 3 of 5 runs.
+        if unread and (not old or text.count(old) != 1):
+            raise ToolError(f"Read {path} before editing it")
         if not old:
             if text:
                 raise ToolError(

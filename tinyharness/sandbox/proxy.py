@@ -116,6 +116,12 @@ class AllowlistProxy:
     denied: list[str] = field(default_factory=list)  # hosts refused, newest last
     reached: list[str] = field(default_factory=list)  # hosts connected to, newest last
     resolve: Callable[[str, int], Awaitable[list[str]]] = field(default=_resolve, repr=False)
+    # Decides a host the allowlist doesn't cover while its connection waits (`_granted`). Seen
+    # live: refused outright, `load_dataset` retried s3.amazonaws.com for 3 minutes until the
+    # command timed out, and only then could the person be asked. None: refuse at once.
+    ask: Callable[[str], Awaitable[bool]] | None = field(default=None, repr=False)
+    asking_seconds: float = 0.0  # time spent waiting for those decisions (not the command's)
+    _decisions: dict[str, asyncio.Future[bool]] = field(default_factory=dict, repr=False)
     _server: asyncio.base_events.Server | None = None
     port: int = 0
 
@@ -134,6 +140,9 @@ class AllowlistProxy:
     def env(self) -> dict[str, str]:
         """The environment that sends a command's traffic through this proxy."""
         url = f"http://127.0.0.1:{self.port}"
+        # Loopback in every form a server prints its address in ("Serving HTTP on :: port
+        # 8000 (http://[::]:8000/)"): the proxy refuses those, so they must go direct.
+        loopback = "localhost,127.0.0.1,::1,::,0.0.0.0"
         return {
             "HTTP_PROXY": url,
             "HTTPS_PROXY": url,
@@ -141,8 +150,8 @@ class AllowlistProxy:
             "https_proxy": url,
             "npm_config_proxy": url,
             "npm_config_https_proxy": url,
-            "NO_PROXY": "localhost,127.0.0.1",
-            "no_proxy": "localhost,127.0.0.1",
+            "NO_PROXY": loopback,
+            "no_proxy": loopback,
         }
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -202,7 +211,7 @@ class AllowlistProxy:
     async def _open(
         self, host: str, port: int, writer: asyncio.StreamWriter
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
-        if not host_allowed(host, self.allowed):
+        if not host_allowed(host, self.allowed) and not await self._granted(host):
             self.denied.append(host)
             log.info("sandbox proxy blocked %s", host)
             await _reply(
@@ -243,6 +252,32 @@ class AllowlistProxy:
         except (OSError, TimeoutError) as e:
             await _reply(writer, 502, f"tinyharness sandbox: couldn't reach {host}:{port}: {e}")
             return None
+
+    async def _granted(self, host: str) -> bool:
+        """Whether `ask` allows a host the allowlist doesn't cover. One question per host:
+        a library opening several connections at once waits on the same answer, and a host
+        refused once stays refused for this proxy's command."""
+        if self.ask is None:
+            return False
+        decision = self._decisions.get(host)
+        if decision is None:
+            decision = self._decisions[host] = asyncio.ensure_future(self._timed(self.ask(host)))
+        try:
+            allowed = await asyncio.shield(decision)
+        except Exception:  # a broken decision refuses; the command reports the host as blocked
+            log.exception("deciding on %s failed", host)
+            return False
+        if allowed and not host_allowed(host, self.allowed):
+            self.allowed = (*self.allowed, *service_hosts(host))
+        return allowed
+
+    async def _timed(self, decision: Awaitable[bool]) -> bool:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        try:
+            return await decision
+        finally:
+            self.asking_seconds += loop.time() - started
 
 
 async def _reply(writer: asyncio.StreamWriter, status: int, message: str) -> None:

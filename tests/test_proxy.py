@@ -71,6 +71,8 @@ def test_proxy_settings_cover_the_common_tools():
         env["HTTPS_PROXY"] == env["https_proxy"] == env["npm_config_https_proxy"] == "http://127.0.0.1:5555"
     )
     assert "127.0.0.1" in env["NO_PROXY"]
+    # Seen live: curl http://[::]:8765 went to the proxy, which refused it.
+    assert {"::", "::1", "0.0.0.0"} <= set(env["NO_PROXY"].split(","))
 
 
 def test_a_blocked_host_is_named_in_the_commands_output():
@@ -122,3 +124,82 @@ async def test_an_allowed_literal_local_address_is_refused():
             writer.close()
         finally:
             proxy.close()
+
+
+# ---- asking about a new host while its connection waits ----
+
+
+async def test_a_new_host_is_asked_about_once_while_its_connections_wait(monkeypatch):
+    """Seen live: refused outright, `load_dataset` retried s3.amazonaws.com for 3 minutes
+    until its timeout. Now the connection waits for the decision, and a library opening
+    several connections at once gets one question."""
+    # The echo server is on loopback, which the proxy otherwise refuses.
+    monkeypatch.setattr("tinyharness.sandbox.proxy._local", lambda address: False)
+    server, port = await _echo_server()
+    asked, answer = [], asyncio.Event()
+
+    async def ask(host):
+        asked.append(host)
+        await answer.wait()
+        return True
+
+    proxy = AllowlistProxy((), ask=ask)
+    try:
+        proxy_port = await proxy.start()
+        connections = [await _connect(proxy_port, f"127.0.0.1:{port}") for _ in range(3)]
+        await asyncio.sleep(0.1)
+        answer.set()
+        for reader, writer in connections:
+            assert (await reader.readuntil(b"\r\n\r\n")).startswith(b"HTTP/1.1 200")
+            writer.close()
+        assert asked == ["127.0.0.1"] and proxy.denied == []
+    finally:
+        proxy.close()
+        server.close()
+
+
+async def test_a_refused_host_stays_refused_without_asking_again():
+    asked = []
+
+    async def ask(host):
+        asked.append(host)
+        return False
+
+    proxy = AllowlistProxy((), ask=ask)
+    try:
+        proxy_port = await proxy.start()
+        for _ in range(2):
+            reader, writer = await _connect(proxy_port, "data.example:443")
+            assert (await reader.read()).startswith(b"HTTP/1.1 403")
+            writer.close()
+        assert asked == ["data.example"] and proxy.denied == ["data.example", "data.example"]
+    finally:
+        proxy.close()
+
+
+async def test_a_yes_still_cannot_reach_a_name_that_points_at_this_machine():
+    async def resolve(host, port):
+        return ["127.0.0.1"]
+
+    async def ask(host):
+        return True
+
+    proxy = AllowlistProxy((), resolve=resolve, ask=ask)
+    try:
+        proxy_port = await proxy.start()
+        reader, writer = await _connect(proxy_port, "rebind.example:443")
+        reply = await reader.read()
+        assert reply.startswith(b"HTTP/1.1 403") and b"resolves to a local address" in reply
+        writer.close()
+    finally:
+        proxy.close()
+
+
+async def test_time_spent_deciding_is_counted():
+    async def ask(host):
+        await asyncio.sleep(0.2)
+        return False
+
+    proxy = AllowlistProxy((), ask=ask)
+    assert not await proxy._granted("slow.example")
+    assert proxy.asking_seconds >= 0.2

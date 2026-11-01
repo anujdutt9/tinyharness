@@ -434,3 +434,98 @@ async def test_sandbox_off_and_on_from_the_command_line(tmp_path, monkeypatch):
         assert "usage: /sandbox [on|off]" in repl.console.file.getvalue()
     finally:
         repl.session.close()
+
+
+async def test_switching_to_a_provider_without_a_default_model_uses_one_that_exists(tmp_path, monkeypatch):
+    """Seen live: /provider → Ollama failed with the server's "model is required": local
+    providers have no default model. Use the one used there last, else pick from its list."""
+    import io
+
+    from rich.console import Console
+
+    from tinyharness import Session, SessionOptions
+    from tinyharness.cli import commands
+    from tinyharness.config import remember_model
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    class Repl:
+        pass
+
+    repl = Repl()
+    repl.session = Session(SessionOptions(working_dir=tmp_path / "w", config_path=tmp_path / "c.toml"))
+    repl.console = Console(file=io.StringIO(), width=200, color_system=None)
+    switched, picked = [], []
+
+    async def switch(repl, spec, **kw):
+        switched.append(spec)
+
+    async def pick_model(repl, provider):
+        picked.append(provider)
+        return "qwen3:4b"
+
+    monkeypatch.setattr(commands, "_switch", switch)
+    monkeypatch.setattr(commands, "_pick_model", pick_model)
+    try:
+        assert repl.session.config.providers["ollama"].default_model == ""
+        await commands.COMMANDS["/provider"].handler(repl, "ollama")
+        assert switched == ["ollama:qwen3:4b"] and picked == ["ollama"]
+        remember_model("ollama", "qwen3-4b-2507-32k")
+        await commands.COMMANDS["/provider"].handler(repl, "ollama")
+        assert switched[-1] == "ollama:qwen3-4b-2507-32k" and picked == ["ollama"]
+        await commands.COMMANDS["/provider"].handler(repl, "openai")  # has a default: used as before
+        assert switched[-1] == f"openai:{repl.session.config.providers['openai'].default_model}"
+    finally:
+        repl.session.close()
+
+
+async def test_a_failed_model_list_stops_its_spinner_before_asking(tmp_path, monkeypatch):
+    """Seen live: /model couldn't list Anthropic's models, and the "Loading…" spinner kept
+    redrawing over the "Model" prompt that asked instead, so the line flickered."""
+    import contextlib
+    import io
+
+    import httpx
+    from rich.console import Console
+
+    from tinyharness import Session, SessionOptions
+    from tinyharness.cli import commands
+    from tinyharness.llm.client import LLMClient
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    class Repl:
+        pass
+
+    repl = Repl()
+    repl.session = Session(SessionOptions(working_dir=tmp_path / "w", config_path=tmp_path / "c.toml"))
+    repl.console = Console(file=io.StringIO(), width=200, color_system=None)
+    spinning = []
+
+    @contextlib.contextmanager
+    def status(*args, **kwargs):
+        spinning.append(True)
+        try:
+            yield
+        finally:
+            spinning.pop()
+
+    async def list_models(self):
+        request = httpx.Request("GET", "https://api.anthropic.com/v1/models")
+        raise httpx.HTTPStatusError("no", request=request, response=httpx.Response(401, request=request))
+
+    asked = []
+
+    async def ask(question, **kwargs):
+        asked.append(bool(spinning))
+        return "claude-sonnet-5"
+
+    monkeypatch.setattr(repl.console, "status", status)
+    monkeypatch.setattr(LLMClient, "list_models", list_models)  # client_for makes a new one each time
+    monkeypatch.setattr(commands, "ask", ask)
+    try:
+        assert await commands._pick_model(repl, "anthropic") == "claude-sonnet-5"
+        assert asked == [False]  # the spinner had stopped
+        assert "(HTTP 401)" in repl.console.file.getvalue()
+    finally:
+        repl.session.close()

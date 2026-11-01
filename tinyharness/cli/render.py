@@ -57,6 +57,7 @@ from tinyharness.cli.theme import (
     tool_line,
     tool_style,
 )
+from tinyharness.cli.widgets import answer_question
 from tinyharness.events import (
     ArtifactPresented,
     AssistantText,
@@ -66,6 +67,7 @@ from tinyharness.events import (
     MessageDelivered,
     ModelStuck,
     PermissionDecision,
+    PlanSaved,
     Reasoning,
     SkillLoaded,
     SubagentUpdate,
@@ -79,6 +81,7 @@ from tinyharness.events import (
 from tinyharness.llm.usage import Usage, UsageMeter
 from tinyharness.paths import pretty_path
 from tinyharness.permissions import Decision, PermissionRequest
+from tinyharness.tools.ask import AskQuestion
 
 WAITING = "Working"
 _WRITING_LABELS = ("Writing", "Editing", "Preparing")  # see Renderer._writing_label
@@ -146,6 +149,12 @@ def summarize_output(tool: str, output: str) -> str:
         return f"Read {len(lines)} lines"
     if tool in ("Glob", "Grep"):  # they start with a summary: "3 match(es):" or "(no matches …)"
         return "no matches" if text.startswith("(") else lines[0].rstrip(":")
+    if tool == "Ask":  # the answers are on screen already, one line each
+        return "answered" if text.startswith("The user answered") else "answering in chat"
+    if tool == "Job":  # where the job got to: its latest line, not its first, nor the "(job …)" note
+        # Seen live: a finished 18-epoch run showed "epoch 1/18 loss=1.7000" on its row.
+        lines = [line for line in lines if line.strip() and not line.startswith("(")] or lines
+        lines = lines[-1:]
     first = lines[0]
     return first if len(first) <= 100 else first[:99] + "…"
 
@@ -161,7 +170,8 @@ def _is_test_command(tool: _RunningTool) -> bool:
 
 
 def _tests_passed(text: str) -> bool:
-    return not re.search(r"\b\d+ (?:failed|errors?)\b|^FAILED\b", text, re.MULTILINE)
+    # Not "0 errors": some runners print a zero count on success.
+    return not re.search(r"\b[1-9]\d* (?:failed|errors?)\b|^FAILED\b", text, re.MULTILINE)
 
 
 def _sandbox_block(tool: _RunningTool, text: str) -> re.Match[str] | None:
@@ -666,7 +676,7 @@ class Renderer:
                 if protected:  # said every time: only the user can do this step
                     under = Text(
                         "git hooks, editor tasks and agent settings run code outside the sandbox: "
-                        "only you can change them",
+                        "changing them needs your approval",
                         style="subtle",
                     )
                 elif not self._sandbox_explained:
@@ -692,6 +702,11 @@ class Renderer:
             # result. A nonzero child status is useful evidence, not a harness crash.
             under = Text(ellipsize(last, 200), style="muted") if last else None
             return Text("·", style="subtle"), Text(f"exit {m.group(1)}", style="muted"), under
+        if is_test and _RAN_TESTS.search(text) and not _tests_passed(text):
+            # Seen live: Sonnet ran `pytest -q 2>&1 | tail -5`, which exits 0 after a failure,
+            # and the row said "3 passed" in green over "1 failed, 3 passed".
+            self._turn.tests_passed = False
+            return Text(FAILED, style="err"), Text(_test_failure_summary(text), style="err"), None
         if is_test:
             self._turn.tests_passed = True
             if summary := _test_summary(text):  # the result on the row: `212 passed in 4.1s`
@@ -700,6 +715,19 @@ class Renderer:
         if last:  # the output shows under the row
             return Text(DONE, style="ok"), Text(), None
         return Text(DONE, style="ok"), Text("no output", style="muted"), None
+
+    def _count_agent_edit(self, summary: str) -> None:
+        """Count a subagent's `Edit(path, -1/+3 lines)` or `Write(path, 11 lines)`."""
+        name, detail = split_summary(summary)
+        if name == "Edit" and (m := _EDIT_STATS.search(detail)):
+            added, removed = int(m.group(2)), int(m.group(1))
+        elif name == "Write" and (m := _WRITE_STATS.search(detail)):
+            added, removed = int(m.group(1)), 0
+        else:
+            return
+        counts = self._turn.files.setdefault(detail[: m.start()], [0, 0])
+        counts[0] += added
+        counts[1] += removed
 
     def _count_edit(self, tool: _RunningTool, added: int, removed: int) -> None:
         path = str(tool.args.get("path") or self._detail(tool))
@@ -788,8 +816,8 @@ class Renderer:
                     tool.started = now
                 self._tools_parallel = parallel
                 self.wait(f"Running {len(names)} tools" if parallel else f"Running {names[0]}")
-            case ToolResult(name="TodoWrite", is_error=False):
-                self._running = [t for t in self._running if t.name != "TodoWrite"]
+            case ToolResult(name=("TodoWrite" | "Plan") as name, is_error=False):
+                self._running = [t for t in self._running if t.name != name]
             case ToolResult() as result:
                 running = self._running_for(result)
                 self.last_output = (running.summary if running else result.name, result.output)
@@ -810,6 +838,18 @@ class Renderer:
                         Text("  ").append(f"{ELBOW} ", style="subtle").append(format_todos(todos)),
                     )
                 )
+                self.wait(WAITING)
+            case PlanSaved(title=title, path=path, text=text, in_reply=in_reply):
+                # The plan in full, where the user already is: plan mode's output to review.
+                # One written in the reply between <plan> tags is on screen already.
+                where = (
+                    Text("  ")
+                    .append(f"{ELBOW} ", style="subtle")
+                    .append(pretty_path(path), style=Style(color=MUTED) + file_link(path))
+                    .append(" · edit it to change the plan", style="subtle")
+                )
+                head = Group(tool_line(f"Plan  {title}", "ok"), where)
+                self._block(head if in_reply else Group(head, Padding(markdown.render(text), (1, 0, 0, 4))))
                 self.wait(WAITING)
             case ArtifactPresented(target=target, media_type=media_type, title=title):
                 label = title or target
@@ -834,6 +874,9 @@ class Renderer:
                 self._finished_agents.append(event)
                 self._turn.agents += 1
                 self._turn.agent_tools += event.tools_used
+                # Seen live: two subagents changed files and the footer said "1 file +3 −1".
+                for summary in event.edits:
+                    self._count_agent_edit(summary)
             case TokenUsage():
                 pass  # counted by the session's meter, which includes subagents
             case Compacted(kind=kind, count=n):
@@ -934,7 +977,10 @@ class Renderer:
                     "Press shift+tab to switch modes, then tell it to build.", style="muted"
                 )
             )
-        if reason in ("stop", "plan_mode") and self._turn.tools:
+        elif reason == "plan_ready":
+            # The REPL asks whether to build it right after (Repl.hand_off_plan).
+            self._block(Text("⏸ Plan ready for review.", style="ok"))
+        if reason in ("stop", "plan_mode", "plan_ready", "awaiting_answer") and self._turn.tools:
             self._block(self.footer())
 
     def footer(self) -> Text:
@@ -980,6 +1026,29 @@ class Renderer:
         async with self.exclusive() if self.exclusive else contextlib.nullcontext():
             return await self._ask_permission(request)
 
+    async def ask_questions(self, questions: list[AskQuestion]) -> list[str] | None:
+        """The agent's questions (the Ask tool), one at a time; each answer stays on screen
+        as one line. None if the user pressed Esc to answer in chat instead."""
+        async with self.exclusive() if self.exclusive else contextlib.nullcontext():
+            self._flush_text(everything=True)
+            self._stop_live()
+            self.console.print()
+            answers: list[str] = []
+            try:
+                for number, question in enumerate(questions, start=1):
+                    answer = await answer_question(question, number, len(questions))
+                    if answer is None:
+                        self._print(Text("  ⎿ answering in chat", style="subtle"))
+                        return None
+                    answers.append(answer)
+                    self._print(
+                        Text.assemble(("  ✓ ", "ok"), (question.header, "bold"), (" · ", "subtle"), answer)
+                    )
+                return answers
+            finally:
+                self._last_was_row = False
+                self._start_live()
+
     async def _ask_permission(self, request: PermissionRequest) -> Decision:
         self._flush_text(everything=True)
         self._stop_live()
@@ -999,7 +1068,7 @@ class Renderer:
 
 _PASSED = re.compile(r"\b\d+ passed\b[^=\n]*")
 _UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in [\d.]+s\s*\n\s*\nOK\b", re.MULTILINE)
-_FAILED_COUNT = re.compile(r"\b\d+ (?:failed|errors?)\b")
+_FAILED_COUNT = re.compile(r"\b[1-9]\d* (?:failed|errors?)\b[^=\n]*")
 _UNITTEST_FAILED = re.compile(r"^FAILED \(([^)]+)\)", re.MULTILINE)
 
 
@@ -1015,7 +1084,7 @@ def _test_summary(output: str) -> str:
 def _test_failure_summary(output: str) -> str:
     """A semantic row label for a failed suite; the full error remains in its preview."""
     if found := _FAILED_COUNT.findall(output):
-        return found[-1]
+        return found[-1].strip(" ,")  # `1 failed, 3 passed in 0.02s`
     if match := _UNITTEST_FAILED.search(output):
         counts = [part.strip().replace("=", " ") for part in match.group(1).split(",")]
         return ", ".join(counts)

@@ -20,10 +20,13 @@ import select
 import sys
 import time
 import tomllib
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from urllib.parse import quote
 
 from prompt_toolkit.styles import Style
+from rich.console import Console
+from rich.segment import Segment
 from rich.style import Style as RichStyle
 from rich.text import Text
 from rich.theme import Theme
@@ -300,4 +303,55 @@ def tool_line(summary: str, bullet_style: str) -> Text:
     line.append(name, style=tool_style(name))
     if detail:
         line.append(f"  {detail}", style="muted")
+    return line
+
+
+# -- output -----------------------------------------------------------------------
+
+
+class TrimmedConsole(Console):
+    """A console whose lines end where their text ends.
+
+    rich pads many lines with spaces to the full width (Padding, Markdown). Terminals
+    rewrap those spaces like text when the window narrows, so each padded line became two
+    rows. Seen live in iTerm2: Scout and the session details broke into rows with gaps
+    between them, and so did every reply. Trailing spaces that show nothing are dropped;
+    ones with a background (a code block's) stay, and so does a line still being written.
+    """
+
+    def _render_buffer(self, buffer: Iterable[Segment]) -> str:
+        return super()._render_buffer(_trim_line_ends(buffer))
+
+
+def _shows(segment: Segment) -> bool:
+    """Whether a blank segment is visible: a background, reverse video or a line."""
+    style = segment.style
+    return style is not None and bool(style.bgcolor or style.reverse or style.underline or style.strike)
+
+
+def _trim_line_ends(segments: Iterable[Segment]) -> Iterator[Segment]:
+    line: list[Segment] = []
+    for segment in segments:
+        if segment.control or "\n" not in segment.text:
+            line.append(segment)
+            continue
+        *ends, rest = segment.text.split("\n")
+        for part in ends:
+            if part:
+                line.append(Segment(part, segment.style))
+            yield from _trimmed(line)
+            yield Segment("\n", segment.style)
+            line = []
+        if rest:
+            line.append(Segment(rest, segment.style))
+    yield from line  # not ended yet: more of this line may come
+
+
+def _trimmed(line: list[Segment]) -> list[Segment]:
+    while line and not line[-1].control and not _shows(line[-1]):
+        text = line[-1].text.rstrip(" ")
+        if text:
+            line[-1] = Segment(text, line[-1].style)
+            break
+        line.pop()
     return line

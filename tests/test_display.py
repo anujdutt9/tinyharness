@@ -267,7 +267,7 @@ def test_a_sandbox_block_in_a_command_that_runs_tests_is_still_a_block(renderer)
     assert shown(renderer)[0].endswith("sandbox blocked a write to ~/.cache/sglang")
 
 
-def test_a_protected_path_block_says_only_the_user_can(renderer):
+def test_a_protected_path_block_says_it_needs_the_users_approval(renderer):
     command = ".venv/bin/pre-commit install"
     output = (
         "PermissionError: [Errno 1] Operation not permitted: '.git/hooks/pre-commit'\n"
@@ -277,7 +277,7 @@ def test_a_protected_path_block_says_only_the_user_can(renderer):
     replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
     row, *why = shown(renderer)
     assert row.startswith("⊘ Bash") and row.endswith("sandbox blocked a write to .git/hooks/pre-commit")
-    assert "only you can change them" in " ".join(line.strip() for line in why)
+    assert "changing them needs your approval" in " ".join(line.strip() for line in why)
 
 
 def test_tests_that_passed_before_a_later_step_failed_count_as_passed(renderer):
@@ -290,6 +290,24 @@ def test_tests_that_passed_before_a_later_step_failed_count_as_passed(renderer):
     lines = shown(renderer)
     assert lines[0].startswith("· Bash") and lines[0].endswith("exit 1")
     assert "tests ✓" in lines[-1]
+
+
+def test_failing_tests_piped_into_tail_still_show_as_failed(renderer):
+    """Seen live: Sonnet ran `uv run pytest -q 2>&1 | tail -15`, which exits 0, and the row
+    said "3 passed" in green and the footer "tests ✓" over `1 failed, 3 passed`."""
+    command = "uv run pytest -q 2>&1 | tail -15"
+    output = "FAILED tests/test_stock.py::test_remove - DID NOT RAISE\n1 failed, 3 passed, 1 warning in 0.58s"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    renderer.handle(Done())
+    lines = shown(renderer)
+    assert lines[0].startswith("✗ Bash") and lines[0].endswith("1 failed, 3 passed, 1 warning in 0.58s")
+    assert "tests ✗" in lines[-1]
+
+
+def test_a_zero_error_count_is_not_a_failure(renderer):
+    command = "uv run pytest -q"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, "12 passed, 0 errors in 1.2s", False))
+    assert shown(renderer)[0].startswith("✓ Bash")
 
 
 def test_a_failed_setup_step_keeps_its_error_without_becoming_a_harness_failure(renderer):
@@ -1202,3 +1220,173 @@ def test_a_call_auto_review_stopped_says_how_and_why(renderer, verdict, label):
     row, reason = shown(renderer)
     assert row.startswith("⊘ WebFetch") and row.rstrip().endswith(label)
     assert verdict.split("(", 1)[1].split(")")[0] in reason
+
+
+def test_a_saved_plan_is_shown_in_full_with_where_to_edit_it(renderer):
+    from tinyharness.events import PlanSaved
+
+    renderer.handle(ToolUse("Plan", {"title": "Token refresh"}, "Plan(Token refresh)"))
+    renderer.handle(ToolsDispatched(["Plan"], False))
+    renderer.handle(ToolResult("Plan", "Saved the plan to ~/x.md (2 steps).", False))
+    text = "# Token refresh\n\n## Goal\n\nRefresh tokens.\n\n## Steps\n\n### S1: Add refresh\n"
+    renderer.handle(PlanSaved("Token refresh", "/home/u/.tinyharness/plans/token-refresh.md", text))
+    out = "\n".join(shown(renderer))
+    assert "Plan  Token refresh" in out and "token-refresh.md · edit it to change the plan" in out
+    assert "Refresh tokens." in out and "S1: Add refresh" in out
+    assert "Saved the plan to" not in out  # the plan itself, not the tool's note to the model
+
+
+async def test_plan_mode_names_the_plan_in_the_footer(repl):
+    """Shift+tab is how a plan gets approved and built, so the footer says which plan and
+    what the key does."""
+    from conftest import call, make_ctx
+
+    assert text(repl._mode_part()).endswith("shift+tab to switch")
+    repl.session.set_mode("plan")
+    assert "plan · shift+tab to switch" in text(repl._mode_part())
+    ctx = make_ctx(repl.session.workspace.root)
+    await call(repl.session.plan_tool, {"plan": "# Token refresh\n\n1. a\n"}, ctx)
+    assert "⏸ plan · Token refresh · shift+tab to approve" in text(repl._mode_part())
+    current = repl.session.plan_tool.current
+    current.path.write_text(current.path.read_text() + "\nmore\n")
+    assert "Token refresh (edited)" in text(repl._mode_part())
+    current.path.write_text(current.text().removesuffix("\nmore\n"))  # undo the edit
+    await call(repl.session.plan_tool, {"plan": "# " + "x" * 60 + "\n\n1. a\n"}, ctx)
+    assert f"{'x' * 39}… · shift+tab" in text(repl._mode_part())
+    repl.session.set_mode("default")
+    assert "xxx" not in text(repl._mode_part())
+
+
+def test_a_plan_ready_for_review_leaves_the_choice_to_the_hand_off(renderer):
+    renderer.handle(Done(reason="plan_ready"))
+    out = "\n".join(shown(renderer))
+    assert "Plan ready for review" in out and "build it" not in out
+
+
+def test_a_plan_from_the_reply_shows_where_it_is_without_repeating_it(renderer):
+    from tinyharness.cli import markdown
+    from tinyharness.events import PlanSaved
+
+    renderer.handle(
+        PlanSaved("Token refresh", "/home/u/plans/token-refresh.md", "# Token refresh\n\nBODY\n", True)
+    )
+    out = "\n".join(shown(renderer))
+    assert "Plan  Token refresh" in out and "token-refresh.md" in out and "BODY" not in out
+    console = Console(width=60, record=True)
+    console.print(markdown.render("<plan>\n# Token refresh\n</plan>"))
+    text = console.export_text()
+    assert "<plan>" not in text and "Token refresh" in text
+
+
+def test_a_job_row_shows_where_the_job_got_to():
+    """Seen live: a finished 18-epoch run showed "epoch 1/18 loss=1.7000" on its row."""
+    from tinyharness.cli.render import summarize_output
+
+    out = "epoch 1/18 loss=1.7000\nepoch 18/18 loss=0.1073\nfinal loss: 0.1073\n(job j1 running for 3m00s: python3 train.py)"
+    assert summarize_output("Job", out) == "final loss: 0.1073"
+    assert summarize_output("Job", "(job j1 finished: exit 0, no output)").startswith("(job j1")
+
+
+def test_files_changed_by_subagents_count_in_the_footer(renderer):
+    """Seen live: two subagents changed files, and the footer said "1 file +3 −1"."""
+    from tinyharness.events import SubagentUpdate
+
+    replay(renderer, ("Edit(a.py, -1/+3 lines)", "Edit", {"path": "a.py"}, "edited a.py", False))
+    renderer.handle(
+        SubagentUpdate(
+            "r1", "general-purpose", "tests", "done", tools_used=3,
+            edits=("Edit(a.py, -2/+2 lines)", "Write(tests/test_b.py, 10 lines)"),
+        )
+    )  # fmt: skip
+    renderer.handle(Done())
+    footer = shown(renderer)[-1]
+    assert "2 files +15 −3" in footer
+
+
+def test_narrowing_the_terminal_erases_the_box_as_it_rewrapped(monkeypatch):
+    """Seen live in iTerm2: dragging the window narrower left broken frame lines above the
+    input box. Each full-width line rewraps onto more rows, which the erase has to cover,
+    and the rows added push the drawing up, which the redraw undoes."""
+    from types import SimpleNamespace
+
+    from prompt_toolkit.data_structures import Point, Size
+    from prompt_toolkit.layout.screen import Char, Screen
+
+    from tinyharness.cli.repl import _count_reflowed_rows
+
+    screen = Screen()
+    for y, width in enumerate([100, 100, 100, 40]):  # frame top, input, frame bottom, toolbar
+        for x in range(width):
+            screen.data_buffer[y][x] = Char("─")
+    screen.height = 4
+    renderer = SimpleNamespace(
+        _last_screen=screen, _last_size=Size(rows=30, columns=100), _cursor_pos=Point(3, 1)
+    )
+
+    def app(columns):
+        renderer._cursor_pos = Point(3, 1)  # on the input line, below the frame's top
+        return SimpleNamespace(renderer=renderer, output=SimpleNamespace(get_size=lambda: Size(30, columns)))
+
+    monkeypatch.delenv("TERM_PROGRAM", raising=False)
+    # iTerm2 keeps the bottom row fixed: the frame's top line now takes two rows above the
+    # cursor, and the three frame lines' extra rows pushed the drawing up by three.
+    assert _count_reflowed_rows(app(60)) == 3 and renderer._cursor_pos == Point(3, 2)
+    assert _count_reflowed_rows(app(30)) == 10 and renderer._cursor_pos == Point(3, 4)
+    assert _count_reflowed_rows(app(120)) == 0 and renderer._cursor_pos == Point(3, 1)  # wider
+    # xterm.js (VS Code) keeps the top fixed and moves the cursor down by every row added.
+    monkeypatch.setenv("TERM_PROGRAM", "vscode")
+    assert _count_reflowed_rows(app(60)) == 0 and renderer._cursor_pos == Point(3, 4)
+
+
+async def test_a_burst_of_resizes_redraws_once_it_settles(monkeypatch):
+    """Seen live in iTerm2: dragging the window edge sent a resize every few milliseconds,
+    and redraws for sizes the window had already left piled up old boxes."""
+    import asyncio
+
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.renderer import Renderer as PTRenderer
+
+    from tinyharness.cli import repl as repl_module
+
+    resized, rendered = [], []
+    monkeypatch.setattr(Application, "_on_resize", lambda self: resized.append(1))
+    monkeypatch.setattr(
+        PTRenderer, "render", lambda self, app, layout, is_done=False: rendered.append(is_done)
+    )
+    monkeypatch.setattr(repl_module, "RESIZE_SETTLE_SECONDS", 0.05)
+    with create_pipe_input() as pipe:
+        app = repl_module._CompactPrompt(input=pipe, output=DummyOutput()).app
+        for _ in range(3):
+            app._on_resize()
+            app.renderer.render(app, app.layout)  # e.g. a spinner redrawing meanwhile
+        assert resized == [] and rendered == []  # held back while the size keeps changing
+        app.renderer.render(app, app.layout, is_done=True)  # leaving is never held back
+        await asyncio.sleep(0.15)
+        assert resized == [1] and rendered == [True]
+        app.renderer.render(app, app.layout)
+        assert rendered == [True, False]
+
+
+def test_printed_lines_end_where_their_text_ends():
+    """Seen live in iTerm2: Scout and every reply broke into rows with gaps between them
+    when the window narrowed. rich padded their lines with spaces to the full width, and
+    the terminal rewrapped the spaces like text."""
+    import io
+
+    from rich.padding import Padding
+    from rich.text import Text
+
+    from tinyharness.cli.theme import TrimmedConsole
+
+    out = io.StringIO()
+    console = TrimmedConsole(file=out, width=80, color_system="truecolor", force_terminal=True)
+    console.print(Padding(Text("hello"), (0, 0, 0, 2)))
+    console.print(Text("code   ", style="on #202020"))  # a background shows: kept
+    console.print("partial ", end="")  # the line isn't finished: more may follow
+    console.print("rest")
+    lines = out.getvalue().split("\n")
+    assert lines[0] == "  hello"  # was "  hello" and 73 spaces
+    assert lines[1] == "\x1b[48;2;32;32;32mcode   \x1b[0m"
+    assert lines[2] == "partial rest"

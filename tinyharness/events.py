@@ -116,6 +116,16 @@ class TodosUpdated:
 
 
 @dataclass(frozen=True)
+class PlanSaved:
+    """Plan mode's plan was written or revised: show it to the user."""
+
+    title: str
+    path: str
+    text: str
+    in_reply: bool = False  # it came from <plan> tags in the reply, already on screen
+
+
+@dataclass(frozen=True)
 class ArtifactPresented:
     """A file or URL is available to the user without launching an external app."""
 
@@ -179,6 +189,7 @@ class SubagentUpdate:
     tool: str = ""  # the tool call being written, when phase is "writing"
     recent: tuple[SubagentCall, ...] = ()  # its last few tool calls, oldest first
     log: str = ""  # its transcript (JSONL), written as it goes
+    edits: tuple[str, ...] = ()  # its Edit and Write calls that worked, as summarized
 
 
 @dataclass(frozen=True)
@@ -187,7 +198,8 @@ class Done:
 
     # plan_mode: in plan mode it tried to change something; it stopped there for the user
     # to switch modes (agent/loop.py PLAN_MODE_CALL)
-    reason: Literal["stop", "max_steps", "interrupted", "plan_mode"] = "stop"
+    # awaiting_answer: asked questions (Ask), the user chose to answer them in chat
+    reason: Literal["stop", "max_steps", "interrupted", "plan_mode", "plan_ready", "awaiting_answer"] = "stop"
 
 
 Event = (
@@ -202,6 +214,7 @@ Event = (
     | ToolResult
     | SkillLoaded
     | TodosUpdated
+    | PlanSaved
     | ArtifactPresented
     | Compacted
     | TokenUsage

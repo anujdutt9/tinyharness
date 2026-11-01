@@ -7,7 +7,8 @@ A tool is a class with:
   * `run(args, ctx)`       — does the work and returns text for the model
 
 Flags tell the harness how to treat it:
-  * `read_only`        — no side effects: allowed in plan mode, safe to run in parallel
+  * `read_only`        — no side effects: safe to run in parallel
+  * `available_in_plan_mode` — an intentional bookkeeping write offered while planning
   * `needs_permission` — False for bookkeeping tools (e.g. TodoWrite) that skip the gate
   * `network`          — reaches other machines (WebFetch): asks per site, never free
   * `approval_boundary`— a contained capability that still needs an explicit decision
@@ -20,7 +21,7 @@ import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 
@@ -29,10 +30,11 @@ from tinyharness.llm.types import ToolSpec
 from tinyharness.llm.usage import UsageMeter
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from tinyharness.config import Config
     from tinyharness.events import Event
+    from tinyharness.jobs import JobScope
     from tinyharness.workspace import Scratch, Workspace
 
 
@@ -124,6 +126,13 @@ class ToolContext:
     usage: UsageMeter = field(default_factory=UsageMeter)  # tokens and cost, subagents included
     # The user's latest message, so agents started on its behalf know what it's for.
     request: str = ""
+    # Approved plan checkpoint included in compaction summaries. The session owns it;
+    # Plan clears it when a new draft supersedes the approved revision.
+    plan_summary: str = ""
+    # Set by a tool that hands the turn back to the user: Plan, when its plan is ready for
+    # review (as Claude Code's ExitPlanMode); Ask, when they'd rather answer in chat. The
+    # loop ends the turn after that batch.
+    hand_back: Literal["", "plan_ready", "awaiting_answer"] = ""
     # Where content from other machines in this conversation came from ("WebFetch
     # docs.python.org"): once there is any, calls that can send data out are reviewed
     # again (permissions/gate.py). Shared with subagents; changed in place, never replaced.
@@ -132,6 +141,13 @@ class ToolContext:
     # model to supply these: the session sets them itself.
     session_id: str = ""
     turn_id: str = ""
+    # This agent's background jobs (tinyharness/jobs.py). None: commands only run in the
+    # foreground, and a timeout kills them.
+    jobs: JobScope | None = None
+    # Decides whether a running command (tool, its arguments) may reach a host its sandbox
+    # doesn't allow yet, while the connection waits: this agent's permission gate, set by
+    # the agent loop. None (a tool run outside a loop): such hosts are refused.
+    ask_network: Callable[[Tool[Any], dict[str, Any], str], Awaitable[bool]] | None = None
 
 
 def note_outside(ctx: ToolContext, source: str) -> None:
@@ -177,6 +193,7 @@ class Tool(ABC, Generic[InputT]):
     description: str
     Input: type[InputT]
     read_only: ClassVar[bool] = False
+    available_in_plan_mode: ClassVar[bool] = False
     needs_permission: ClassVar[bool] = True
     network: ClassVar[bool] = False
     # What it saves is read by every later session as context (the agent's memory), so
@@ -242,6 +259,12 @@ class Tool(ABC, Generic[InputT]):
     def risk(self, args: dict[str, Any], path: Path | None) -> str | None:
         """Why this call is destructive enough to always ask in auto mode, or None.
         Gets the raw arguments, since it runs before they're validated."""
+        return None
+
+    def nameable_risk(self, args: dict[str, Any]) -> str | None:
+        """For a call `risk` flags: a note for auto mode's review when the user may have
+        asked for exactly this (deleting a folder they named), so the review can allow it
+        instead of asking. None (the default): it always asks."""
         return None
 
     def contained(self, args: dict[str, Any]) -> bool:

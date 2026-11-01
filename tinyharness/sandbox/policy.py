@@ -14,8 +14,10 @@ Each backend (sandbox/seatbelt.py, ...) translates this one policy for its platf
 
 from __future__ import annotations
 
+import functools
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from collections.abc import Iterable
@@ -100,6 +102,7 @@ class SandboxPolicy:
             private_tmp = scratch / "tmp"
             private_tmp.mkdir(parents=True, exist_ok=True)
             env.update({"TMPDIR": str(private_tmp), "TMP": str(private_tmp), "TEMP": str(private_tmp)})
+        roots.extend(_framework_scratch())  # cached: the answer is fixed for this user
         shared = tuple(dict.fromkeys(shared_caches))
         for name in shared:
             for variable, default in SHAREABLE_CACHES[name].items():
@@ -127,6 +130,25 @@ class SandboxPolicy:
 def _real(path: Path) -> Path:
     """Sandboxes match real paths (/tmp is /private/tmp on macOS)."""
     return Path(path).expanduser().resolve()
+
+
+@functools.cache
+def _framework_scratch() -> list[Path]:
+    """Scratch folders macOS frameworks write regardless of TMPDIR, each one folder under the
+    user's own temp directory (`getconf DARWIN_USER_TEMP_DIR`), never the whole of it.
+
+    Seen live: PyTorch on Apple GPUs printed "You don't have permission to save the file
+    mpsgraph-..." on every graph it built: Metal writes per-process files (named for the
+    process and time) to com.apple.MetalPerformanceShadersGraph there, ignoring TMPDIR."""
+    if sys.platform != "darwin":
+        return []
+    try:
+        temp = subprocess.run(
+            ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [_real(Path(temp)) / "com.apple.MetalPerformanceShadersGraph"] if temp else []
 
 
 def _temp_dirs() -> list[Path]:

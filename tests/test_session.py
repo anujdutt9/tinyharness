@@ -420,3 +420,17 @@ async def test_a_prompt_naming_a_skill_is_sent_as_typed(session):
     assert "a skill, tool or approach they name isn't optional" in " ".join(
         session.history.messages[0].content.split()
     )
+
+
+def test_plan_mode_asks_the_questions_that_shape_the_plan_first():
+    """Seen live: asked to read the docs and plan, the agent wrote nine sections built on
+    guesses, then asked four questions (which tools, which model, which keys, which data)
+    whose answers changed most of them."""
+    from tinyharness.session import PLAN_ON
+
+    assert "at most three questions" in PLAN_ON and "With the Ask tool" in PLAN_ON
+    assert "recommended default" in PLAN_ON and "end your turn to wait" in PLAN_ON  # without Ask
+    assert "every blocking choice" in PLAN_ON
+    assert "1. Look" in PLAN_ON and "don't explore everything first" in PLAN_ON
+    assert "4. Revise" in PLAN_ON and "changing only what they touched" in PLAN_ON
+    assert "in Markdown with the Plan tool" in PLAN_ON and "between <plan> and </plan>" in PLAN_ON

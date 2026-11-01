@@ -1,7 +1,10 @@
 """Bash: run a shell command in the working directory, inside the OS sandbox.
 
 Each call is a fresh process (no shell state carries over), started in its own
-process group so a timeout or Ctrl-C kills everything it spawned. The environment
+process group so Ctrl-C or stopping it kills everything it spawned. With background
+jobs on (a session's default; see tinyharness/jobs.py), a command can run in the
+background from the start, and one still running at its timeout moves there instead
+of being killed; otherwise the timeout kills it. The environment
 has credentials stripped, and output is capped (head and tail kept) before the
 loop masks any remaining secrets.
 
@@ -14,6 +17,7 @@ Containment is chosen by the harness, never by a model tool argument.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import glob
 import hashlib
@@ -25,18 +29,21 @@ import shutil
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from pydantic import Field, ValidationError, field_validator
 
+from tinyharness.jobs import LOG_MAX_BYTES, Job, JobReason, JobScope
+from tinyharness.paths import pretty_path
 from tinyharness.process import kill_group
 from tinyharness.sandbox import Sandbox, SandboxPolicy
 from tinyharness.sandbox.policy import PROTECTED_IN_PROJECT
 from tinyharness.sandbox.proxy import PACKAGE_REGISTRY_HOSTS, AllowlistProxy, host_allowed, service_hosts
 from tinyharness.security import is_secret_path, sanitized_env
-from tinyharness.tools.base import ApprovalBoundary, Tool, ToolContext, ToolInput, note_outside
+from tinyharness.tools.base import ApprovalBoundary, Tool, ToolContext, ToolError, ToolInput, note_outside
 
 HEAD_BYTES = 15_000  # output kept from the start...
 TAIL_BYTES = 15_000  # ...and from the end
@@ -49,6 +56,9 @@ NONINTERACTIVE_ENV = {
     "NO_COLOR": "1",
     "TERM": "dumb",
     "GIT_TERMINAL_PROMPT": "0",
+    # Output isn't a terminal, so Python would hold it back until it exits: a background
+    # server's "Serving on ..." line never reached its log (seen live).
+    "PYTHONUNBUFFERED": "1",
 }
 
 # Inherited settings that force color: output goes to the model, where color codes are
@@ -61,6 +71,12 @@ def command_env(extra: dict[str, str]) -> dict[str, str]:
     env = {**sanitized_env(), **NONINTERACTIVE_ENV, **extra}
     for name in _FORCES_COLOR:
         env.pop(name, None)
+    if sys.platform == "darwin":
+        # macOS frameworks turn C strings into text with the user's default encoding, which
+        # is Mac Roman unless this says UTF-8. Seen live: Metal's messages came out as
+        # "You don‚Äôt have permission" for "You don’t have permission".
+        user = env.get("__CF_USER_TEXT_ENCODING", "").split(":")[0] or hex(os.getuid())
+        env["__CF_USER_TEXT_ENCODING"] = f"{user}:0x8000100:0x8000100"
     return env
 
 
@@ -145,7 +161,8 @@ _PYTHON_PIPE_INLINE = re.compile(
 )
 _EXECUTES_STDIN = re.compile(r"\b(?:exec|eval|compile)\s*\(", re.IGNORECASE)
 _SHELL_REDIRECTION = re.compile(r"^\d*(?:>>?|<<?)(?:&\d+|\S+)$")
-_FD_DUPLICATION = re.compile(r"(?<!\S)\d*[<>]&\d+(?!\S)")
+# Also beside a shell operator: `(pytest 2>&1 || ...)` (seen live) ends in `2>&1)`.
+_FD_DUPLICATION = re.compile(r"(?<![^\s;&|()])\d*[<>]&\d+(?![^\s;&|()])")
 # Throwing a known local reader's output away cannot send project data anywhere.
 # Keep other redirections conservative: they may read or change a real file.
 _DEVNULL_OUTPUT = re.compile(r"(?<!\S)\d*>>?/dev/null(?!\S)")
@@ -735,13 +752,30 @@ def _inside(path: Path, roots: tuple[Path, ...]) -> bool:
 
 class BashInput(ToolInput):
     command: str = Field(description="The shell command to run")
-    timeout: int = Field(default=120, ge=1, le=600, description="Seconds before the command is killed")
+    timeout: int = Field(
+        default=120,
+        ge=1,
+        le=600,
+        description="Seconds to wait for it; a command still running then moves to the background "
+        "(or is killed where background jobs are off)",
+    )
     description: str = Field(default="", description="What the command does, in 5-10 words")
     network_host: str = Field(
         default="",
         description="One exact hostname this sandboxed command needs. Use 'localhost' when a "
         "test, preview, or development server needs loopback; use other hosts after the sandbox "
         "reports that destination as blocked. Approval never removes containment.",
+    )
+    background: bool = Field(
+        default=False,
+        description="Run it in the background and return at once with a job id: for servers, "
+        "watchers, and long work whose result you don't need for your next step",
+    )
+    outside_sandbox: bool = Field(
+        default=False,
+        description="Only to rerun, word for word, a command the user asked for that the sandbox "
+        "refused for a protected path (git config or hooks, editor or agent settings): it runs "
+        "outside the sandbox once the user approves. They are asked every time.",
     )
 
     @field_validator("network_host")
@@ -767,11 +801,13 @@ class BashInput(ToolInput):
 @dataclass
 class Execution:
     output: str
-    code: int | None  # None: it timed out and was killed
+    code: int | None  # None: it timed out and was killed, or it moved to the background
     timed_out: bool
     sandboxed: bool
     blocked: list[str]  # hosts the sandbox proxy refused while it ran
     reached: list[str]  # hosts it downloaded from, through the proxy
+    job: Job | None = None  # it moved to the background: still running as this job
+    stuck: str = ""  # stopped early: it kept retrying this host, which the sandbox refused
 
 
 class BashTool(Tool[BashInput]):
@@ -785,10 +821,16 @@ class BashTool(Tool[BashInput]):
         shell: str | None = None,
         proxy: AllowlistProxy | None = None,
         session_hosts: set[str] | None = None,
+        background: bool = False,
     ) -> None:
         self.policy = policy
         self.shell = shell or default_shell()
         self.session_hosts = session_hosts if session_hosts is not None else set()
+        self.background = background  # the session runs background jobs (`jobs`)
+        # Commands the sandbox refused for a protected path: only these may ask to run
+        # outside it (`outside_sandbox`), so it never becomes a general way out. Seen live:
+        # given a switch, a model proposed a routine install without containment.
+        self.refused_commands: set[str] = set()
         self.set_sandbox(sandbox, proxy)
 
     def set_sandbox(self, sandbox: Sandbox | None, proxy: AllowlistProxy | None = None) -> None:
@@ -810,7 +852,7 @@ class BashTool(Tool[BashInput]):
             + ". API key variables are stripped, and apps (`open`, browsers like Chrome.app) can't "
             "start. When a download names a blocked destination, retry once with network_host set "
             "to that exact hostname; approval keeps the command sandboxed. Use structured file/Open "
-            "tools for host actions; Bash never drops containment. Installing what the project declares "
+            "tools for host actions; Bash drops containment only with outside_sandbox, which always asks the user. Installing what the project declares "
             "(`uv sync`, `pip install -e .`, `npm ci`) runs freely when it is its own command, apart from "
             "tests and other steps; naming a new package is reviewed first; run "
             "an already-installed executable directly to reuse it without another prompt. "
@@ -833,6 +875,15 @@ class BashTool(Tool[BashInput]):
             "never ask, and take paths in any subdirectory. Use Edit over sed. "
             f"{limits}"
         )
+        if self.background:
+            self.description += (
+                " Run it in the foreground when you need its result for your next step. Use "
+                "background=true for servers, watchers and long work you don't need to wait for: "
+                "you get a job id at once (don't add `&` yourself), the output goes to a log file, "
+                "and you get a note when it ends. A command still running at its timeout moves to the background too, "
+                "instead of being killed. Use Job to wait for its output (or for a line such as "
+                "'ready') and to stop it; don't end your turn while you still need one's result."
+            )
 
     def describe(self, args: BashInput) -> str:
         command = args.command if len(args.command) <= 80 else args.command[:79] + "…"
@@ -849,7 +900,13 @@ class BashTool(Tool[BashInput]):
             return None
         if acquisition.needs_python_environment:
             _, _, environment = _python_install_environment(args.command, self.policy)
-            location = f"the writable environment at {environment}"
+            # Seen live: the full path ran to 180 characters in the approval card.
+            where = environment.resolve() if environment is not None else None
+            location = (
+                f"the project's {where.relative_to(project).as_posix()}"
+                if where is not None and where.is_relative_to(project)
+                else f"the writable environment at {pretty_path(where, 60) if where else 'none yet'}"
+            )
         else:
             location = (
                 "the private tinyharness cache or another permitted root" if self.sandbox else "the host"
@@ -868,15 +925,24 @@ class BashTool(Tool[BashInput]):
         return not (only_reads(command) or certainly_offline(command))
 
     def contained(self, args: dict[str, Any]) -> bool:
-        return self.sandbox is not None
+        return self.sandbox is not None and not self._leaves_sandbox(args)
 
     def runs_unsandboxed(self, args: dict[str, Any]) -> bool:
-        return self.sandbox is None
+        return self.sandbox is None or self._leaves_sandbox(args)
+
+    def _leaves_sandbox(self, args: BashInput | dict[str, Any]) -> bool:
+        """Whether this call runs outside the sandbox, as the user may allow for the exact
+        command the sandbox refused for a protected path. Any other command stays inside."""
+        if isinstance(args, BashInput):
+            wanted, command = args.outside_sandbox, args.command
+        else:
+            wanted, command = bool(args.get("outside_sandbox")), str(args.get("command", ""))
+        return wanted and self.sandbox is not None and command in self.refused_commands
 
     def can_send_out(self, args: dict[str, Any]) -> bool:
         """The sandbox's allowlist is still an outbound channel for readable project data,
         except for plain downloads: they send an allowed host nothing but the URL."""
-        if self.sandbox is None:  # any host: only a command that can't use the network is safe
+        if self.sandbox is None or self._leaves_sandbox(args):  # any host: only offline commands are safe
             return not certainly_offline(str(args.get("command", "")))
         if not (self.policy.allowed_hosts or self.session_hosts or self._network_host(args)):
             return False
@@ -885,6 +951,11 @@ class BashTool(Tool[BashInput]):
     def escapes(self, args: dict[str, Any]) -> str | None:
         if self.sandbox is None:  # off is the user's choice (/sandbox): there's nothing to escape
             return None
+        if self._leaves_sandbox(args):
+            return (
+                "this runs the command outside the sandbox, as you; git config and hooks, editor "
+                "and agent settings it changes can run code later"
+            )
         host = self._network_host(args)
         if host and not self._host_is_allowed(host):
             return (
@@ -895,6 +966,8 @@ class BashTool(Tool[BashInput]):
 
     def rememberable_escape(self, args: dict[str, Any]) -> bool:
         host = self._network_host(args)
+        if self._leaves_sandbox(args):
+            return False  # dropping containment is asked every time
         return bool(self.sandbox is not None and host and not self._host_is_allowed(host))
 
     def _host_is_allowed(self, host: str) -> bool:
@@ -910,20 +983,54 @@ class BashTool(Tool[BashInput]):
                 return ""
         return args.network_host
 
+    def nameable_risk(self, args: dict[str, Any]) -> str | None:
+        # Seen live: "clean up the old build folder" still asked before `rm -r build` in
+        # auto mode. Inside the sandbox a delete reaches only the project and its caches;
+        # git's reset --hard and clean throw away work and keep asking.
+        command = str(args.get("command", ""))
+        if not self.contained(args):
+            return None
+        reasons = {reason for pattern, reason in _DESTRUCTIVE_COMMANDS if pattern.search(command)}
+        if not reasons or not reasons <= {"deletes files", "deletes files with find"}:
+            return None
+        return (
+            "This sandboxed command deletes files inside the project, which can't be undone. "
+            "Allow it only if the user's own messages asked for this deletion and named what to "
+            "delete; if they didn't, or it deletes more than they named, answer ask."
+        )
+
     def risk(self, args: dict[str, Any], path: Path | None) -> str | None:
         command = str(args.get("command", ""))
         for pattern, reason in _DESTRUCTIVE_COMMANDS:
             if pattern.search(command):
                 return reason
-        if self.sandbox:
+        if self.sandbox and not self._leaves_sandbox(args):
             return None
         return _unsandboxed_risk(
             command, next(iter(self.policy.project_roots or self.policy.write_roots), None)
         )
 
     async def run(self, args: BashInput, ctx: ToolContext) -> str:
+        if args.outside_sandbox and self.sandbox is not None and not self._leaves_sandbox(args):
+            raise ToolError(
+                "outside_sandbox only reruns, word for word, a command the sandbox refused for a "
+                "protected path. Run this one without it; if the sandbox refuses it for a protected "
+                "path, run it again with outside_sandbox=true and the user is asked."
+            )
+        if args.background:
+            if ctx.jobs is None:
+                raise ToolError(
+                    "Background jobs aren't available here. Run the command in the foreground "
+                    "with a timeout long enough for it."
+                )
+            if not ctx.jobs.table.has_room():
+                running = ", ".join(f"{j.id} ({j.short_command(40)})" for j in ctx.jobs.table.running())
+                raise ToolError(
+                    f"{ctx.jobs.table.max_running} background jobs are already running: {running}. "
+                    "Stop one you no longer need with Job(action='stop') first."
+                )
         started = time.time()
-        run = await self.execute(args, ctx)
+        run = await self.execute(args, ctx, jobs=ctx.jobs)
         reached = run.reached
         if _installs_declared_only(args.command, self.policy):
             # Installing what the project declares is authorized project setup inside the
@@ -940,7 +1047,9 @@ class BashTool(Tool[BashInput]):
             # No proxy says which hosts it reached: anything that looks like a download counts.
             note_outside(ctx, "Bash network use (no sandbox)")
         notes = self._cached_python_notes(args.command, started) if run.sandboxed else ()
-        return self._report(run.output, run.code, run.timed_out, args, run.sandboxed, run.blocked, notes)
+        return self._report(
+            run.output, run.code, run.timed_out, args, run.sandboxed, run.blocked, notes, run.job, run.stuck
+        )
 
     def _cached_python_notes(self, command: str, since: float) -> tuple[str, ...]:
         """Say so when a new virtualenv's Python lives in the private sandbox cache.
@@ -974,11 +1083,13 @@ class BashTool(Tool[BashInput]):
                     )
         return tuple(notes)
 
-    async def execute(self, args: BashInput, ctx: ToolContext) -> Execution:
-        """Run the command; what it printed and how it ended, before any notes are added."""
+    async def execute(self, args: BashInput, ctx: ToolContext, jobs: JobScope | None = None) -> Execution:
+        """Run the command; what it printed and how it ended, before any notes are added.
+        With `jobs`, it may move to the background (asked for, at its timeout, or detached
+        by the user) and the result says which job it became."""
         command, install_env, _ = _python_install_environment(args.command, self.policy)
         argv = shell_argv(self.shell, command)
-        sandboxed = self.sandbox is not None
+        sandboxed = self.sandbox is not None and not self._leaves_sandbox(args)
         policy, denied_before, reached_before = self.policy, 0, 0
         active_proxy = self.proxy
         temporary_proxy = False
@@ -986,6 +1097,7 @@ class BashTool(Tool[BashInput]):
             *sorted(self.session_hosts),
             *(service_hosts(args.network_host) if args.network_host else ()),
         )
+        remote_hosts: tuple[str, ...] = ()
         if sandboxed and added_hosts:
             localhost = "localhost" in added_hosts
             remote_hosts = tuple(host for host in added_hosts if host != "localhost")
@@ -994,15 +1106,18 @@ class BashTool(Tool[BashInput]):
                 allow_localhost=policy.allow_localhost or localhost,
                 allowed_hosts=tuple(dict.fromkeys((*policy.allowed_hosts, *remote_hosts))),
             )
-            if (
-                remote_hosts
-                and not getattr(self.sandbox, "manages_network", False)
-                and (
-                    active_proxy is None
-                    or any(not host_allowed(host, active_proxy.allowed) for host in remote_hosts)
-                )
-            ):
-                active_proxy = AllowlistProxy(policy.allowed_hosts)
+        # A host this command needs but the sandbox doesn't allow is decided while its
+        # connection waits, so a library's retries never stall the command. Its own proxy
+        # says which command asked, even with subagents running commands side by side.
+        asker = ctx.ask_network
+        ask = (lambda host: asker(self, args.model_dump(), host)) if asker is not None else None
+        if sandboxed and not getattr(self.sandbox, "manages_network", False):
+            needs_hosts = bool(remote_hosts) and (
+                active_proxy is None
+                or any(not host_allowed(host, active_proxy.allowed) for host in remote_hosts)
+            )
+            if needs_hosts or (ask is not None and active_proxy is not None):
+                active_proxy = AllowlistProxy(policy.allowed_hosts, ask=ask)
                 temporary_proxy = True
         try:
             if sandboxed and active_proxy is not None:
@@ -1031,24 +1146,60 @@ class BashTool(Tool[BashInput]):
             if temporary_proxy and active_proxy is not None:
                 active_proxy.close()
             raise
-        spill = ctx.scratch.dir / f"bash-{uuid.uuid4().hex[:8]}.log" if ctx.scratch else None
-        output = _Capture(spill)
+        if jobs is not None:
+            output = _Capture(jobs.table.new_log(), keep=True)
+        else:
+            spill = ctx.scratch.dir / f"bash-{uuid.uuid4().hex[:8]}.log" if ctx.scratch else None
+            output = _Capture(spill)
         timed_out = False
+        job: Job | None = None
+        began = time.monotonic()  # a job's run time counts from here, not from when it became one
 
         async def finish() -> None:
             assert proc.stdout is not None
             await output.drain(proc.stdout)
-            await proc.wait()  # inside the timeout: it may have closed its output and kept running
+            await proc.wait()  # it may have closed its output and kept running
 
+        task = asyncio.create_task(finish())
+        detach = jobs.table.foreground() if jobs is not None else None
+        stuck: list[str] = []  # the refused host it kept retrying, once stopped for it
+        proxy_now = active_proxy if sandboxed else None
+        if proxy_now is not None:
+            watcher = asyncio.create_task(_stop_when_stuck(proc, proxy_now, output, denied_before, stuck))
+            task.add_done_callback(lambda _: watcher.cancel())
         try:
             try:
-                await asyncio.wait_for(finish(), args.timeout)
-            except TimeoutError:
-                timed_out = True
-                await kill_group(proc)
+                moved: JobReason | None = "background" if args.background else None
+                if moved is None:
+                    asked = (lambda: proxy_now.asking_seconds) if proxy_now is not None else None
+                    moved = await _settle(task, detach, args.timeout, jobs, asked)
+                if moved == "timeout" and (
+                    jobs is None or not jobs.table.background_on_timeout or not jobs.table.has_room()
+                ):
+                    moved, timed_out = None, True
+                    await kill_group(proc)
+                    try:
+                        await asyncio.wait_for(asyncio.shield(task), 5)  # what it printed before
+                    except TimeoutError:  # something that left its group holds the output open
+                        task.cancel()
             except BaseException:  # Ctrl-C: don't leave the command running
                 await kill_group(proc)
+                task.cancel()
                 raise
+            blocked_from = denied_before if sandboxed and active_proxy else 0
+            reached_from = reached_before if sandboxed and active_proxy else 0
+            if moved is not None and jobs is not None:
+                job = _job(sandboxed, args, jobs, proc, task, output, moved)
+                job.started = began
+                if sandboxed and active_proxy is not None:
+                    proxy = active_proxy
+                    job.reached = lambda: proxy.reached[reached_from:]
+                    job.blocked = lambda: proxy.denied[blocked_from:]
+                    if temporary_proxy:  # the job uses it now; it closes when the job ends
+                        job.on_end.append(proxy.close)
+                        temporary_proxy = False
+                job.seen = output.size  # this result shows everything printed so far
+                jobs.table.adopt(job)
             blocked = (
                 list(dict.fromkeys(active_proxy.denied[denied_before:])) if sandboxed and active_proxy else []
             )
@@ -1058,10 +1209,16 @@ class BashTool(Tool[BashInput]):
                 else []
             )
         finally:
+            if detach is not None and jobs is not None:
+                jobs.table.done_in_foreground(detach)
             if temporary_proxy and active_proxy is not None:
                 active_proxy.close()
-        code = None if timed_out else proc.returncode
-        return Execution(output.text(), code, timed_out, sandboxed, blocked, reached)
+        if job is None:
+            output.finished()
+        code = None if timed_out or job is not None else proc.returncode
+        return Execution(
+            output.text(), code, timed_out, sandboxed, blocked, reached, job, stuck[0] if stuck else ""
+        )
 
     def _blocked_path(self, text: str) -> tuple[str, bool]:
         """The path a denied write named, and whether it is a protected one (.git/hooks).
@@ -1097,55 +1254,24 @@ class BashTool(Tool[BashInput]):
         sandboxed: bool,
         blocked: list[str] | None = None,
         notes: tuple[str, ...] = (),
+        job: Job | None = None,
+        stuck: str = "",
     ) -> str:
         text = text.rstrip() or "(no output)"
-        if blocked:
-            text += (
-                f"\n[tinyharness:network_destination_denied host={blocked[0]}] "
-                "The command stayed sandboxed. If this destination is required and trusted, "
-                f"retry with network_host={blocked[0]!r}; do not change the command's containment."
-            )
-        # Sandbox failures don't say "sandbox": a blocked write says "Operation not permitted",
-        # and a macOS app (which needs LaunchServices) dies with "Abort trap: 6".
-        denied = "Operation not permitted" in text or "Permission denied" in text
-        if sandboxed and code and ".app/" in args.command:
-            text += (
-                "\n[tinyharness:host_application_blocked] This command stayed sandboxed. "
-                "Use a structured host-application tool if the user needs to see the result."
-            )
-        elif sandboxed and denied and _looks_like_localhost_denial(text):
-            text += (
-                "\n[tinyharness:localhost_denied] This command stayed sandboxed. If it needs a "
-                "local test, preview, or development server, retry with network_host='localhost'; "
-                "do not change the command's containment."
-            )
-        elif sandboxed and denied and (protected := self._blocked_path(text))[1]:
-            # Seen live: `pre-commit install` hit .git/hooks; nothing said only the user can.
-            text += (
-                f"\n[tinyharness:protected_path_denied path={protected[0]}] This command stayed "
-                f"sandboxed. {protected[0]} is protected: git hooks and config and tinyharness's own "
-                "settings run code later, outside the sandbox, so no sandboxed command may change them. "
-                "Don't look for a way around it: tell the user the exact command to run in their own "
-                "terminal for this step (for example `pre-commit install`), and carry on without it."
-            )
-        elif sandboxed and denied:
-            path, _ = self._blocked_path(text)
-            text += (
-                f"\n[tinyharness:filesystem_or_process_denied{f' path={path}' if path else ''}] "
-                "This command stayed sandboxed. Use the working directory, $TMPDIR, or an explicitly "
-                "configured writable root; do not retry outside containment."
-            )
-            if path and _is_home_dot_dir(path):
-                # Seen live: SGLang hard-codes ~/.cache/sglang instead of following XDG.
-                text += (
-                    f" The tool writes {path} directly instead of following $XDG_CACHE_HOME, which "
-                    "already points at a writable sandbox cache. Find the variable that sets this "
-                    "folder (most tools have one, like FOO_CACHE_DIR or FOO_HOME) and point it beneath "
-                    "$XDG_CACHE_HOME. If you have a Memory tool, save that variable there so later "
-                    "sessions set it from the start."
-                )
+        if job is not None:
+            note = _moved_note(job, args.timeout)
+            return note if job.reason == "background" else f"{text}\n{note}"
+        notes_text = sandbox_notes(text, args.command, code, sandboxed, blocked or [], self._blocked_path)
+        if PROTECTED_DENIED in notes_text:
+            self.refused_commands.add(args.command)
+        text += notes_text
         for note in notes:
             text += f"\n{note}"
+        if stuck:
+            return text + (
+                f"\n(stopped early: it kept retrying {stuck}, which the sandbox refused, with no "
+                f"output for {STUCK_QUIET_SECONDS:.0f}s)"
+            )
         # The outcome goes last: the CLI reads it from the final line (a failed test run
         # showed as passing when this note came after it).
         if timed_out:
@@ -1155,9 +1281,90 @@ class BashTool(Tool[BashInput]):
         return text
 
 
+PROTECTED_DENIED = "tinyharness:protected_path_denied"
+
+
+def sandbox_notes(
+    text: str,
+    command: str,
+    code: int | None,
+    sandboxed: bool,
+    blocked: list[str],
+    blocked_path: Callable[[str], tuple[str, bool]] | None = None,
+) -> str:
+    """What to do about a sandbox refusal in a command's output (and its background job's).
+    `blocked_path` names the path a refused write was for, and whether it's protected."""
+    notes = ""
+    if blocked and _is_loopback(blocked[0]):
+        notes += (
+            f"\n[tinyharness:localhost_denied] {blocked[0]} is this machine. The command stayed "
+            "sandboxed. To reach a local server, retry with network_host='localhost'; do not "
+            "change the command's containment."
+        )
+    elif blocked:
+        notes += (
+            f"\n[tinyharness:network_destination_denied host={blocked[0]}] "
+            "The command stayed sandboxed. If this destination is required and trusted, "
+            f"retry with network_host={blocked[0]!r}; do not change the command's containment."
+        )
+    # Sandbox failures don't say "sandbox": a blocked write says "Operation not permitted",
+    # and a macOS app (which needs LaunchServices) dies with "Abort trap: 6".
+    lowered = text.lower()  # Go and Node say "operation not permitted"
+    denied = "operation not permitted" in lowered or "permission denied" in lowered
+    if sandboxed and code and ".app/" in command:
+        notes += (
+            "\n[tinyharness:host_application_blocked] This command stayed sandboxed. "
+            "Use a structured host-application tool if the user needs to see the result."
+        )
+    elif sandboxed and denied and _looks_like_localhost_denial(text):
+        notes += (
+            "\n[tinyharness:localhost_denied] This command stayed sandboxed. If it needs a "
+            "local test, preview, or development server, retry with network_host='localhost'; "
+            "do not change the command's containment."
+        )
+    elif sandboxed and denied:
+        path, protected = blocked_path(text) if blocked_path else ("", False)
+        if protected:
+            # Seen live: `pre-commit install` hit .git/hooks; nothing said only the user can.
+            # Seen live: "add a git remote" dead-ended; the user had to run it themselves.
+            notes += (
+                f"\n[{PROTECTED_DENIED} path={path}] This command stayed "
+                f"sandboxed. {path} is protected: git hooks and config and tinyharness's own "
+                "settings run code later, outside the sandbox, so no sandboxed command may change them. "
+                "Don't look for a way around it. If the user asked for this step, run the same command "
+                "again with outside_sandbox=true: they are asked to approve it. Otherwise tell them the "
+                "exact command to run in their own terminal, and carry on without it."
+            )
+            return notes
+        notes += (
+            f"\n[tinyharness:filesystem_or_process_denied{f' path={path}' if path else ''}] "
+            "This command stayed sandboxed. Use the working directory, $TMPDIR, or an explicitly "
+            "configured writable root; do not retry outside containment."
+        )
+        if path and _is_home_dot_dir(path):
+            # Seen live: SGLang hard-codes ~/.cache/sglang instead of following XDG.
+            notes += (
+                f" The tool writes {path} directly instead of following $XDG_CACHE_HOME, which "
+                "already points at a writable sandbox cache. Find the variable that sets this "
+                "folder (most tools have one, like FOO_CACHE_DIR or FOO_HOME) and point it beneath "
+                "$XDG_CACHE_HOME. If you have a Memory tool, save that variable there so later "
+                "sessions set it from the start."
+            )
+    return notes
+
+
+# A server refused its port by the sandbox: Python's `self.socket.bind(...)`, Go's
+# `listen tcp :8080: bind:`, Node's `listen EPERM ... 0.0.0.0:3000`, or a loopback address.
+_LOCALHOST_DENIAL = re.compile(r"127\.0\.0\.1|localhost|0\.0\.0\.0|bind on address|\bbind\b|\blisten\b", re.I)
+
+
+def _is_loopback(host: str) -> bool:
+    host = host.strip("[]").lower()
+    return host in ("localhost", "::", "::1", "0.0.0.0") or host.startswith("127.")
+
+
 def _looks_like_localhost_denial(text: str) -> bool:
-    lowered = text.lower()
-    return any(marker in lowered for marker in ("127.0.0.1", "localhost", "bind on address"))
+    return _LOCALHOST_DENIAL.search(text) is not None
 
 
 def only_reads(command: str) -> bool:
@@ -1209,6 +1416,40 @@ _LOCAL_STEPS = frozenset(
 _GIT_LOCAL = _GIT_READS | {"checkout", "switch", "restore", "add", "branch", "reset", "stash"}
 
 
+# `uv run <tool>` first installs what the project declares, then runs a tool that reads and
+# checks local code. Seen live: the first `uv run pytest` in a fresh project fetched pytest
+# from PyPI, and from then on every test run asked about outside content.
+_PROJECT_TOOLS = frozenset(
+    {"pytest", "py.test", "ruff", "mypy", "pyright", "black", "isort", "flake8", "pylint", "coverage"}
+)
+_UV_RUN_VALUES = frozenset(
+    {"--extra", "--group", "--only-group", "--package", "-p", "--python", "--directory", "--project"}
+)
+# Options that bring in something the project doesn't declare, or from somewhere else.
+_UV_RUN_UNDECLARED = ("--with", "--script", "--index", "--default-index", "--extra-index-url", "--find-links")
+
+
+def _is_project_tool(words: list[str]) -> bool:
+    """`pytest ...`, `.venv/bin/ruff ...` or `python -m pytest ...`: the project's own
+    checks, which run its code like the rest of the project (they never taint)."""
+    if words and Path(words[0]).name in {"python", "python3"}:
+        return len(words) > 2 and words[1] == "-m" and words[2] in _PROJECT_TOOLS
+    return bool(words) and Path(words[0]).name in _PROJECT_TOOLS
+
+
+def _runs_project_tool(words: list[str]) -> bool:
+    """`uv run [options] pytest ...`: a declared install, then a project tool."""
+    if len(words) < 3 or Path(words[0]).name != "uv" or words[1] != "run":
+        return False
+    index = 2
+    while index < len(words) and words[index].startswith("-"):
+        option = words[index].partition("=")[0]
+        if option.startswith(_UV_RUN_UNDECLARED) or option == "-f":
+            return False
+        index += 2 if option in _UV_RUN_VALUES and "=" not in words[index] else 1
+    return _is_project_tool(words[index:])
+
+
 def _installs_declared_only(command: str, policy: SandboxPolicy) -> bool:
     """Whether the command is project setup: declared installs, plus steps that can't fetch.
 
@@ -1246,9 +1487,12 @@ def _installs_declared_only(command: str, policy: SandboxPolicy) -> bool:
             or (name == "git" and len(words) > 1 and words[1] in _GIT_LOCAL)
             or (name in {"source", "."} and len(words) == 2 and _project_activation(words[1], cwd, policy))
             or _MAKES_VENV.search(" ".join(words))
+            or _is_project_tool(words)
         ):
             pass
-        elif (acquisition := _acquisition_in_segment(segment, cwd)) is not None and acquisition.declared:
+        elif _runs_project_tool(words) or (
+            (acquisition := _acquisition_in_segment(segment, cwd)) is not None and acquisition.declared
+        ):
             installs += 1
         else:
             return False
@@ -1675,9 +1919,12 @@ def shell_argv(shell: str, command: str) -> list[str]:
 
 # Where a denied write says what it tried: Python's `Operation not permitted: '/x'` and
 # BSD tools' `mkdir: /x: Operation not permitted`.
+# The whole word holding the path, relative ones too. Seen live: git's "could not write
+# config file .git/config: Operation not permitted" was read as "/config", so the
+# protected path went unrecognised.
 _DENIED_PATH = re.compile(
     r"(?:Operation not permitted|Permission denied): '([^']+)'"
-    r"|(/[^\s:'\"]+): (?:Operation not permitted|Permission denied)"
+    r"|(?<![^\s'\"])([^\s:'\"]*/[^\s:'\"]+): (?:Operation not permitted|Permission denied)"
 )
 
 
@@ -1690,46 +1937,187 @@ def _is_home_dot_dir(path: str) -> bool:
     return len(parts) >= 2 and parts[0].startswith(".")
 
 
+async def _settle(
+    task: asyncio.Task[None],
+    detach: asyncio.Event | None,
+    timeout: float,
+    jobs: JobScope | None,
+    asked: Callable[[], float] | None = None,
+) -> JobReason | None:
+    """Wait for the command: None once it has finished, "timeout" if it's still running at
+    `timeout`, "detached" if the user moved it to the background first (honored only while
+    there's room for another job). Time spent waiting for the person to decide on a host
+    (`asked`) is added back: a slow answer mustn't use up the command's time."""
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    while True:
+        deadline = started + timeout + (asked() if asked is not None else 0.0)
+        waiting: set[asyncio.Future[object]] = {task}  # type: ignore[arg-type]
+        detached = asyncio.ensure_future(detach.wait()) if detach is not None else None
+        if detached is not None:
+            waiting.add(detached)  # type: ignore[arg-type]
+        try:
+            await asyncio.wait(
+                waiting, timeout=max(deadline - loop.time(), 0), return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            if detached is not None:
+                detached.cancel()
+        if task.done():
+            return None
+        if detach is not None and detach.is_set():
+            if jobs is not None and jobs.table.has_room():
+                return "detached"
+            detach.clear()  # no room for another job: it stays in the foreground
+            continue
+        if asked is not None and loop.time() < started + timeout + asked():
+            continue  # a decision on a host took some of that time
+        return "timeout"
+
+
+# A command that keeps asking for a host the sandbox refused, while printing nothing, is
+# stuck in a library's retry loop. Seen live: `load_dataset` retried s3.amazonaws.com for
+# 3 minutes until its timeout. A fallback that builds quietly doesn't keep asking, so both
+# conditions must hold.
+STUCK_RETRIES = 3
+STUCK_QUIET_SECONDS = 15.0
+
+
+async def _stop_when_stuck(
+    proc: asyncio.subprocess.Process, proxy: AllowlistProxy, output: _Capture, since: int, stuck: list[str]
+) -> None:
+    """Stop the command once it has asked for one refused host `STUCK_RETRIES` times and
+    printed nothing for `STUCK_QUIET_SECONDS`; the host goes in `stuck`."""
+    loop = asyncio.get_running_loop()
+    seen, quiet_since = output.seen, loop.time()
+    while proc.returncode is None:
+        await asyncio.sleep(1)
+        if output.seen != seen:
+            seen, quiet_since = output.seen, loop.time()
+        refused = proxy.denied[since:]
+        host = next((h for h in dict.fromkeys(refused) if refused.count(h) >= STUCK_RETRIES), None)
+        if host is not None and loop.time() - quiet_since >= STUCK_QUIET_SECONDS:
+            stuck.append(host)
+            await kill_group(proc)
+            return
+
+
+def _job(
+    sandboxed: bool,
+    args: BashInput,
+    jobs: JobScope,
+    proc: asyncio.subprocess.Process,
+    task: asyncio.Task[None],
+    output: _Capture,
+    reason: JobReason,
+) -> Job:
+    assert output.path is not None
+    job = Job(jobs.table.next_id(), args.command, jobs.owner, output.path, proc, task, output, reason)
+    job.sandboxed = sandboxed
+    return job
+
+
+def _moved_note(job: Job, timeout: int) -> str:
+    use = (
+        f"Job(id={job.id!r}, action='wait') waits for more output (until='<regex>' stops at a "
+        f"matching line), action='stop' ends it; the full output is in {job.log}."
+    )
+    match job.reason:
+        case "background":
+            return f"Started background job {job.id}. You'll get a note when it ends. {use}"
+        case "timeout":
+            return (
+                f"(still running after {timeout}s, so it moved to the background as job {job.id} "
+                f"instead of being killed; you'll get a note when it ends. {use})"
+            )
+        case _:
+            return (
+                f"(the user moved this command to the background as job {job.id}; it's still "
+                f"running and you'll get a note when it ends. {use})"
+            )
+
+
 class _Capture:
     """Keeps the first HEAD_BYTES and last TAIL_BYTES of a stream, whatever its size. Once
     output is dropped, all of it also goes to `spill` (a file in the session's scratch
-    directory), so the model can read the middle instead of running a slow command again."""
+    directory), so the model can read the middle instead of running a slow command again.
 
-    def __init__(self, spill: Path | None = None) -> None:
+    With `keep`, every byte goes to the file from the start (up to LOG_MAX_BYTES): the
+    command may become a background job, whose log it is. `finished()` removes the file
+    again if the command ended in the foreground and nothing was dropped."""
+
+    def __init__(self, spill: Path | None = None, *, keep: bool = False) -> None:
         self.head = bytearray()
         self.tail = bytearray()
         self.dropped = 0
         self.spill = spill
+        self.path = spill if keep else None
+        self.keep = keep
+        self.size = 0  # bytes in the file
+        self.seen = 0  # bytes it has printed so far, kept or not
+        self.capped = False
+        self.changed = asyncio.Event()
         self._file: Any = None
+        if keep and spill is not None:
+            try:
+                self._file = spill.open("wb")
+            except OSError:
+                self.spill = self.path = None
+
+    def _write(self, chunk: bytes) -> None:
+        if self._file is None:
+            return
+        room = LOG_MAX_BYTES - self.size
+        if room <= 0:
+            self.capped = True
+            return
+        piece = chunk[:room]
+        self.capped = len(piece) < len(chunk)
+        self._file.write(piece)
+        self._file.flush()  # Job and Read read it while the command runs
+        self.size += len(piece)
 
     async def drain(self, stream: asyncio.StreamReader) -> None:
         try:
             while chunk := await stream.read(65536):
-                if self._file is not None:
-                    self._file.write(chunk)
+                self.seen += len(chunk)
+                self._write(chunk)
                 room = HEAD_BYTES - len(self.head)
                 self.head += chunk[:room]
                 self.tail += chunk[room:] if room > 0 else chunk
                 if len(self.tail) > TAIL_BYTES:
-                    if self._file is None and self.spill is not None:
+                    if self._file is None and self.spill is not None and not self.keep:
                         try:
                             self._file = self.spill.open("wb")
-                            self._file.write(self.head + self.tail)  # everything so far
+                            self._write(bytes(self.head + self.tail))  # everything so far
                         except OSError:
                             self.spill = None
                     self.dropped += len(self.tail) - TAIL_BYTES
                     del self.tail[:-TAIL_BYTES]
+                self.changed.set()
         finally:
             if self._file is not None:
                 self._file.close()
+            self.changed.set()
+
+    def finished(self) -> None:
+        """The command ended in the foreground: a kept file nothing was dropped from holds
+        nothing the result doesn't, so it goes."""
+        if self.keep and not self.dropped and self.path is not None:
+            if self._file is not None:
+                self._file.close()
+            with contextlib.suppress(OSError):
+                self.path.unlink()
+            self.spill = None
 
     def text(self) -> str:
         head = self.head.decode("utf-8", errors="replace")
         tail = self.tail.decode("utf-8", errors="replace")
         if self.dropped:
+            kept = f"the first {self.size:,} bytes of it are" if self.capped else "all of it is"
             where = (
-                f"; all of it is in {self.spill}: Read or Grep that file instead of running the command again"
-                if self._file is not None and self.spill is not None
+                f"; {kept} in {self.spill}: Read or Grep that file instead of running the command again"
+                if self.spill is not None and (self._file is not None or self.keep)
                 else ""
             )
             return f"{head}\n… ({self.dropped:,} bytes of output omitted{where}) …\n{tail}"

@@ -24,6 +24,7 @@ JSONL file per session there; a server could keep them in a database.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -129,6 +130,11 @@ class Replayed:
     model: str | None = None
     world: dict[str, Any] = field(default_factory=dict)  # the last `world` record
     reported: dict[str, dict[str, Any] | None] = field(default_factory=dict)  # from `files` records
+    # Background jobs still running when the log ends (by id: their commands); every job
+    # dies with its session, so these were stopped. `last_job` is the highest job number.
+    jobs: dict[str, str] = field(default_factory=dict)
+    last_job: int = 0
+    plan: dict[str, Any] = field(default_factory=dict)
 
 
 def replay(records: list[dict[str, Any]]) -> Replayed:
@@ -153,8 +159,18 @@ def replay(records: list[dict[str, Any]]) -> Replayed:
                 out.todos = list(r.get("todos", []))
             case "model":
                 out.model = r.get("spec")
+            case "plan_saved":
+                out.plan = dict(r.get("plan", {}))
+            case "plan_approved" if out.plan and r.get("id") == out.plan.get("id"):
+                out.plan["approved"] = str(r.get("revision", ""))
             case "files":
                 out.reported.update(r.get("files", {}))
+            case "job_start":
+                out.jobs[r.get("job", "")] = r.get("command", "")
+                with contextlib.suppress(ValueError):
+                    out.last_job = max(out.last_job, int(str(r.get("job", "")).lstrip("j")))
+            case "job_end" if r.get("status") in ("exited", "stopped"):
+                out.jobs.pop(r.get("job", ""), None)
             case "world":
                 out.world = {
                     k: v

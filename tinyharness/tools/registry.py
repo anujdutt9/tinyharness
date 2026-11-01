@@ -44,7 +44,8 @@ class ToolRegistry:
     ) -> list[AnyTool]:
         """Tools to offer the model: filtered by an allow-list, by `hidden` (tools a deny rule
         refuses outright, so the model doesn't try them), to the ones that work right now
-        (`Tool.offered`) and, in plan mode, to read-only tools."""
+        (`Tool.offered`) and, in plan mode, to read-only tools plus the few bookkeeping
+        tools explicitly made for that mode."""
         hidden = set(hidden)
         return [
             tool
@@ -52,7 +53,7 @@ class ToolRegistry:
             if (allowed is None or name in allowed)
             and name not in hidden
             and tool.offered()
-            and (mode != PermissionMode.PLAN or tool.read_only)
+            and (mode != PermissionMode.PLAN or tool.read_only or tool.available_in_plan_mode)
         ]
 
 
