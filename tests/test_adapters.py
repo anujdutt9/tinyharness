@@ -114,6 +114,22 @@ ANTHROPIC_STREAM = sse(
 )
 
 
+@pytest.mark.parametrize(
+    ("provider", "sent"), [("anthropic", True), ("openrouter", True), ("github_copilot", False)]
+)
+def test_block_binding_is_sent_only_where_the_provider_accepts_it(provider, sent):
+    """Seen live: Copilot's Claude endpoint answered `thinking.adaptive.block_binding: Extra
+    inputs are not permitted`; Anthropic needs the field to survive compaction."""
+    from tinyharness.llm.adapters.anthropic import AnthropicAdapter
+    from tinyharness.llm.types import Request
+
+    adapter = AnthropicAdapter(load_catalog()[provider])
+    request = Request("claude-x", "", [], info=ModelInfo("claude-x", adaptive_thinking=True))
+    thinking = adapter.payload(request)["thinking"]
+    assert thinking["type"] == "adaptive"
+    assert ("block_binding" in thinking) is sent
+
+
 async def test_anthropic_request_and_stream(tmp_path):
     server = Server(ANTHROPIC_STREAM)
     llm = client("anthropic", server, "claude-x", tmp_path=tmp_path)

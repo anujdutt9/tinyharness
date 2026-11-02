@@ -60,6 +60,10 @@ class Provider(BaseModel):
     # request: for a gateway of your own that admits, queues or bills per session and agent
     # (tinyharness/llm/identity.py). Off: no provider gets them unless you ask.
     send_ids: bool = False
+    # Anthropic API only: ask for `thinking.block_binding` so signed thinking blocks that no
+    # longer match the history are dropped, not rejected. Anthropic accepts it; some
+    # Anthropic-compatible gateways (GitHub Copilot) reject the field.
+    block_binding: bool = True
     effort_param: str = "reasoning_effort"  # chat API only: where the reasoning effort goes
     # The provider's own web search: true for APIs with a built-in search tool, a table
     # merged into the request for chat providers that switch it on another way, false: none.

@@ -6,7 +6,8 @@
 - Signed thinking is bound to everything before it, so any edit to earlier
   messages (our compaction, or switching models) would invalidate it. We opt in to
   `prefix_mismatch_behavior: "drop_block"` so the API drops such blocks instead of
-  rejecting the request.
+  rejecting the request (unless the provider sets `block_binding = false`: some
+  gateways, GitHub Copilot among them, reject the field).
 - Caching: the top-level `cache_control` lets the API place the breakpoint itself.
 """
 
@@ -49,10 +50,9 @@ class AnthropicAdapter(Adapter):
                 for t in request.tools
             ]
         if info.adaptive_thinking:
-            payload["thinking"] = {
-                "type": "adaptive",
-                "block_binding": {"prefix_mismatch_behavior": "drop_block"},
-            }
+            payload["thinking"] = {"type": "adaptive"}
+            if self.provider.block_binding:
+                payload["thinking"]["block_binding"] = {"prefix_mismatch_behavior": "drop_block"}
         if request.effort and (info.efforts is None or request.effort in info.efforts):
             payload["output_config"] = {"effort": request.effort}
         if request.web_search:
