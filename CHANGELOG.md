@@ -24,7 +24,7 @@ the SDK, and every break is listed here.
 - Models that write their plan-mode questions instead of using the picker get the picker
   anyway: one short extra call restates the questions, and your picks are sent as your
   next message. Strong models already use the picker, so they never make that call.
-- Plan mode works like Claude Code's, with tinyharness's guarantees on top. The agent
+- Plan mode guides the agent from questions to an editable, reviewable plan. The agent
   looks at the code briefly, asks at most three questions (each with options and a
   recommended default), then writes the plan in Markdown and hands it to you: it's shown
   in full, the turn ends, and one question asks whether to build it: "Yes, build it in auto
@@ -162,7 +162,7 @@ the SDK, and every break is listed here.
   review for that one command, instead of asking you. With outside content in the
   conversation, you are still asked: a new destination is how that content could get data
   sent out.
-- WebFetch and WebSearch are core tools, as in other harnesses; the `web` extension is
+- WebFetch and WebSearch are core tools; the `web` extension is
   gone (a config that still lists it loads without an error). WebSearch is offered only
   where the provider has built-in search (Anthropic, OpenAI, Gemini, xAI, OpenRouter),
   following `/model`; WebFetch works with any provider. To turn the web off,
@@ -173,7 +173,7 @@ the SDK, and every break is listed here.
   config that still lists `pdf` loads without an error. Before, with the extension off
   (the default), Read told the model to use a Pdf tool it didn't have.
 - `/sandbox` turns the sandbox on or off for the session, from a picker or with
-  `/sandbox on|off`. With it off, tinyharness works like other harnesses: commands run as
+  `/sandbox on|off`. With it off, commands run as
   you anywhere on your machine, reads run, `default` mode asks before other commands and
   auto mode's review decides them. Deleting files, `sudo`, touching credential files and
   changing files that run code later (git hooks, editor settings, `.envrc`) still ask you,
@@ -192,7 +192,7 @@ the SDK, and every break is listed here.
 - Approving `huggingface.co` opens Hugging Face's download hosts with it, so a model
   download that redirects to `cas-server.xethub.hf.co` or a CDN doesn't stop again.
 - The sandbox also keeps editor tasks and settings (`.vscode/`, `.idea/`), `.envrc`,
-  `.gitmodules`, `.mcp.json` and Claude Code's settings, commands and agents read-only:
+  `.gitmodules`, `.mcp.json` and agent settings, commands and definitions read-only:
   each runs code outside the sandbox when you open or enter the project. An allowed host
   name or address that is or resolves to this machine, its link (such as the cloud
   metadata service at `169.254.169.254`) or no one is refused; local servers go through
@@ -212,6 +212,8 @@ the SDK, and every break is listed here.
 - The next-message suggestion stands on its own without repeating `tab to use` beside it.
 
 ### Fixed
+- On Windows, a Job wait's `until` pattern matches whole lines: `^ready$` never matched,
+  because output there ends lines with `\r\n`.
 - Two questions from the agent in one reply are asked one after the other, not both at once.
 - Resuming a session that ended while its plan was waiting for review comes back in plan
   mode and asks "Build this plan?" again. Before, every write was refused as unapproved.
@@ -457,8 +459,7 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
 - Public SDK and extension examples now use concise numpydoc documentation. Function
   tools read their input descriptions from numpydoc `Parameters` sections while keeping
   the earlier compact form compatible.
-- Code comments and documentation now explain tinyharness behavior directly, without
-  relying on comparisons to other agent products or their implementations.
+- Code comments and documentation now explain tinyharness behavior directly.
 - Credential-based provider fallback is now named `credential_selected` internally;
   `auto_selected` remains a compatibility alias and no longer occupies future routing terminology.
 - Prompt-suggestion shown/accepted events are recorded without their text so the default
@@ -730,7 +731,7 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
   text. Cached per model; `tool_calls = "native" | "text"` overrides it. A server without
   a tool-call parser (vLLM without `--enable-auto-tool-choice`) works this way.
 
-### Outside content (Rule of Two)
+### Outside-content protection
 - Once content from another machine is in the conversation (a fetched page, search
   results, a command's download through the sandbox proxy), calls that could send data out
   ask a person, in every mode but bypass: network tools no longer read public pages
@@ -1063,7 +1064,7 @@ regression test.
   can't be re-pointed at your machine or network in between (TLS still verifies the
   site's name). A redirect to another site isn't followed; the model is told where it
   leads, and fetching it asks about that site.
-- `Grep` doesn't follow symlinks, to files or directories (like ripgrep): the
+- `Grep` doesn't follow symlinks, to files or directories: the
   secret-file check saw a link's own name, so `leak -> ~/.aws/credentials` was read.
   Each file is read once, without following symlinks, so the file checked is the file
   searched.

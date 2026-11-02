@@ -1151,7 +1151,7 @@ def _research_history(fetches: int = 3) -> History:
     return History(
         [
             Message(role="system", content="system prompt"),
-            Message(role="user", content="check how claude code and other harnesses handle these issues"),
+            Message(role="user", content="check how established tools handle these issues"),
             *earlier,
             step,
         ]
@@ -1170,7 +1170,7 @@ def test_the_users_request_survives_many_tool_calls():
             Message(role="assistant", content="", tool_calls=[ToolCall(f"x{i}", "Bash", '{"command": "ls"}')])
         )
     tail = _tail(history, current="x19")
-    assert tail.startswith("[user, latest request] check how claude code and other harnesses")
+    assert tail.startswith("[user, latest request] check how established tools")
 
 
 def test_the_call_under_review_and_its_neighbors_are_kept_apart():

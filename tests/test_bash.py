@@ -1020,7 +1020,7 @@ async def test_destructive_command_cannot_bundle_a_remembered_host_approval(tmp_
 
 
 async def test_with_the_sandbox_off_default_mode_asks_before_changes_and_runs_reads(tmp_path):
-    """Like other harnesses' default mode: reading runs, changing asks."""
+    """With containment off, default mode runs reads and asks before changes."""
     tool = unsandboxed(tmp_path)
     decision, asked = await check(tmp_path, tool, PermissionMode.DEFAULT)
     assert decision.allow and len(asked) == 1
@@ -1058,8 +1058,8 @@ async def test_with_the_sandbox_off_default_mode_asks_before_changes_and_runs_re
     ],
 )
 async def test_with_the_sandbox_off_auto_mode_reviews_and_critical_commands_ask(tmp_path, command, reason):
-    """The user turned the sandbox off to work like other harnesses: the review decides
-    ordinary commands, and what the sandbox used to stop asks the person."""
+    """With containment off, review decides ordinary commands, while critical commands
+    still ask the person."""
     from tinyharness.permissions.classifier import ClassifierDecision
 
     class Classifier:

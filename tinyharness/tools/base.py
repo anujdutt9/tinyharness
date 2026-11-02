@@ -130,7 +130,7 @@ class ToolContext:
     # Plan clears it when a new draft supersedes the approved revision.
     plan_summary: str = ""
     # Set by a tool that hands the turn back to the user: Plan, when its plan is ready for
-    # review (as Claude Code's ExitPlanMode); Ask, when they'd rather answer in chat. The
+    # review; Ask, when they'd rather answer in chat. The
     # loop ends the turn after that batch.
     hand_back: Literal["", "plan_ready", "awaiting_answer"] = ""
     # Where content from other machines in this conversation came from ("WebFetch

@@ -610,9 +610,9 @@ class _Reviewer:
 
 
 async def test_the_quick_check_can_only_allow_and_a_careful_review_decides_the_rest():
-    """Seen live: Haiku with no reasoning held back 12 of 65 calls (18%), most of them
-    plainly serving the request. Claude Code's fast check alone wrongly blocked 8.5%; its
-    reasoning second stage brought that to 0.4%."""
+    """Seen live: a fast model with no reasoning held back 12 of 65 calls (18%), most of
+    them plainly serving the request. A careful second stage decides what the fast check
+    cannot safely allow."""
     from tinyharness.permissions.classifier import AutoModeClassifier
 
     client = _Reviewer(
@@ -644,8 +644,8 @@ async def test_the_quick_check_can_only_allow_and_a_careful_review_decides_the_r
     ],
 )
 def test_low_risk_needs_no_explicit_authorization(risk, authorized, decision):
-    """Risk and authorization are rated apart, as Codex's reviewer does: "without clear
-    justification" was the reason given for blocking ordinary, low-risk reads."""
+    """Risk and authorization are rated apart: requiring explicit justification for every
+    call incorrectly blocks ordinary, low-risk reads."""
     from tinyharness.permissions.classifier import parse_verdict
 
     reply = f'Reasoning {{maybe}}.\n{{"risk": "{risk}", "authorized": "{authorized}", "reason": "r"}}'
@@ -690,8 +690,8 @@ async def test_a_review_that_cannot_run_says_it_judged_nothing(tmp_path):
 
 @pytest.mark.parametrize("outside", [[], ["WebFetch evil.example"]])
 async def test_auto_review_can_open_a_new_host_for_one_command(tmp_path, outside):
-    """As in Claude Code, a host the command needs is reviewed with the command and opened
-    for that command alone. With outside content in the conversation the person decides:
+    """A host the command needs is reviewed with the command and opened for that command
+    alone. With outside content in the conversation the person decides:
     a new destination is how that content could get data sent out."""
     from tinyharness.permissions.classifier import ClassifierDecision
     from tinyharness.sandbox import SandboxPolicy

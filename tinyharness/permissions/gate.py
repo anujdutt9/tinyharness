@@ -112,7 +112,7 @@ class PermissionGate:
     hooks: HookRunner | None = None
     classifier: PermissionClassifier | None = None
     # Where content from other machines in the conversation came from (ToolContext.outside).
-    # While there is any, calls that can send data out are reviewed again ("Rule of Two").
+    # While there is any, calls that can send data out are reviewed again.
     outside: Callable[[], list[str]] = field(default=lambda: [], repr=False)
     callback: PermissionCallback | None = None
     # Bash and the gate share this set. Remembering a host must expand the sandbox's
@@ -372,7 +372,7 @@ class PermissionGate:
         It never covers what must always ask (the tool's `risk`: deleting files, sudo,
         credentials), an unsandboxed command on the strength of an answer given while the
         sandbox was on, nor a call that could send data out while outside content is in
-        the conversation: the Rule of Two holds whatever was answered before. Seen in
+        the conversation: outside-content protection holds whatever was answered before. Seen in
         review: with the sandbox off, a remembered `Bash` let `curl -d @src/main.py`
         through after a WebFetch.
         """
@@ -552,11 +552,11 @@ class PermissionGate:
     async def _auto_approves_host(
         self, tool: Tool[Any], args: dict[str, Any], host: str, history_tail: str
     ) -> Decision | None:
-        """Let Auto open one more host for this one command, as Claude Code does.
+        """Let Auto open one more host for this one command.
 
         Nothing is remembered: the next command that needs the host is judged again. With
         outside content in the conversation the person decides, since a new destination is
-        the way that content could get data sent out ("Rule of Two").
+        the way that content could get data sent out.
         """
         local = host == "localhost"
         # Loopback never leaves this machine, so outside content can't use it to send data

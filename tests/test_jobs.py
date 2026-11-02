@@ -663,7 +663,12 @@ async def test_the_user_can_see_and_stop_background_jobs(tmp_path):
         assert job.status == "stopped" and not job.reported  # the agent is told
         assert "/jobs" not in "".join(text for _, text in repl._status(200))
 
-        bindings = repl._prompt_session().key_bindings
+        from prompt_toolkit.application import create_app_session
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+
+        with create_pipe_input() as keys, create_app_session(input=keys, output=DummyOutput()):
+            bindings = repl._prompt_session().key_bindings  # no console needed (Windows CI)
         detach = next(b for b in bindings.bindings if b.keys == (Keys.ControlB,))
         assert not detach.filter()  # no command running: Ctrl+B moves the cursor, as usual
         moved = session.jobs.foreground()
@@ -672,3 +677,13 @@ async def test_the_user_can_see_and_stop_background_jobs(tmp_path):
         assert moved.is_set()
     finally:
         session.close()
+
+
+async def test_until_matches_whole_lines_that_end_in_crlf(tmp_path):
+    """Seen in CI on Windows: output there ends lines with \\r\\n, so `^ready$` never matched."""
+    ctx, _ = jobs_ctx(tmp_path)
+    code = "import sys, time; sys.stdout.buffer.write(b'ready\\r\\n'); sys.stdout.flush(); time.sleep(30)"
+    job = await python_job(ctx.jobs, code)
+    out = await call(JobTool(), {"id": job.id, "until": "^ready$", "timeout": 10}, ctx)
+    assert "a line matched" in out
+    await ctx.jobs.table.stop(job)

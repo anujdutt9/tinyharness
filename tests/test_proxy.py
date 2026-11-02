@@ -202,4 +202,4 @@ async def test_time_spent_deciding_is_counted():
 
     proxy = AllowlistProxy((), ask=ask)
     assert not await proxy._granted("slow.example")
-    assert proxy.asking_seconds >= 0.2
+    assert proxy.asking_seconds >= 0.15  # Windows' clock can measure a 0.2s sleep a little short

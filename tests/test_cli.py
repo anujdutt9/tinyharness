@@ -396,7 +396,7 @@ def test_cost_shows_the_latest_calls_cache_hits_and_the_fixed_prefix(tmp_path, m
 
 
 async def test_sandbox_off_and_on_from_the_command_line(tmp_path, monkeypatch):
-    """`/sandbox off` makes commands work like other harnesses for the rest of the session."""
+    """`/sandbox off` runs commands without containment for the rest of the session."""
     import io
 
     from rich.console import Console

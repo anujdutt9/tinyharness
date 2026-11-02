@@ -270,6 +270,7 @@ async def test_built_in_commands_run_while_the_agent_works(repl):
     """Seen live: "/effort has to wait until the agent finishes". Settings apply from the
     next model call; only commands that replace the conversation wait for the turn."""
     repl._turn = asyncio.get_running_loop().create_future()  # a turn is running
+    repl.auto_confirmed = True  # no confirmation picker: Windows CI has no console for one
     await repl.handle("/effort none")
     await repl.handle("/mode auto")
     out = repl.console.file.getvalue()

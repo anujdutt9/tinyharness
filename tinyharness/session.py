@@ -101,7 +101,7 @@ MAX_SUGGESTION = 120  # chars: a longer "next message" is the model explaining, 
 # without a reasoning parser); unclosed when the reply ended mid-thought.
 INLINE_REASONING = re.compile(r"^\s*<think>.*?(?:</think>|\Z)", re.DOTALL)
 # Told to the model when the conversation doesn't already say which side of plan mode it's
-# on (`_plan_note_says_planning`). Leaving plan mode is the user's switch, as in opencode.
+# on (`_plan_note_says_planning`). Leaving plan mode is always the user's switch.
 PLAN_TAG = "<plan-mode>"
 PLAN_BLOCK = re.compile(r"<plan>\s*(.*?)\s*</plan>", re.DOTALL)  # a plan in the reply (_plan_in_reply)
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})\s*([\w+-]*)")
@@ -148,8 +148,8 @@ def _titled_plan(text: str) -> str:
     return ""
 
 
-# The order (look, ask, plan, revise) follows what plan modes people like share: Claude
-# Code, Codex, addyosmani's planning skill, better-plan-mode (docs/plans-design.md).
+# The order is look, ask, plan, then revise: enough context before questions, and answers
+# before the plan is committed for review.
 PLAN_ON = (
     "You are in plan mode: you can read, search and research, but nothing that changes files "
     "or runs commands is available. Work in this order:\n"

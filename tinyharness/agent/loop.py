@@ -131,7 +131,7 @@ _CHANGE_APPROACH = {
     "earlier edits changed it), or edit a smaller block, or rewrite the file with Write.",
     "Bash": "Read the error and fix the command, or try a different command or tool.",
 }
-RETRY_IMAGE_SIDE = 1568  # px: what images shrink to after a provider rejects one (Anthropic's sweet spot)
+RETRY_IMAGE_SIDE = 1568  # px: what images shrink to after a provider rejects one
 MAX_STOP_BLOCKS = 2  # a Stop hook can keep a turn going this many times
 # A reply ending in a tool call written as text that couldn't be read (seen live from Gemma 4:
 # a made-up tool, a command that didn't parse). Answered this many times per turn.

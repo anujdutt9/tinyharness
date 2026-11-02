@@ -504,7 +504,7 @@ class Repl:
         @keys.add("c-b", filter=Condition(lambda: self.session.jobs.has_foreground()))
         def _to_background(event: KeyPressEvent) -> None:
             """Move the running command to the background: it keeps going as a job, and the
-            agent carries on (Ctrl+B otherwise moves the cursor back, as in Emacs)."""
+            agent carries on (Ctrl+B otherwise moves the cursor back)."""
             self.session.jobs.detach_foreground()
 
         @keys.add("c-t")

@@ -1,5 +1,5 @@
 """Plan mode: the model is told when it's in it and asks the user to switch modes to build;
-a call to change things ends the turn there, and the switch stays the user's (as in opencode)."""
+a call to change things ends the turn there, and the switch stays the user's."""
 
 import io
 

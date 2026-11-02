@@ -430,6 +430,8 @@ def test_shared_caches_write_the_users_own_cache(tmp_path, monkeypatch):
     from tinyharness.sandbox import SandboxPolicy
 
     monkeypatch.setenv("HF_HOME", str(tmp_path / "my-hf"))
+    for unset in ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR"):  # CI's setup-uv sets them
+        monkeypatch.delenv(unset, raising=False)
     policy = SandboxPolicy.for_project(
         tmp_path / "p", cache_dir=tmp_path / "c", shared_caches=["uv", "huggingface"]
     )

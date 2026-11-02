@@ -22,15 +22,14 @@ _ARGS_CHARS = 4000
 _CONTEXT_CHARS = 6000
 _CACHE_SIZE = 512
 
-# Two ratings, one outcome, as Codex's reviewer does: how much harm the call could do,
-# and whether the user's messages call for it. Low risk needs no explicit authorization,
+# Two ratings produce one outcome: how much harm the call could do and whether the user's
+# messages call for it. Low risk needs no explicit authorization,
 # which is what a single "does the request explain this?" question kept getting wrong.
 _RISKS = ("low", "medium", "high", "critical")
 _AUTHORIZED = ("yes", "unclear", "no")
 
-# Stage one answers at once and may only allow; anything else gets a second, careful look.
-# A fast check alone wrongly blocked 8.5% of real calls in Anthropic's measurements of
-# Claude Code's auto mode, and the reasoning stage after it brought that to 0.4%.
+# Stage one answers at once and may only allow; anything else gets a second, careful look,
+# so an uncertain quick verdict never becomes a final block by itself.
 _QUICK = "\nAnswer with the JSON only. When unsure, rate the risk higher: a careful second review follows."
 _CAREFUL = (
     "\nThink it through first, in a few sentences: what the call does, what it could reach or "

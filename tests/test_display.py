@@ -264,7 +264,7 @@ def test_a_sandbox_block_in_a_command_that_runs_tests_is_still_a_block(renderer)
         "(exit code 1)"
     )
     replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
-    assert shown(renderer)[0].endswith("sandbox blocked a write to ~/.cache/sglang")
+    assert shown(renderer)[0].replace("\\", "/").endswith("sandbox blocked a write to ~/.cache/sglang")
 
 
 def test_a_protected_path_block_says_it_needs_the_users_approval(renderer):
@@ -276,6 +276,7 @@ def test_a_protected_path_block_says_it_needs_the_users_approval(renderer):
     )
     replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
     row, *why = shown(renderer)
+    row = row.replace("\\", "/")  # Windows shows its own separator
     assert row.startswith("⊘ Bash") and row.endswith("sandbox blocked a write to .git/hooks/pre-commit")
     assert "changing them needs your approval" in " ".join(line.strip() for line in why)
 
@@ -751,7 +752,9 @@ def test_a_sandbox_block_is_its_own_row_not_a_crash(renderer):
         replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
     lines = shown(renderer)
     rows = [line for line in lines if line.startswith("⊘ Bash")]
-    assert len(rows) == 2 and rows[0].endswith("sandbox blocked a write to ~/.cache/sglang")
+    assert len(rows) == 2 and rows[0].replace("\\", "/").endswith(
+        "sandbox blocked a write to ~/.cache/sglang"
+    )
     said = " ".join(line.strip() for line in lines if not line.startswith("⊘"))
     assert said.count("/sandbox") == 1 and "runs later, unsandboxed" in said  # said once
     assert "Traceback" not in said  # folded: the model has it

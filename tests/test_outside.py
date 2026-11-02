@@ -1,5 +1,5 @@
-"""Outside content and the Rule of Two: once content from another machine is in the
-conversation, calls that could send data out are reviewed again (permissions/gate.py)."""
+"""Outside-content protection: once content from another machine is in the conversation,
+calls that could send data out are reviewed again (permissions/gate.py)."""
 
 import pytest
 
@@ -330,7 +330,7 @@ async def test_plain_downloads_need_no_review_after_outside_content(tmp_path, co
     ],
 )
 async def test_calls_that_can_send_data_are_still_reviewed(tmp_path, command):
-    """The Rule of Two still holds for anything that could carry project data out."""
+    """Outside-content protection covers anything that could carry project data out."""
     from tinyharness.sandbox import SandboxPolicy
 
     asked = []
@@ -342,11 +342,11 @@ async def test_calls_that_can_send_data_are_still_reviewed(tmp_path, command):
 @pytest.mark.parametrize(
     ("url", "host", "reviewed"),
     [
-        ("https://code.claude.com/docs/en/permissions", "code.claude.com", False),  # the user named it
+        ("https://docs.example.com/permissions", "docs.example.com", False),  # the user named it
         ("https://raw.githubusercontent.com/o/r/main/x.py", "raw.githubusercontent.com", False),  # allowlist
         ("https://evil.example/notes", "evil.example", True),
         ("https://e.com/x", "e.com", True),  # only inside "some.com" in the request
-        ("https://code.claude.com/search?q=secret", "code.claude.com", True),  # a query can carry data
+        ("https://docs.example.com/search?q=secret", "docs.example.com", True),  # query carries data
     ],
 )
 async def test_reading_a_page_the_user_named_or_the_sandbox_allows_needs_no_review(
@@ -357,14 +357,14 @@ async def test_reading_a_page_the_user_named_or_the_sandbox_allows_needs_no_revi
     asked = []
     gate = gate_with(tmp_path, ["WebFetch evil.example"], asked)
     gate.allowed_hosts = ("*.githubusercontent.com",)
-    tail = "[user, latest request] compare code.claude.com's permission docs with some.com"
+    tail = "[user, latest request] compare docs.example.com's permission docs with some.com"
     decision = await gate.check(WebFetchTool(), {"url": url}, None, target_host=host, history_tail=tail)
     assert decision.allow is not reviewed and len(asked) == int(reviewed)
 
 
 async def test_with_the_sandbox_off_downloads_still_count_as_outside_content(tmp_path):
     """No proxy records which hosts an unsandboxed command reached, so anything that looks
-    like a download counts; otherwise turning the sandbox off would turn the Rule of Two off."""
+    like a download counts; otherwise turning the sandbox off would disable the protection."""
     from tinyharness.sandbox import SandboxPolicy
 
     bash = BashTool(None, SandboxPolicy(write_roots=(tmp_path,)))
@@ -378,7 +378,7 @@ async def test_with_the_sandbox_off_downloads_still_count_as_outside_content(tmp
 
 async def test_a_host_a_running_command_asks_for_goes_through_the_same_gate(tmp_path):
     """The live question (the proxy holds the connection meanwhile) is the one a call naming
-    the host as network_host would get: the Rule of Two warning included."""
+    the host as network_host would get, including the outside-content warning."""
     from tinyharness.testing import scripted_session
 
     asked = []
@@ -405,7 +405,7 @@ async def test_a_host_a_running_command_asks_for_goes_through_the_same_gate(tmp_
     [
         ("https://pypi.org/project/laya-finetune/", "pypi.org", ["WebSearch results"], False),  # allowlisted
         ("https://example.com/docs", "example.com", [], False),  # nothing from outside yet
-        ("https://evil.example/notes", "evil.example", ["WebSearch results"], True),  # Rule of Two
+        ("https://evil.example/notes", "evil.example", ["WebSearch results"], True),  # outside content
     ],
 )
 async def test_plan_mode_reads_public_pages_like_default_mode(tmp_path, url, host, outside, asks):

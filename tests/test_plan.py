@@ -65,8 +65,8 @@ async def test_an_empty_plan_is_refused_with_what_to_send(tmp_path):
 
 
 async def test_a_ready_plan_ends_the_turn_for_the_users_review(tmp_path):
-    """As Claude Code's ExitPlanMode: the plan is shown and the user decides; the model
-    doesn't get another call to repeat or embellish it."""
+    """The plan is shown and the user decides; the model doesn't get another call to
+    repeat or embellish it."""
     session = scripted_session(
         tmp_path / "w",
         [[("Plan", json.dumps(PLAN))], "(never asked: the user is reviewing the plan)"],
@@ -528,7 +528,12 @@ async def test_the_build_question_comes_back_on_resume(tmp_path, monkeypatch):
     again = repl_module.Repl(resumed, repl.console, repl.renderer)
     again.running = False  # stop after the hand-off: no input box in a test
     try:
-        await again.loop()
+        from prompt_toolkit.application import create_app_session
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+
+        with create_pipe_input() as keys, create_app_session(input=keys, output=DummyOutput()):
+            await again.loop()  # no console needed (Windows CI)
         assert [title for title, _, _ in asked] == ["Build this plan?", "Build this plan?"]
     finally:
         resumed.close()

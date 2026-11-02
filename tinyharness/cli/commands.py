@@ -783,7 +783,7 @@ def _bytes(n: int) -> str:
 
 _SANDBOX_CHOICES = [
     ("on", "on    commands write only in the project and reach only allowed hosts"),
-    ("off", "off   commands run as you, like other harnesses; deleting, sudo and credentials still ask"),
+    ("off", "off   commands run as you; deleting, sudo and credentials still ask"),
 ]
 
 

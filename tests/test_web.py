@@ -305,8 +305,8 @@ def test_web_search_is_offered_only_where_the_provider_can_search(provider, offe
 
 
 def test_web_tools_are_core_and_a_deny_rule_hides_them(tmp_path, monkeypatch):
-    """Web reading is standard in other harnesses; turning it off is one deny rule, and the
-    model isn't offered a tool every call of which would be refused."""
+    """Turning web reading off is one deny rule, and the model isn't offered a tool every
+    call of which would be refused."""
     from tinyharness import Session
     from tinyharness.config import Config
 

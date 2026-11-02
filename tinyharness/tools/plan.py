@@ -1,7 +1,7 @@
 """The plan the agent writes in plan mode, as a Markdown file you can read and edit.
 
-As in Claude Code, the plan is plain Markdown the agent writes, not a schema it has to
-fill in: any model that can write a file can write one (seen live: Qwen 4B rarely got a
+The plan is plain Markdown the agent writes, not a schema it has to fill in: any model
+that can write a file can write one (seen live: Qwen 4B rarely got a
 structured plan call right). With `ready`, the agent hands it to you for review and its
 turn ends. Leaving plan mode approves the exact bytes on disk (their hash), and from then
 on the build is held to that revision (see docs/plans-design.md).
@@ -101,8 +101,8 @@ class PlanFile:
 
 class PlanTool(Tool[PlanInput]):
     name = "Plan"
-    # What a good plan holds draws on Claude Code's plan mode and on planning guides people
-    # rate (addyosmani's planning skill, iterative-planner, Codex discussions).
+    # A good plan records the context, decisions, concrete steps and explicit boundaries
+    # that the builder would otherwise have to rediscover or guess.
     description = (
         "Save your plan for the user to review: the whole plan in Markdown, starting with a "
         "'# Title' line. Call it in plan mode once the questions that would change the plan "

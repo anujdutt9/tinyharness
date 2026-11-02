@@ -104,7 +104,8 @@ async def _wait(job: Job, pattern: re.Pattern[str] | None, timeout: float) -> bo
         job.output.changed.clear()  # before looking, so output arriving later wakes us
         if pattern is not None:
             data = _read(job, scanned)
-            if pattern.search(data.decode("utf-8", errors="replace")):
+            # As lines, whatever the platform: on Windows `^ready$` never matched "ready\r\n".
+            if pattern.search(data.decode("utf-8", errors="replace").replace("\r\n", "\n")):
                 return True
             scanned += data.rfind(b"\n") + 1  # a partial last line is searched again, whole
         remaining = deadline - loop.time()
