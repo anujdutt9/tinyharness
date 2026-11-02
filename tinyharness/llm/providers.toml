@@ -22,6 +22,8 @@
 #   small_model    cheap, fast model for background work (auto-mode classifier, WebSearch digests)
 #   extra_headers  sent with every request
 #   extra_body     merged into every request body
+#   block_binding  Anthropic API only: send thinking.block_binding (default true; false for
+#                  gateways that reject the field)
 #   effort_param   chat API only: where the reasoning effort goes in the request
 #   web_search     the provider's own web search (used by the WebSearch tool): true for
 #                  APIs with a built-in search tool, or for chat providers the table
@@ -80,6 +82,7 @@ auth_methods = ["github_copilot"]
 auth_refresh = "github_copilot"
 model_catalog = "github_copilot"
 request_headers = "github_copilot"
+block_binding = false  # Copilot's Claude endpoint rejects thinking.block_binding
 default_model = "gpt-4.1"
 small_model = "gpt-4.1"
 
