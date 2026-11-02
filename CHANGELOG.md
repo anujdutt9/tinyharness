@@ -7,6 +7,8 @@ the SDK, and every break is listed here.
 
 ## Unreleased
 
+## 0.1.2 (2026-11-02)
+
 ### Changed
 - Plan mode separates facts it can discover from choices only you can make. It researches
   current datasets, models, libraries, services and approaches; when several viable options
