@@ -18,6 +18,8 @@ WAIT_TAIL = 20_000  # ...and from the end (where a build's errors and a server's
 
 
 class JobInput(ToolInput):
+    """Validate a request to wait for or stop a background job."""
+
     id: str = Field(description="The job id, e.g. 'j2', from the Bash result that started it")
     action: Literal["wait", "stop"] = Field(
         default="wait",
@@ -35,6 +37,8 @@ class JobInput(ToolInput):
 
 
 class JobTool(Tool[JobInput]):
+    """Wait for new background-job output or stop a background job."""
+
     name = "Job"
     Input = JobInput
     needs_permission = False  # it only waits for or stops a command the agent already ran
@@ -46,12 +50,14 @@ class JobTool(Tool[JobInput]):
     )
 
     def describe(self, args: JobInput) -> str:
+        """Return a compact description of the requested job action."""
         if args.action == "stop":
             return f"Job(stop {args.id})"
         until = f", until {args.until!r}" if args.until else ""
         return f"Job(wait {args.id}{until}, {args.timeout}s)"
 
     async def run(self, args: JobInput, ctx: ToolContext) -> str:
+        """Run a wait or stop action against an agent-owned job."""
         jobs = ctx.jobs
         if jobs is None:
             raise ToolError("Background jobs aren't available here, so there's no job to wait for.")
@@ -96,7 +102,9 @@ class JobTool(Tool[JobInput]):
 
 async def _wait(job: Job, pattern: re.Pattern[str] | None, timeout: float) -> bool:
     """Wait until the job ends, its new output matches `pattern`, or `timeout` passes.
-    True if it stopped waiting because of a match."""
+
+    True if it stopped waiting because of a match.
+    """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     scanned = job.seen  # output before this was searched already, up to its last whole line
@@ -141,7 +149,7 @@ def _new_bytes(job: Job) -> bytes:
 
 
 def _take_new(job: Job) -> str:
-    """The unseen output, which now counts as seen; long output keeps its start and end."""
+    """Return and mark seen the job's unseen output, preserving its start and end."""
     data = _new_bytes(job)
     job.seen += len(data)
     text = data.decode("utf-8", errors="replace")

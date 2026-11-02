@@ -34,6 +34,8 @@ from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
 
 
 class PlanInput(ToolInput):
+    """Validate a complete or draft Markdown plan."""
+
     plan: str = Field(description="The whole plan in Markdown, starting with a '# Title' line")
     ready: bool = Field(
         default=True,
@@ -43,17 +45,18 @@ class PlanInput(ToolInput):
 
 
 def plans_dir(working_dir: Path) -> Path:
+    """Return the private plan directory for the containing repository."""
     # Keyed on the repository's root, like memory: starting in a subfolder finds the same plans.
     return state_dir(repo_root(working_dir)) / "plans"
 
 
 def revision(text: str) -> str:
-    """The plan's revision: a hash of the whole file, byte for byte."""
+    """Return a byte-exact revision hash for plan text."""
     return hashlib.sha256(text.encode()).hexdigest()
 
 
 def title_of(text: str) -> str:
-    """The plan's name: its first heading, else its first line."""
+    """Return the first heading or nonempty line as the plan title."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     heading = next((line.lstrip("#").strip() for line in lines if line.startswith("#")), "")
     return (heading or (lines[0] if lines else "") or "Plan")[:80]
@@ -79,7 +82,7 @@ def _slug(title: str) -> str:
 
 @dataclass
 class PlanFile:
-    """This session's plan: where it is and what the Plan tool last wrote there."""
+    """Track a session plan and its written and approved revisions."""
 
     id: str
     path: Path
@@ -89,17 +92,21 @@ class PlanFile:
     approved: str = ""  # exact on-disk revision approved by leaving plan mode
 
     def text(self) -> str | None:
+        """Return the current on-disk text, or ``None`` when unavailable."""
         try:
             return self.path.read_text(encoding="utf-8")
         except OSError:
             return None
 
     def edited(self) -> bool:
+        """Return whether the on-disk plan differs from the tool's revision."""
         text = self.text()
         return text is None or revision(text) != self.written
 
 
 class PlanTool(Tool[PlanInput]):
+    """Save editable plans and bind builds to an approved revision."""
+
     name = "Plan"
     # A good plan records the context, decisions, concrete steps and explicit boundaries
     # that the builder would otherwise have to rediscover or guess.
@@ -132,13 +139,16 @@ class PlanTool(Tool[PlanInput]):
         self.current: PlanFile | None = None
 
     def offered(self) -> bool:
+        """Return whether the session is currently planning."""
         # Only in plan mode: every tool's definition is sent with every request.
         return self.planning()
 
     def describe(self, args: PlanInput) -> str:
+        """Return a compact description containing the plan title."""
         return f"Plan({title_of(args.plan)})"
 
     async def run(self, args: PlanInput, ctx: ToolContext) -> str:
+        """Save a plan draft or hand a completed plan back for review."""
         text = args.plan.strip()
         if not text:
             raise ToolError("Give the whole plan in `plan`, as Markdown starting with a '# Title' line.")
@@ -175,7 +185,8 @@ class PlanTool(Tool[PlanInput]):
         """Approve the exact file on disk. Called only for a user mode transition.
 
         Leaving plan mode is the user's choice and never fails: a plan file they emptied or
-        deleted means they're building without a plan, so the plan ends (returns "")."""
+        deleted means they're building without a plan, so the plan ends (returns "").
+        """
         if self.current is None:
             return ""
         text = self.current.text()

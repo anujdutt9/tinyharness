@@ -48,6 +48,8 @@ _SENSITIVE_DIRS = (
 
 @dataclass
 class ClassifierDecision:
+    """Store an automatic permission review decision and its rationale."""
+
     decision: Verdict
     reason: str = ""
     provider: str = "classifier"
@@ -55,11 +57,17 @@ class ClassifierDecision:
 
 
 class PermissionClassifier(Protocol):
-    def fast_filter(self, args: dict[str, Any]) -> ClassifierDecision | None: ...
+    """Define the interface used to review calls in automatic mode."""
+
+    def fast_filter(self, args: dict[str, Any]) -> ClassifierDecision | None:
+        """Return an immediate decision for clearly sensitive arguments, if any."""
+        ...
 
     async def classify(
         self, tool_name: str, args: dict[str, Any], history_tail: str = "", note: str = ""
-    ) -> ClassifierDecision: ...
+    ) -> ClassifierDecision:
+        """Review one proposed tool call and return its decision."""
+        ...
 
 
 class AutoModeClassifier:
@@ -104,6 +112,7 @@ class AutoModeClassifier:
     async def classify(
         self, tool_name: str, args: dict[str, Any], history_tail: str = "", note: str = ""
     ) -> ClassifierDecision:
+        """Review one proposed tool call with the quick and careful stages."""
         if (early := self.fast_filter(args)) is not None:
             return early
         shown = json.dumps(args, sort_keys=True)

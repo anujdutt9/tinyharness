@@ -211,6 +211,7 @@ def context(repl: Repl, arg: str) -> None:
 
 @command("/jobs", "list background commands, or stop one", group="Session", usage="[stop <id>]")
 async def jobs(repl: Repl, arg: str) -> None:
+    """List background jobs or stop one by identifier."""
     table = repl.session.jobs
     action, _, job_id = arg.strip().partition(" ")
     if action == "stop":
@@ -794,6 +795,7 @@ _SANDBOX_CHOICES = [
     usage="[on|off]",
 )
 async def sandbox(repl: Repl, arg: str) -> None:
+    """Show or change command isolation for the current session."""
     session = repl.session
     choice = arg.strip().lower()
     if choice not in ("", "on", "off"):

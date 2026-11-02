@@ -38,7 +38,7 @@ JobReason = Literal["background", "timeout", "detached"]
 
 
 class Output(Protocol):
-    """What a job reads from the capture draining its output (see tools/bash.py)."""
+    """Describe captured output available to a background job."""
 
     size: int  # bytes written to the log so far
     capped: bool  # the log reached LOG_MAX_BYTES and stopped growing
@@ -47,7 +47,7 @@ class Output(Protocol):
 
 @dataclass
 class Job:
-    """One background command. `seen` is how much of its log the agent has been shown."""
+    """Represent one background command and its captured output."""
 
     id: str
     command: str
@@ -72,13 +72,15 @@ class Job:
 
     @property
     def running(self) -> bool:
+        """Return whether the command is still running."""
         return self.status == "running"
 
     def runtime(self) -> float:
+        """Return the command's elapsed runtime in seconds."""
         return (self.ended or time.monotonic()) - self.started
 
     def describe(self) -> str:
-        """`exited with code 1 after 3m12s`, `running for 40s`."""
+        """Describe the job's status and elapsed time."""
         took = duration(self.runtime())
         match self.status:
             case "running":
@@ -91,14 +93,17 @@ class Job:
                 return f"killed after {took} (its agent finished)"
 
     def short_command(self, limit: int = 80) -> str:
+        """Return the command collapsed and truncated to ``limit`` characters."""
         command = " ".join(self.command.split())
         return command if len(command) <= limit else command[: limit - 1] + "…"
 
     def unseen(self) -> int:
+        """Return the number of captured bytes not yet shown to the agent."""
         return max(self.output.size - self.seen, 0)
 
 
 def duration(seconds: float) -> str:
+    """Format a duration as a compact whole-second string."""
     seconds = int(seconds)
     if seconds < 60:
         return f"{seconds}s"
@@ -135,25 +140,26 @@ class JobTable:
         self._cleanups: set[asyncio.Future[None]] = set()
 
     def scope(self, owner: str, outside: list[str] | None = None) -> JobScope:
-        """The view of the jobs `owner` starts; `outside` is the agent's outside-content list."""
+        """Create the job view owned by one agent."""
         scope = JobScope(self, owner, outside if outside is not None else [])
         self._scopes[owner] = scope
         return scope
 
     def new_log(self) -> Path:
-        """A log file for a command that may become a job (every command gets one: whether it
-        will is known only later)."""
+        """Create a log path for a command that may become a job."""
         self.directory.mkdir(parents=True, exist_ok=True)
         return self.directory / f"{uuid.uuid4().hex[:12]}.log"
 
     def next_id(self) -> str:
-        """The id for a command that just became a job: j1, j2, ..."""
+        """Return the next session-local job identifier."""
         return f"j{next(self._ids)}"
 
     def running(self) -> list[Job]:
+        """Return all running jobs in the session."""
         return [job for job in self.jobs.values() if job.running]
 
     def has_room(self) -> bool:
+        """Return whether another background job may be started."""
         return len(self.running()) < self.max_running
 
     # -- detaching foreground commands (the user's Ctrl+B) ------------------------
@@ -165,9 +171,11 @@ class JobTable:
         return event
 
     def done_in_foreground(self, event: asyncio.Event) -> None:
+        """Unregister a command that finished in the foreground."""
         self._foreground.discard(event)
 
     def has_foreground(self) -> bool:
+        """Return whether any foreground command can be detached."""
         return bool(self._foreground)
 
     def detach_foreground(self) -> int:
@@ -179,6 +187,7 @@ class JobTable:
     # -- lifecycle ------------------------------------------------------------------
 
     def adopt(self, job: Job) -> None:
+        """Add a newly detached or backgrounded job to the table."""
         self.jobs[job.id] = job
         if self.transcript is not None:
             self.transcript.write(
@@ -260,17 +269,20 @@ class JobScope:
         self._noted_hosts: set[str] = set()
 
     def child(self, owner: str) -> JobScope:
-        """A subagent's scope: its own jobs, the same outside-content list."""
+        """Create a child agent's scope with the shared outside-content list."""
         return self.table.scope(owner, self.outside)
 
     def get(self, job_id: str) -> Job | None:
+        """Return an owned job by identifier, if it exists."""
         job = self.table.jobs.get(job_id.strip())
         return job if job is not None and job.owner == self.owner else None
 
     def jobs(self) -> list[Job]:
+        """Return every job owned by this agent."""
         return [job for job in self.table.jobs.values() if job.owner == self.owner]
 
     def running(self) -> list[Job]:
+        """Return the running jobs owned by this agent."""
         return [job for job in self.jobs() if job.running]
 
     def _ended(self, job: Job) -> None:
@@ -278,8 +290,10 @@ class JobScope:
             self._notes.append(job.id)
 
     def take_notes(self) -> list[str]:
-        """Notes for the agent's next step: jobs that ended since the last step (unless it
-        already saw that with Job), after counting what they downloaded as outside content."""
+        """Return newly ended-job notes for the agent's next step.
+
+        Downloads are recorded as outside content before the notes are returned.
+        """
         self.mark_outside()
         notes = []
         for job_id in self._notes:
@@ -291,9 +305,7 @@ class JobScope:
         return notes
 
     def mark_outside(self) -> None:
-        """What a job downloaded is outside content (a README can carry instructions). With
-        one proxy for every command, a host is counted for whichever job ran while it was
-        reached: conservative, never missed."""
+        """Record hosts reached by owned jobs as outside-content sources."""
         for job in self.jobs():
             for host in job.reached():
                 if host not in self._noted_hosts:
@@ -311,7 +323,7 @@ class JobScope:
         self.mark_outside()  # what they downloaded may be in the answer it hands back
 
     def summary(self) -> str:
-        """Running jobs, for a compaction summary to keep."""
+        """Return running-job state suitable for a compaction summary."""
         running = self.running()
         if not running:
             return ""

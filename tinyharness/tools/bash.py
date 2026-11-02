@@ -920,6 +920,7 @@ class BashTool(Tool[BashInput]):
         )
 
     def writes(self, args: BashInput | dict[str, Any]) -> bool:
+        """Return whether the command may change local state."""
         command = (
             args.command if isinstance(args, BashInput) else str(args.get("command", ""))
         )  # the gate's raw args
@@ -929,6 +930,7 @@ class BashTool(Tool[BashInput]):
         return self.sandbox is not None and not self._leaves_sandbox(args)
 
     def runs_unsandboxed(self, args: dict[str, Any]) -> bool:
+        """Return whether the command runs without command isolation."""
         return self.sandbox is None or self._leaves_sandbox(args)
 
     def _leaves_sandbox(self, args: BashInput | dict[str, Any]) -> bool:
@@ -985,6 +987,7 @@ class BashTool(Tool[BashInput]):
         return args.network_host
 
     def nameable_risk(self, args: dict[str, Any]) -> str | None:
+        """Return the review guidance for a user-named deletion, if applicable."""
         # Seen live: "clean up the old build folder" still asked before `rm -r build` in
         # auto mode. Inside the sandbox a delete reaches only the project and its caches;
         # git's reset --hard and clean throw away work and keep asking.
