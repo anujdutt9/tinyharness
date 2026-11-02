@@ -7,6 +7,16 @@ the SDK, and every break is listed here.
 
 ## Unreleased
 
+### Changed
+- Plan mode separates facts it can discover from choices only you can make. It researches
+  current datasets, models, libraries, services and approaches; when several viable options
+  would materially change the result, it presents their trade-offs and asks you instead of
+  silently picking one. It asks early about intent, ambiguous task meaning and constraints,
+  treats the dataset, base model and a learning project's primary framework as choices, verifies
+  exact external IDs and access before planning, chooses cheap reversible details itself, and
+  writes a decision-complete plan only after every high-impact choice is settled. Plans no longer
+  invite guesses labelled `assumed:`.
+
 ## 0.1.1 (2026-11-01)
 
 ### Added

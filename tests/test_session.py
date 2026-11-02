@@ -422,15 +422,24 @@ async def test_a_prompt_naming_a_skill_is_sent_as_typed(session):
     )
 
 
-def test_plan_mode_asks_the_questions_that_shape_the_plan_first():
-    """Seen live: asked to read the docs and plan, the agent wrote nine sections built on
-    guesses, then asked four questions (which tools, which model, which keys, which data)
-    whose answers changed most of them."""
+def test_plan_mode_settles_discoverable_and_user_owned_choices_before_the_plan():
+    """Seen live: the agent guessed the task meaning, dataset and model, then called the
+    guesses assumptions and handed the plan over while promising to research them later."""
     from tinyharness.session import PLAN_ON
 
-    assert "at most three questions" in PLAN_ON and "With the Ask tool" in PLAN_ON
-    assert "recommended default" in PLAN_ON and "end your turn to wait" in PLAN_ON  # without Ask
-    assert "every blocking choice" in PLAN_ON
+    assert "two kinds of unknowns" in PLAN_ON
+    assert "Discoverable facts" in PLAN_ON and "current web research" in PLAN_ON
+    assert "User-owned choices" in PLAN_ON and "ask early instead of inferring" in PLAN_ON
+    assert "present the real candidates" in PLAN_ON and "don't choose for the user" in PLAN_ON
+    assert "A dataset and a base model--and, for a learning project" in PLAN_ON
+    assert "primary framework or stack" in PLAN_ON
+    assert "research current candidates and ask the user to choose" in PLAN_ON
+    assert "verify its exact ID, access, license" in PLAN_ON
+    assert "hardware does not choose the framework" in PLAN_ON
+    assert "choosing a model family does not choose its exact model or size" in PLAN_ON
+    assert "at most three questions per call" in PLAN_ON and "writes their own answer" in PLAN_ON
+    assert "Choose cheap, reversible implementation details" in PLAN_ON
+    assert "decision complete" in PLAN_ON and "do not write the plan yet--ask" in PLAN_ON
     assert "1. Look" in PLAN_ON and "don't explore everything first" in PLAN_ON
     assert "4. Revise" in PLAN_ON and "changing only what they touched" in PLAN_ON
     assert "in Markdown with the Plan tool" in PLAN_ON and "between <plan> and </plan>" in PLAN_ON
