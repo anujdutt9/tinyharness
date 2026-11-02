@@ -7,6 +7,8 @@ the SDK, and every break is listed here.
 
 ## Unreleased
 
+## 0.1.1 (2026-11-01)
+
 ### Added
 - `/jobs` lists background commands with their status and log, and `/jobs stop <id>` stops
   one (the agent is told). The status bar shows how many are running, and Ctrl+B moves a
