@@ -108,12 +108,22 @@ async def test_choosing_an_unconfigured_litellm_gateway_runs_setup(installed, mo
     assert asked == ["litellm"]
 
 
-async def test_a_checkout_never_runs_setup_unless_asked(monkeypatch, tmp_path):
+async def test_a_connected_checkout_never_runs_setup_unless_asked(monkeypatch, tmp_path):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "a")
     asked = []
     monkeypatch.setattr(app, "run_setup", _fake_setup("gemini", asked))
     assert await app.first_run_setup(SessionOptions(working_dir=tmp_path), Console())
     assert asked == []
     assert await app.first_run_setup(SessionOptions(working_dir=tmp_path), Console(), force=True)
+    assert asked == ["anthropic"]
+
+
+async def test_a_checkout_with_nothing_connected_starts_setup(monkeypatch, tmp_path):
+    """Seen in the friction audit: with no key, a checkout listed 17 providers and exited,
+    leaving the user to rerun with --setup."""
+    asked = []
+    monkeypatch.setattr(app, "run_setup", _fake_setup("gemini", asked))
+    assert await app.first_run_setup(SessionOptions(working_dir=tmp_path), Console())
     assert asked == ["anthropic"]
 
 

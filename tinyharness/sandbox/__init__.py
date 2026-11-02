@@ -5,6 +5,7 @@ this machine supports; None means commands run unsandboxed, and the permission
 gate then asks before every one of them.
 """
 
+import shutil
 import sys
 
 from tinyharness.sandbox.base import Sandbox
@@ -24,10 +25,21 @@ def detect_sandbox() -> Sandbox | None:
     return None
 
 
+_LINUX_INSTALL = {
+    "apt-get": "sudo apt-get install bubblewrap socat ripgrep",
+    "dnf": "sudo dnf install bubblewrap socat ripgrep",
+    "pacman": "sudo pacman -S bubblewrap socat ripgrep",
+    "zypper": "sudo zypper install bubblewrap socat ripgrep",
+}
+
+
 def setup_hint() -> str:
     """Return platform-specific setup help when no backend is usable."""
     if sys.platform == "linux":
-        return "install bubblewrap, socat and ripgrep, then npm install -g @anthropic-ai/sandbox-runtime"
+        # The exact command for the package manager that's here, so it can be pasted as is.
+        manager = next((name for name in _LINUX_INSTALL if shutil.which(name)), None)
+        install = _LINUX_INSTALL[manager] if manager else "install bubblewrap, socat and ripgrep"
+        return f"{install}, then npm install -g @anthropic-ai/sandbox-runtime"
     if sys.platform == "win32":
         return (
             "install Git Bash and @anthropic-ai/sandbox-runtime, then run its "

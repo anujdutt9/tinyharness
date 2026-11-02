@@ -70,8 +70,8 @@ GitHub Copilot is mixed-format: its live catalog declares whether each available
 uses Chat Completions, Responses or Anthropic Messages. LiteLLM uses its OpenAI-compatible
 Chat Completions interface.
 
-The Copilot connection follows the compatibility flow used by Pi and OpenCode: GitHub
-device authorization, a short-lived Copilot service token, and GitHub's live model
+The Copilot connection uses GitHub device authorization, a short-lived Copilot service
+token, and GitHub's live model
 catalog. Auto, the only choice on Free and Student plans, is not a model id: tinyharness
 asks GitHub which model Auto picks for the session (as VS Code's Copilot Chat does) and
 sends that model. It keeps tinyharness's own agent loop, but these service endpoints are not a
@@ -131,7 +131,8 @@ Background model work is configured by role rather than one catch-all model:
 
 ```toml
 [models.roles]
-safety_classifier = "claude-haiku-4-5"
+safety_classifier = "claude-haiku-4-5"  # auto mode's quick check
+safety_review = "claude-sonnet-5"       # its careful second look; unset: the session's model
 search_digest = "claude-haiku-4-5"
 compaction = "claude-sonnet-5"
 ```

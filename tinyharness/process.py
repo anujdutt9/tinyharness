@@ -64,6 +64,11 @@ def _signal(group: int, sig: signal.Signals) -> None:
         os.killpg(group, sig)
 
 
+def group_alive(group: int) -> bool:
+    """Whether any process is left in `group` (always False where there are no groups)."""
+    return os.name != "nt" and hasattr(os, "killpg") and _group_alive(group)
+
+
 def _group_alive(group: int) -> bool:
     try:
         os.killpg(group, 0)  # signal 0: only checks that someone is there
@@ -72,3 +77,37 @@ def _group_alive(group: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def kill_groups_now(pids: list[int], grace: float = 1.0) -> None:
+    """`kill_group` without an event loop, for several processes at once: closing a
+    session is synchronous, and its background jobs must not outlive it."""
+    if not pids:
+        return
+    if os.name == "nt":
+        import subprocess
+
+        for pid in pids:
+            with contextlib.suppress(OSError):
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+        return
+    if not hasattr(os, "killpg"):
+        for pid in pids:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+        return
+    import time
+
+    for pid in pids:
+        _signal(pid, signal.SIGTERM)
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline and any(_group_alive(pid) for pid in pids):
+        time.sleep(_POLL)
+    for pid in pids:
+        if _group_alive(pid):
+            _signal(pid, signal.SIGKILL)

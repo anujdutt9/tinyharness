@@ -21,8 +21,12 @@ class PermissionMode(StrEnum):
     BYPASS = "bypassPermissions"
 
     def next(self) -> PermissionMode:
-        """The mode Shift+Tab switches to: default → auto → plan → ask → default."""
-        cycle = [PermissionMode.DEFAULT, PermissionMode.AUTO, PermissionMode.PLAN, PermissionMode.ASK]
+        """The mode Shift+Tab switches to: default → auto → plan → default.
+
+        Ask isn't in the cycle (`/mode ask`): people approve prompts out of habit, so a
+        prompt for every edit protects less than it seems, and a fourth stop slows the rest.
+        """
+        cycle = [PermissionMode.DEFAULT, PermissionMode.AUTO, PermissionMode.PLAN]
         return cycle[(cycle.index(self) + 1) % len(cycle)] if self in cycle else PermissionMode.DEFAULT
 
     @classmethod

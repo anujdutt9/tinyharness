@@ -35,10 +35,11 @@ class GlobTool(Tool[GlobInput]):
     name = "Glob"
     description = (
         "Find files by glob pattern, most recently modified first. "
-        "Hidden directories and secret-shaped files are skipped."
+        "Hidden directories and secret-shaped files are skipped. Use it instead of find or ls in Bash."
     )
     Input = GlobInput
     read_only = True
+    taken_from_json = True
 
     def describe(self, args: GlobInput) -> str:
         return f"Glob({args.pattern} in {args.path or '.'})"

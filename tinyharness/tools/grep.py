@@ -17,7 +17,10 @@ from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolInput
 from tinyharness.tools.glob import is_hidden, resolve_search_root
 from tinyharness.workspace.files import read_bytes
 
-MAX_FILE_BYTES = 2_000_000
+MAX_FILE_BYTES = 2_000_000  # in a directory walk: bigger files are data or bundles, not code
+# A file named directly is searched up to this size (it's read whole). Seen live: a 2.2 MB
+# session log was refused and the model was told to page through it with Read instead.
+MAX_NAMED_FILE_BYTES = 64_000_000
 BINARY_PROBE_BYTES = 4096
 SKIP_DIRS = frozenset({"node_modules", "__pycache__", "venv", "dist", "build", "target"})
 MAX_LINE_CHARS = 300  # a match in a minified file would otherwise fill the context
@@ -41,10 +44,12 @@ class GrepTool(Tool[GrepInput]):
     name = "Grep"
     description = (
         "Search file contents with a regular expression. Skips binaries, hidden directories, "
-        "common build/dependency directories and secret-shaped files."
+        "common build/dependency directories and secret-shaped files. Use it instead of grep or rg "
+        "in Bash."
     )
     Input = GrepInput
     read_only = True
+    taken_from_json = True
 
     def describe(self, args: GrepInput) -> str:
         return f"Grep({args.pattern!r} in {args.path or '.'})"
@@ -73,14 +78,14 @@ def _search(root: Path, regex: re.Pattern[str], args: GrepInput) -> str:
                 "Set TINYHARNESS_ALLOW_SECRET_READS=1 if you really mean it."
             )
         _check_searchable(root)
-        files = [root]
+        files, max_bytes = [root], MAX_NAMED_FILE_BYTES
     else:
-        files = list(_iter_searchable(root, args.include))
+        files, max_bytes = list(_iter_searchable(root, args.include)), MAX_FILE_BYTES
     if args.output_mode == "files_with_matches":
-        return _files_with_matches(files, regex, args.head_limit, root)
+        return _files_with_matches(files, regex, args.head_limit, root, max_bytes)
     if args.output_mode == "count":
-        return _count(files, regex, args.head_limit, root)
-    return _content(files, regex, args.head_limit, root)
+        return _count(files, regex, args.head_limit, root, max_bytes)
+    return _content(files, regex, args.head_limit, root, max_bytes)
 
 
 def _iter_searchable(root: Path, include: str | None) -> Iterator[Path]:
@@ -102,14 +107,14 @@ def _iter_searchable(root: Path, include: str | None) -> Iterator[Path]:
             yield p
 
 
-def _load(path: Path) -> str | None:
+def _load(path: Path, max_bytes: int = MAX_FILE_BYTES) -> str | None:
     """The file's text, or None to skip it: unreadable, now a symlink, too big or binary.
     One read, without following symlinks, so the file checked is the file searched."""
     try:
-        data = read_bytes(path, limit=MAX_FILE_BYTES + 1)
+        data = read_bytes(path, limit=max_bytes + 1)
     except OSError:
         return None
-    if len(data) > MAX_FILE_BYTES or b"\x00" in data[:BINARY_PROBE_BYTES]:
+    if len(data) > max_bytes or b"\x00" in data[:BINARY_PROBE_BYTES]:
         return None
     return data.decode("utf-8", errors="replace")
 
@@ -117,23 +122,26 @@ def _load(path: Path) -> str | None:
 def _check_searchable(path: Path) -> None:
     """The reason `_load` would skip this file, as an error."""
     try:
-        data = read_bytes(path, limit=MAX_FILE_BYTES + 1)
+        data = read_bytes(path, limit=MAX_NAMED_FILE_BYTES + 1)
     except OSError as e:
         raise ToolError(f"can't read {path}: {e.strerror or e}") from None
-    if len(data) > MAX_FILE_BYTES:
+    if len(data) > MAX_NAMED_FILE_BYTES:
         size = path.stat().st_size
         raise ToolError(
-            f"file too large to search: {path} is {size / 1_000_000:.1f} MB; "
-            f"Grep searches files up to {MAX_FILE_BYTES // 1_000_000} MB. Use Read with offset/limit."
+            f"file too large to search: {path} is {size / 1_000_000:.0f} MB; Grep reads a file whole, "
+            f"up to {MAX_NAMED_FILE_BYTES // 1_000_000} MB. Search it with Bash instead, which streams "
+            f"it: rg -n 'PATTERN' {path}"
         )
     if b"\x00" in data[:BINARY_PROBE_BYTES]:
         raise ToolError(f"not a text file: {path} looks binary; Grep only searches text")
 
 
-def _files_with_matches(files: list[Path], regex: re.Pattern[str], limit: int, root: Path) -> str:
+def _files_with_matches(
+    files: list[Path], regex: re.Pattern[str], limit: int, root: Path, max_bytes: int = MAX_FILE_BYTES
+) -> str:
     hits: list[str] = []
     for p in files:
-        text = _load(p)
+        text = _load(p, max_bytes)
         if text is not None and regex.search(text):
             hits.append(str(p))
             if len(hits) >= limit:
@@ -144,10 +152,12 @@ def _files_with_matches(files: list[Path], regex: re.Pattern[str], limit: int, r
     return f"{len(hits)} file(s) matched{more}:\n" + "\n".join(hits)
 
 
-def _count(files: list[Path], regex: re.Pattern[str], limit: int, root: Path) -> str:
+def _count(
+    files: list[Path], regex: re.Pattern[str], limit: int, root: Path, max_bytes: int = MAX_FILE_BYTES
+) -> str:
     per_file: list[tuple[str, int]] = []
     for p in files:
-        text = _load(p)
+        text = _load(p, max_bytes)
         if text is not None and (n := len(regex.findall(text))):
             per_file.append((str(p), n))
     if not per_file:
@@ -158,10 +168,12 @@ def _count(files: list[Path], regex: re.Pattern[str], limit: int, root: Path) ->
     return f"{total} total match(es) across {len(per_file)} file(s):\n{lines}"
 
 
-def _content(files: list[Path], regex: re.Pattern[str], limit: int, root: Path) -> str:
+def _content(
+    files: list[Path], regex: re.Pattern[str], limit: int, root: Path, max_bytes: int = MAX_FILE_BYTES
+) -> str:
     out: list[str] = []
     for p in files:
-        text = _load(p)
+        text = _load(p, max_bytes)
         if text is None:
             continue
         for lineno, line in enumerate(text.split("\n"), start=1):  # numbered as Read and Edit number them

@@ -5,19 +5,23 @@ that parser trips, the call arrives as text in the model's own format, and a har
 only reads `tool_calls` takes it for the final answer. Seen in tinyharness's logs from
 Qwen3-Coder and Qwen3.5 (a teammate's "result" was the XML of the call it meant to make).
 
-Three formats cover the open models in use:
+These formats cover the open models in use:
 
     <tool_call>{"name": "Read", "arguments": {"path": "a.py"}}</tool_call>      JSON-style calls
     <tool_call><function=Read><parameter=path>a.py</parameter></function></tool_call>  Qwen3-Coder
     <|tool_call>call:read{path: "a.py"}<tool_call|>                             Gemma 4
+    ```json [{"type": "function", "function": {"name": "Read", ...}}] ```       the API's own JSON (Gemma 3)
 
 `recover_calls` is strict, since running a tool the model only described would be worse
 than missing a call: the calls must name tools that exist, start a line outside any code
 block or inline code, and be the last thing in the reply (a model that meant to call a
-tool stops there; one explaining the format keeps writing).
+tool stops there; one explaining the format keeps writing). JSON with no call marker
+could just as well be an example the user asked for, so it's taken only for tools whose
+calls change nothing and reach nothing outside.
 
 `repair_arguments` fixes the small, unambiguous ways arguments come back malformed:
-wrapped in a code fence, JSON encoded twice, two objects run together, or empty.
+wrapped in a code fence, JSON encoded twice, two objects run together, or empty; then, as
+a last resort, broken syntax that json-repair can mend without changing any string.
 """
 
 from __future__ import annotations
@@ -25,8 +29,10 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
+
+import json_repair
 
 from tinyharness.agent.history import ToolCall
 
@@ -55,12 +61,18 @@ _BARE_CALL = re.compile(
 )
 
 
-def recover_calls(text: str, schema_of: Callable[[str], dict[str, Any] | None]) -> tuple[str, list[ToolCall]]:
+def recover_calls(
+    text: str,
+    schema_of: Callable[[str], dict[str, Any] | None],
+    from_json: Callable[[str], bool] = lambda name: False,
+) -> tuple[str, list[ToolCall]]:
     """Tool calls written into `text`, and the text without them. `schema_of(name)` is the
-    tool's JSON schema, or None if there's no such tool (then nothing is taken)."""
+    tool's JSON schema, or None if there's no such tool (then nothing is taken). Calls with
+    no marker, only JSON, are taken only for tools `from_json(name)` allows: such JSON can
+    be an example the user asked for (`Tool.taken_from_json`)."""
     start = _first_tag(text)
     if start < 0:
-        return text, []
+        return _from_openai_json(text, schema_of, from_json)
     tail = text[start:]
     if tail.startswith("<|tool_call>"):
         return _from_gemma(text, start, schema_of)
@@ -81,6 +93,75 @@ def recover_calls(text: str, schema_of: Callable[[str], dict[str, Any] | None]) 
     if not calls:
         return text, []
     return text[:start].rstrip(), calls
+
+
+# The reply's last thing: a fenced block (```json, ```python) or bare JSON.
+_LAST_FENCE = re.compile(r"(?:^|\n)```[\w-]*[ \t]*\n(.*?)\n?```\s*$", re.DOTALL)
+
+
+def _from_openai_json(
+    text: str, schema_of: Callable[[str], dict[str, Any] | None], from_json: Callable[[str], bool]
+) -> tuple[str, list[ToolCall]]:
+    """Calls written as JSON (`_json_call` lists the shapes), alone or in a list, as the
+    reply's last thing. Seen live: Gemma 3 12B never made a real call and wrote its plans
+    this way in a ```python or ```tool_code block, so every plan was lost. Taken only if
+    every item is a call to a real tool."""
+    if len(text) > MAX_BARE_CALL:
+        return text, []
+    if match := _LAST_FENCE.search(text):
+        found = _json_value(match.group(1))
+        before = text[: match.start()]
+    else:  # bare: JSON from the start of a line to the end of the reply
+        found, before = None, text
+        for start in (0, *(m.end() for m in re.finditer(r"\n(?=[ \t]*[\[{])", text))):
+            if (found := _json_value(text[start:])) is not None:
+                before = text[:start]
+                break
+    if found is None:
+        return text, []
+    value = found
+    calls: list[ToolCall] = []
+    for item in value if isinstance(value, list) else [value]:
+        call = _json_call(item, schema_of)
+        if call is None or not from_json(call.name):
+            return text, []
+        calls.append(call)
+    return (before.rstrip(), calls) if calls else (text, [])
+
+
+def _json_value(body: str) -> Any:
+    """`body` as one JSON object or list, or None."""
+    if body.strip()[:1] not in ("{", "["):
+        return None
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return None
+
+
+def _json_call(item: Any, schema_of: Callable[[str], dict[str, Any] | None]) -> ToolCall | None:
+    """One call in any of the shapes seen: the API's, `{"name", "arguments"}`, or flat, with
+    the arguments beside the name (`{"name": "Plan", "plan": ...}`, or the name in "type").
+    A flat one is taken only if every other key is one of the tool's own parameters."""
+    if not isinstance(item, dict):
+        return None
+    if item.get("type") == "function" and isinstance(item.get("function"), dict):
+        item = item["function"]
+    name = item.get("name") if isinstance(item.get("name"), str) else item.get("type")
+    if not isinstance(name, str) or (schema := schema_of(name)) is None:
+        return None
+    if "arguments" in item or "parameters" in item:
+        arguments = item.get("arguments", item.get("parameters"))
+        if isinstance(arguments, str):  # the API sends arguments as JSON text
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                return None
+    else:
+        arguments = {k: v for k, v in item.items() if k not in ("name", "type")}
+        if not set(arguments) <= set(schema.get("properties") or {}):
+            return None
+    return _call(name, arguments) if isinstance(arguments, dict) else None
 
 
 def _from_gemma(
@@ -208,7 +289,7 @@ def repair_arguments(arguments: str) -> str | None:
     try:
         value, end = json.JSONDecoder().raw_decode(text)
     except json.JSONDecodeError:
-        return None
+        return _repair_hybrid_parameters(text) or _repair_syntax(text)
     if isinstance(value, str):  # encoded twice: '"{\"path\": ...}"'
         return repair_arguments(value)
     if not isinstance(value, dict):
@@ -216,3 +297,66 @@ def repair_arguments(arguments: str) -> str | None:
     # Something after the object: a second object run together with it, or stray text.
     # The first object is the call; anything else is dropped.
     return json.dumps(value, ensure_ascii=False) if end < len(text) or text != arguments else arguments
+
+
+def _repair_syntax(text: str) -> str | None:
+    """Last resort: the JSON's syntax repaired (a missing comma or quote, a trailing comma,
+    single quotes) by json-repair, but only where that can't change what a tool gets. The
+    text must end its object (cut-off arguments aren't completed: that would run a call the
+    model never finished), and every string in the result must be in the original word for
+    word, so a file's content or a command is never altered."""
+    if not text.endswith("}"):
+        return None
+    try:
+        value = json_repair.loads(text)
+    except Exception:  # json-repair should return something for anything; don't trust that
+        return None
+    if not isinstance(value, dict) or not value or not all(_verbatim(s, text) for s in _strings(value)):
+        return None
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _strings(value: Any) -> Iterator[str]:
+    """Every string in a JSON value: keys and values, at any depth."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def _verbatim(string: str, text: str) -> bool:
+    """Whether `string` is in `text` as written: raw, or JSON-escaped."""
+    return string in text or json.dumps(string, ensure_ascii=False)[1:-1] in text
+
+
+_HYBRID_PARAMETER = re.compile(
+    r'^(.*)\s*<parameter\s+name="([\w.-]+)">\s*(.*?)(?:</parameter>)?\s*$', re.DOTALL
+)
+
+
+def _repair_hybrid_parameters(text: str) -> str | None:
+    """Repair a native call that switches from JSON to an XML parameter for its last field.
+
+    Seen live: a hosted parser returned a Plan call whose object ended after `decisions`,
+    followed by `<parameter name="out_of_scope">[...]}`. Only accept it when the JSON prefix
+    becomes a complete object by adding one brace and the suffix is exactly one JSON value
+    followed by that object's closing brace.
+    """
+    match = _HYBRID_PARAMETER.fullmatch(text)
+    if match is None:
+        return None
+    prefix, name, suffix = match.groups()
+    try:
+        base = json.loads(prefix.rstrip().rstrip(",") + "}")
+        value, end = json.JSONDecoder().raw_decode(suffix)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(base, dict) or name in base or suffix[end:].strip() not in ("", "}"):
+        return None
+    base[name] = value
+    return json.dumps(base, ensure_ascii=False)

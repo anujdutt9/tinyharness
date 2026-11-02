@@ -8,6 +8,64 @@ the SDK, and every break is listed here.
 ## Unreleased
 
 ### Added
+- `/jobs` lists background commands with their status and log, and `/jobs stop <id>` stops
+  one (the agent is told). The status bar shows how many are running, and Ctrl+B moves a
+  command that's running now to the background; its row says so once it has run a few
+  seconds.
+- A plan the agent writes in its reply under a `# Title`, fenced or not, is saved for review
+  as if it had called Plan, and you get the same "Build this plan?" question. Gemma 3 12B
+  planned this way and lost half its plans.
+- Plan mode asks its questions one at a time, as a picker: "Question 1 of 3 · Format",
+  the recommended answer first and selected, so Enter takes it. Number keys or arrows pick
+  another, the last row lets you type your own, and Esc lets you answer in chat instead.
+  Each answer stays on screen as one line, and the agent goes on to write the plan in the
+  same turn. A model that doesn't use the new Ask tool still asks in its reply, as before.
+  The SDK gets it through `SessionOptions(question_callback=...)`.
+- Models that write their plan-mode questions instead of using the picker get the picker
+  anyway: one short extra call restates the questions, and your picks are sent as your
+  next message. Strong models already use the picker, so they never make that call.
+- Plan mode guides the agent from questions to an editable, reviewable plan. The agent
+  looks at the code briefly, asks at most three questions (each with options and a
+  recommended default), then writes the plan in Markdown and hands it to you: it's shown
+  in full, the turn ends, and one question asks whether to build it: "Yes, build it in auto
+  mode", "Yes, build it in default mode" or "No, keep planning". Enter picks the mode you
+  were in before planning; picking a mode approves that exact revision and starts the
+  build. Keep planning (or Esc) and say what to change, and it revises only that.
+  Shift+Tab out of plan mode still approves without starting. The plan lives under
+  `~/.tinyharness/projects/<project>/plans/`, outside the project, so a cloned repository
+  can't ship one and a command can't rewrite it. You can edit it by hand: the agent works
+  your edits in and never overwrites them. Once approved, changes the build makes are held
+  to that revision: if the plan file changes, the build stops until you approve again.
+  A model that can't call the Plan tool can put the plan in its reply between `<plan>` tags
+  instead, and it's saved the same way (local Qwen 4B does this; it never called the tool).
+  Leaving plan mode never fails: if you emptied or deleted the plan file you build without
+  one, and if the agent never saved a plan you're told it builds without one. The approval survives resume and compaction;
+  `/clear` ends the plan (docs/plans-design.md).
+- When a sandboxed command reaches a host it isn't allowed to yet, you're asked right then,
+  while the connection waits, with the same choices as before (once, or for the session).
+  A yes lets the same command carry on, so a download no longer stalls in its library's
+  retries until it times out and has to run again. Time spent answering doesn't count
+  toward the command's timeout. Without anyone to ask (`-p`), the host is refused at once,
+  and a command that keeps retrying it with no output for 15 seconds is stopped with the
+  host named. On Linux and Windows the sandbox runtime handles the network itself, so
+  there the old flow remains: the host is refused, and the agent retries with
+  `network_host`.
+- The agent knows when it's in plan mode. It's told when plan mode starts and ends (again
+  after a long conversation is summarized), plans with you, asks the questions that would
+  change the plan before writing it out in detail (at most three, each with options and a
+  recommended default, after a short look at the code rather than a long one), keeps
+  small plans small, revises only what you asked to change, and when you want it built,
+  asks you to switch modes with Shift+Tab. If it tries to change a file or run a command
+  in plan mode anyway, its turn stops there with a one-line reminder of how to build,
+  instead of it writing the whole result into its reply. This works the same with any
+  model, local ones included.
+- Bash commands can run in the background: the agent starts dev servers, watchers and
+  long builds with `background=true` and keeps working, then uses the new Job tool to wait
+  for their output (or for a line like "ready") and to stop them. A command still running
+  at its timeout now moves to the background instead of being killed, so its work isn't
+  lost (`[jobs] background_on_timeout = false` restores killing). The agent gets a short
+  note when a job ends; a subagent's jobs stop when it returns, and every job stops when
+  the session closes.
 - ChatGPT Plus and Pro users can choose the separate ChatGPT plan provider and use
   Continue with ChatGPT instead of creating an OpenAI API key. tinyharness validates
   the OpenID identity, stores renewable credentials privately, discovers models for
@@ -33,13 +91,250 @@ the SDK, and every break is listed here.
   standard local endpoints, then checks the selected model before starting a session.
   When the standard endpoint is unavailable, it can connect and remember a remote or
   custom endpoint with an optional server key.
+- `[sandbox] share_caches` lets uv, pip, npm, Hugging Face and torch use your own cache
+  locations from inside the sandbox, so nothing is downloaded or compiled twice. It is
+  off by default: a sandboxed command can then change what those tools load later.
 
 ### Changed
+- With Ollama, the context window is the one the model is actually served with: a model
+  with no `num_ctx` in its Modelfile runs at Ollama's default (4,096 tokens on most Macs),
+  not its architecture's 262k, so conversations get compacted before Ollama silently cuts
+  their start. Set `OLLAMA_CONTEXT_LENGTH` for Ollama to serve more.
+- When a request names a library, model or product the agent doesn't recognize, it looks it
+  up on the web before asking you or guessing, then answers your question with what it
+  learned instead of reporting the research back.
+- Replies lead with the answer and don't restate what you already know: what you told it
+  or named, or what a tool already showed you. What it looked up comes in where it changes
+  the answer, not as a summary up front.
+- Files in the session's scratch folder show as `(scratch)/make_nb.py` instead of a long
+  path under `~/.tinyharness`; links still open the real file. The agent keeps the
+  scripts that produce a deliverable (a notebook's generator, a page's build script) with
+  it in your project so you can rerun them; scratch is only for throwaway files, and it
+  leaves tool caches such as Playwright's browsers where they are.
+- Shift+Tab cycles `default` → `auto` → `plan`. `ask` mode is out of the cycle, since
+  approving every edit out of habit protects less than it seems; `/mode ask` and
+  `--mode ask` still switch to it.
+- When no sandbox is available, the start-up banner gives the command that installs one
+  (for Linux, the one for your package manager) instead of only saying it's off.
 - `/model` shows the complete model catalog for the active provider instead of a
   mixed-provider recent list. The banner and status bar identify the provider separately
   from its model.
+- Fewer permission prompts in the sandbox. Installing what the project already declares
+  (`uv sync`, `pip install -e .`, `pip install -r requirements.txt`, `npm ci`) no longer
+  asks. Naming a new package can be approved once per ecosystem for the session, and in
+  auto mode the classifier reviews whether the install serves the request. An install
+  inside `sh -c`, `eval` or `exec` asks the same way. `[permissions] allow = ["Bash(capability:software:Python package)"]` pre-approves one.
+- Installing the project's declared dependencies (`uv pip install -e .`, `uv sync`,
+  `npm ci`) no longer marks the conversation as holding outside content, so later
+  commands don't all ask: it is authorized project setup inside the sandbox. This holds
+  only when every other step in the command is setup (`cd`, making a venv, activating
+  the project's own virtualenv) or a local reader; any other step keeps the downloads as outside content.
+  Installing a new package by name still counts, since its build and code can print or
+  plant text. Known local inspection (`which`, `ls`, local `git` reads) stays quiet even
+  then, because it cannot send anything.
+- Bash now uses ordinary shell semantics instead of forcing `set -e` and `pipefail`.
+  Independent probes continue, dependent steps use `&&`, and unknown nonzero child
+  exits are shown neutrally while known test/build failures, timeouts and sandbox
+  blocks stay prominent.
+- In auto mode, uncertain or denied classifier decisions go back to the agent so it can
+  recover without interrupting the user. Three consecutive blocks or twenty total
+  blocks fall back to a person, preventing silent loops. Project-declared installs stay
+  routine; newly named packages are reviewed even after outside content was read.
+- Auto mode's review now always sees your request, however many tool calls came
+  before it, and judges only the call in front of it, not its neighbors or its topic.
+  A call it holds back says so (not the sandbox, nothing ran) and the agent may try a
+  narrower one; a call it denies tells the agent not to try it another way.
+- Auto mode's review has two stages. A quick check on the provider's small model can only
+  allow; anything it doesn't allow gets a careful review on your session's model (or
+  `[models.roles] safety_review`) that reasons before it answers. It rates how risky a
+  call is apart from whether you asked for it, so a low-risk call no longer needs your
+  request to spell it out. The same call for the same request gets the same answer, and a
+  review that couldn't run says so instead of reading as "unsafe". In the CLI, its row
+  reads `auto review held back`, `denied` or `couldn't run`, with the reason underneath
+  in full, instead of "denied by classifier: Pattern…".
+- After a web page or download is in the conversation, plain downloads no longer wait on
+  a review: `curl`/`wget` reads of allowed hosts, read-only `gh` commands, and text filters
+  such as `jq` or a `python3 -c` that only parses JSON. Neither does reading a page on a
+  host you named yourself or one on the sandbox allowlist. Anything that could carry data
+  out (a request body, an upload, headers, a new host, a script) is still reviewed, and so
+  is a text step that can run a program (`sed`'s `e` command, `sort --compress-program`).
+- In auto mode a command that needs a host outside the allowlist can be approved by the
+  review for that one command, instead of asking you. With outside content in the
+  conversation, you are still asked: a new destination is how that content could get data
+  sent out.
+- WebFetch and WebSearch are core tools; the `web` extension is
+  gone (a config that still lists it loads without an error). WebSearch is offered only
+  where the provider has built-in search (Anthropic, OpenAI, Gemini, xAI, OpenRouter),
+  following `/model`; WebFetch works with any provider. To turn the web off,
+  `[permissions] deny = ["WebFetch", "WebSearch"]`: a tool denied outright is no longer
+  offered to the model at all.
+- Read reads PDFs, as their text page by page with a `page N of M` line before each
+  page, so every session can read them. The `pdf` extension and its Pdf tool are gone; a
+  config that still lists `pdf` loads without an error. Before, with the extension off
+  (the default), Read told the model to use a Pdf tool it didn't have.
+- `/sandbox` turns the sandbox on or off for the session, from a picker or with
+  `/sandbox on|off`. With it off, commands run as
+  you anywhere on your machine, reads run, `default` mode asks before other commands and
+  auto mode's review decides them. Deleting files, `sudo`, touching credential files and
+  changing files that run code later (git hooks, editor settings, `.envrc`) still ask you,
+  and "don't ask again" doesn't cover them. That includes credential paths written as a
+  pattern or in quotes (`~/.ss?/id_*`) and `sudo` called by its full path, and a read
+  that can run a program or write a file (`rg --pre`, `tree -o`) is not treated as a read.
+  A "don't ask again" given while the sandbox was on doesn't carry over once it's off.
+  Before, every command asked once the sandbox was off, even in auto mode, and even
+  `bypassPermissions` asked.
+- Programs that talk to their own helper processes over Unix sockets work in the sandbox:
+  ZMQ `ipc://`, multiprocessing managers, language servers. A command may use sockets in
+  the folders it can write (the project and its private temp folder); others, such as
+  Docker's, stay closed. SGLang's engine couldn't reach its own scheduler before.
+- Loopback (`localhost`) is decided by auto mode's review even after outside content was
+  read, since it never leaves your machine, and an approval lasts for the session.
+- Approving `huggingface.co` opens Hugging Face's download hosts with it, so a model
+  download that redirects to `cas-server.xethub.hf.co` or a CDN doesn't stop again.
+- The sandbox also keeps editor tasks and settings (`.vscode/`, `.idea/`), `.envrc`,
+  `.gitmodules`, `.mcp.json` and agent settings, commands and definitions read-only:
+  each runs code outside the sandbox when you open or enter the project. An allowed host
+  name or address that is or resolves to this machine, its link (such as the cloud
+  metadata service at `169.254.169.254`) or no one is refused; local servers go through
+  `localhost` approval instead.
+- Three blocked retries are counted per action, so unrelated parallel calls cannot
+  combine into an unexpected prompt.
+
+- A write the sandbox blocks shows as its own amber row, `⊘ sandbox blocked a write to
+  ~/.cache/sglang`, instead of a red failure under a long traceback. The first one in a
+  session says why in one line. The model is told which folder was blocked and to point
+  the tool's own cache variable under `$XDG_CACHE_HOME`, and to save it with the Memory
+  tool when that is on.
+- `/sandbox` shows where the sandbox cache is, how big it is, and its largest parts.
+- When a virtualenv made in the sandbox uses a Python stored in the sandbox cache, the
+  model tells you, since clearing that cache would break it.
+- The working spinner shows long waits as minutes and seconds (`8m 35s`).
+- The next-message suggestion stands on its own without repeating `tab to use` beside it.
 
 ### Fixed
+- On Windows, a Job wait's `until` pattern matches whole lines: `^ready$` never matched,
+  because output there ends lines with `\r\n`.
+- Two questions from the agent in one reply are asked one after the other, not both at once.
+- Resuming a session that ended while its plan was waiting for review comes back in plan
+  mode and asks "Build this plan?" again. Before, every write was refused as unapproved.
+- The resume preview and the `/resume` list show what you typed, not the notes tinyharness
+  adds before it (`<plan-mode>…`).
+- Esc followed quickly by `/` no longer drops the slash (the agent got "cost" for `/cost`).
+- A Job wait no longer says a job that matched its line and then crashed is "still
+  running"; a stopped job's row says "stopped"; a command that hit its timeout and moved to
+  the background says so on its row instead of looking finished.
+- No more "Thought for 0s" rows, and auto mode's reason for allowing a call stays on one line.
+- Tool calls from smaller models work more often. A list argument sent as JSON text is
+  decoded (Llama 3.1 8B sent Ask's questions this way). Calls written as JSON in the reply,
+  in the API's own shape or with the arguments beside the tool's name, are recovered
+  (Gemma 3 12B wrote all its plans this way, so every one was lost), but only for Read,
+  Glob, Grep, Plan and Ask: JSON with no call marker may be an example you asked for, so a
+  Bash or Write call written that way is never run. And broken JSON syntax
+  in arguments is repaired with json-repair, but only when no text the tool receives
+  would change and the arguments weren't cut off.
+- Resizing the terminal no longer leaves broken copies of the input box behind (seen in
+  iTerm2 when dragging the window edge). tinyharness waits for the size to settle, then
+  erases the box's lines as the terminal rewrapped them and redraws it once, in place,
+  with the conversation still directly above it. Printed output (the welcome banner,
+  replies) no longer breaks into rows with gaps either: its lines used to be padded with
+  spaces to the full width, which the terminal rewrapped like text.
+- When `/model` can't list a provider's models, its "Loading…" spinner stops before asking
+  you to type a model name (it flickered over the prompt), and the message gives the HTTP
+  status ("HTTP 401") instead of "HTTPStatusError".
+- Running the project's own checks no longer makes later commands ask. The first
+  `uv run pytest` in a fresh project installs pytest from PyPI; that download counted as
+  content from outside, so in default mode every later test run asked. `uv run` with a
+  project tool (pytest, ruff, mypy and the like) now counts as installing what the project
+  declares, as `uv sync` does. `uv run --with ...` and anything that fetches pages still
+  counts as outside content.
+- In auto mode, deleting something you named ("clean up the old build folder") no longer
+  always asks. Inside the sandbox, the review may allow a deletion your own messages asked
+  for. It still asks when the review isn't sure, when web content is in the conversation,
+  without the sandbox, and for `git reset --hard` and `git clean`.
+- Edit no longer insists on a Read first when its `old_string` is in the file exactly once,
+  word for word: that shows the agent has the current text. Agents that look at a file
+  with `cat` used to have their first Edit refused and redone.
+- A checkout with no provider connected starts the setup picker, instead of listing the
+  providers and exiting.
+- A message typed while `/compact` runs is sent when it finishes. It used to land on the
+  spinner line, and Enter added a newline instead of sending it.
+- The approval for a Python package install says "the project's .venv" instead of the
+  environment's full path.
+- A background job's row shows its latest output line ("final loss: 0.1073"), not its
+  first; the turn's footer counts files that subagents changed; and a `/btw` answer
+  asked mid-turn says it's as of the agent's last finished step.
+- A test run whose output reports failures now shows as failed, even when the command
+  exits 0 (`pytest | tail`, `pytest || true`). Before, the row said "3 passed" in green and
+  the footer "tests ✓" over "1 failed, 3 passed".
+- Asking the agent to add a git remote (or anything else that writes `.git/config` or
+  hooks) no longer dead-ends. The sandbox still refuses it, and the agent can then ask
+  you to run that exact command outside the sandbox: you're asked every time, in every
+  mode, and the answer is never remembered. Git's refusal was also misread as a write to
+  "/config", so it wasn't recognised as a protected path.
+- What the agent sees of a file outside the project, such as `~/.zshrc` (through Read,
+  Edit or Grep), hides secret values in it: anything shaped like an API key, and the values
+  of settings named like `*_API_KEY`, `*_TOKEN` or `password`. Before, only keys set in the
+  session's environment were masked. The file can still be edited.
+- The suggested next message no longer shows a model's reasoning (seen with qwen3:4b on
+  Ollama: the input box suggested `<think>`), and a suggestion cut off mid-reply is dropped.
+- Ollama models run without a tag (`qwen3` for `qwen3:latest`) are recognized: their
+  context window, tool support and reasoning were unknown, so `/effort` said the endpoint
+  "does not advertise effort support". tinyharness also reads which Ollama models reason
+  (`/effort` offers levels only for those) and the window a model is served with
+  (`num_ctx`), so compaction starts before Ollama silently drops the start of the
+  conversation.
+- Built-in commands work while the agent is working: `/effort`, `/model`, `/sandbox` and
+  the rest run right away instead of "has to wait until the agent finishes". `/clear`,
+  `/sessions` and `/compact` replace the conversation the agent is adding to, so they run
+  as soon as it finishes.
+- `/provider` works for local providers (Ollama, LM Studio), which have no default model:
+  it uses the model you used there last, or lets you pick from the ones the server has,
+  instead of failing with "model is required".
+- PyTorch on Apple GPUs no longer prints "You don't have permission to save the file
+  mpsgraph-..." for every graph in a sandboxed command: Metal's own scratch folder under
+  your temp directory is writable (only that folder). macOS framework messages also show
+  apostrophes and quotes correctly instead of `don‚Äôt`.
+- Plan mode reads public web pages without asking, as default and auto mode do: research is
+  what plan mode is for. Before, every page asked, even one on the sandbox's allowlist
+  such as a package's PyPI page. With web content already in the conversation, a page on
+  a host that isn't allowlisted and that you didn't name still asks.
+- Grep searches a file you name directly up to 64 MB, such as a long session log, instead of
+  refusing anything over 2 MB. A search across a folder still skips files that big, and a
+  file past the limit gets a suggestion to search it with `rg` through Bash.
+- Shown reasoning streams line by line into the scrollback, so a long thought is readable
+  from its first line while the model is still thinking. Before, only its last eight
+  lines were on screen until it finished. Ctrl+T says it applies from here on, since
+  reasoning already printed stays in the terminal's scrollback.
+- An install that also needs a new host, such as Playwright downloading Chrome, asks one
+  question naming both instead of two in a row; "for this session" allows both.
+- "Don't ask again for Bash" no longer lets a command that could send project data out
+  run without asking once a web page or download is in the conversation. Such a command
+  is reviewed like any other, and the prompt doesn't offer to remember the answer.
+- Piping downloaded JSON into a local `python -c` parser no longer looks like downloading
+  and executing a program. Piping a script into Python, or explicitly evaluating the
+  downloaded input, still requires software-acquisition approval. An unauthenticated
+  GitHub CLI call says `GitHub login required` instead of raw `exit 4`.
+- Auto mode no longer asks about known local inspection merely because it discards output
+  with `2>/dev/null`. The agent keeps declared installs in their own command and addresses
+  virtualenvs directly, preserving precise download provenance and avoiding later prompts.
+- Failed test commands show `13 errors`, `1 failed`, or `tests failed` instead of a raw
+  shell code such as `exit 1` or Python's broken-pipe `exit 120`; the error preview and
+  failing-tests footer remain visible.
+- A command counts as a test run only when a step runs the tests, so installing pytest
+  (`uv pip install pytest`) no longer turns a failed build into `exit 1` or the footer
+  into `tests ✗`. A sandbox block in a command whose tests never ran shows as a block.
+- A sandboxed command that tries to change a protected path, such as `pre-commit
+  install` writing `.git/hooks`, shows `sandbox blocked a write to .git/hooks/pre-commit`,
+  and the model is told to give you the command to run yourself instead of retrying.
+- A failed package build says `build failed` instead of raw `exit 1`, and internal
+  harness notes no longer occupy its visible error preview. Shell redirections such as
+  `2>&1` no longer make a local editable install look like a new package acquisition.
+- Auto-approved software installs are identified as classifier decisions in the UI and
+  session log. A sourced script or shell command substitution beside a declared install
+  no longer hides registry downloads from outside-content tracking.
+- Unknown nonzero shell exits are neutral instead of being guessed from command text.
+  The footer judges tests by their own result line, so tests that passed before a later
+  independent probe returned nonzero still count as passed.
 - Ollama setup reads each model's native capabilities and automatically uses text-based
   tool calls when a model such as `gemma3:270m` does not accept API tool definitions.
 - GitHub Copilot setup uses the account-specific API endpoint returned by GitHub and lets
@@ -164,8 +459,7 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
 - Public SDK and extension examples now use concise numpydoc documentation. Function
   tools read their input descriptions from numpydoc `Parameters` sections while keeping
   the earlier compact form compatible.
-- Code comments and documentation now explain tinyharness behavior directly, without
-  relying on comparisons to other agent products or their implementations.
+- Code comments and documentation now explain tinyharness behavior directly.
 - Credential-based provider fallback is now named `credential_selected` internally;
   `auto_selected` remains a compatibility alias and no longer occupies future routing terminology.
 - Prompt-suggestion shown/accepted events are recorded without their text so the default
@@ -437,7 +731,7 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
   text. Cached per model; `tool_calls = "native" | "text"` overrides it. A server without
   a tool-call parser (vLLM without `--enable-auto-tool-choice`) works this way.
 
-### Outside content (Rule of Two)
+### Outside-content protection
 - Once content from another machine is in the conversation (a fetched page, search
   results, a command's download through the sandbox proxy), calls that could send data out
   ask a person, in every mode but bypass: network tools no longer read public pages
@@ -770,7 +1064,7 @@ regression test.
   can't be re-pointed at your machine or network in between (TLS still verifies the
   site's name). A redirect to another site isn't followed; the model is told where it
   leads, and fetching it asks about that site.
-- `Grep` doesn't follow symlinks, to files or directories (like ripgrep): the
+- `Grep` doesn't follow symlinks, to files or directories: the
   secret-file check saw a link's own name, so `leak -> ~/.aws/credentials` was read.
   Each file is read once, without following symlinks, so the file checked is the file
   searched.

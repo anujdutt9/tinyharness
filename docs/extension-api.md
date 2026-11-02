@@ -49,7 +49,7 @@ table and reach it as `th.config`:
 
 ```toml
 [extensions]
-enabled = ["web", "agents", "hello"]
+enabled = ["agents", "hello"]
 
 [extensions.hello]
 greeting = "Hi"
@@ -210,8 +210,6 @@ its module. Only load extensions you trust, as you would any package.
 
 | Extension | Adds | Without it |
 |---|---|---|
-| `web` | WebSearch, WebFetch, and when to cite pages | no web access beyond the sandbox's allowlist |
-| `pdf` | Pdf: pages, text and images of a PDF | the model reads PDFs with Bash (`pdftotext`, pypdf) |
 | `todo` | TodoWrite: a live checklist for multi-step work | `todo_list = true` turns it on too |
 | `agents` | Agent and Team, and how to brief a subagent | no subagents |
 

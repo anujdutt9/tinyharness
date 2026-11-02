@@ -14,7 +14,11 @@ Each backend (sandbox/seatbelt.py, ...) translates this one policy for its platf
 
 from __future__ import annotations
 
+import functools
+import os
 import re
+import subprocess
+import sys
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -22,10 +26,37 @@ from pathlib import Path
 
 from tinyharness.security import public_path_regexes, secret_path_regexes
 
+# Caches a user may choose to share with their own terminal ([sandbox] share_caches):
+# each name sets these variables to where the tool keeps them outside tinyharness (the
+# user's own setting when there is one). Sharing saves downloading and compiling twice,
+# but a sandboxed command can then change files the tool loads later, outside the sandbox.
+SHAREABLE_CACHES: dict[str, dict[str, str]] = {
+    "uv": {"UV_CACHE_DIR": "~/.cache/uv", "UV_PYTHON_INSTALL_DIR": "~/.local/share/uv/python"},
+    "pip": {"PIP_CACHE_DIR": "~/Library/Caches/pip" if sys.platform == "darwin" else "~/.cache/pip"},
+    "npm": {"npm_config_cache": "~/.npm"},
+    "huggingface": {"HF_HOME": "~/.cache/huggingface"},
+    "torch": {"TORCH_HOME": "~/.cache/torch"},
+}
+
 # Inside a project, these would let a sandboxed command get code run *outside* the
-# sandbox later: tinyharness hooks/plugins/skills, and git hooks or config (core.hooksPath,
-# core.fsmonitor).
-PROTECTED_IN_PROJECT = (".tinyharness", ".git/hooks", ".git/config")
+# sandbox later: tinyharness hooks/plugins/skills, git hooks or config (core.hooksPath,
+# core.fsmonitor), and the files other tools run from when you open or enter the project:
+# editor tasks and settings, direnv, MCP servers, other agents' commands and hooks. The
+# list follows Anthropic's Sandbox Runtime's mandatory denies, plus .envrc.
+PROTECTED_IN_PROJECT = (
+    ".tinyharness",
+    ".git/hooks",
+    ".git/config",
+    ".gitmodules",
+    ".vscode",
+    ".idea",
+    ".envrc",
+    ".mcp.json",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".claude/commands",
+    ".claude/agents",
+)
 
 
 @dataclass(frozen=True)
@@ -40,6 +71,7 @@ class SandboxPolicy:
     proxy_port: int | None = None  # the allowlist proxy (sandbox/proxy.py), the one way out
     cache_dir: Path | None = None  # package managers cache here instead of the user's own cache
     env: dict[str, str] = field(default_factory=dict)  # extra environment for the command
+    shared_caches: tuple[str, ...] = ()  # SHAREABLE_CACHES names writing the user's own cache
 
     @classmethod
     def for_project(
@@ -51,6 +83,7 @@ class SandboxPolicy:
         extra_write: Iterable[Path] = (),
         allow_localhost: bool = False,
         allowed_hosts: Iterable[str] = (),
+        shared_caches: Iterable[str] = (),
     ) -> SandboxPolicy:
         """Build a project policy with private writes and explicit network destinations."""
         projects = [_real(root), *(_real(p) for p in extra_write)]
@@ -69,6 +102,13 @@ class SandboxPolicy:
             private_tmp = scratch / "tmp"
             private_tmp.mkdir(parents=True, exist_ok=True)
             env.update({"TMPDIR": str(private_tmp), "TMP": str(private_tmp), "TEMP": str(private_tmp)})
+        roots.extend(_framework_scratch())  # cached: the answer is fixed for this user
+        shared = tuple(dict.fromkeys(shared_caches))
+        for name in shared:
+            for variable, default in SHAREABLE_CACHES[name].items():
+                path = _real(Path(os.environ.get(variable) or default))
+                env[variable] = str(path)
+                roots.append(path)
         return cls(
             write_roots=tuple(dict.fromkeys(roots)),
             project_roots=tuple(projects),
@@ -79,6 +119,7 @@ class SandboxPolicy:
             allowed_hosts=tuple(dict.fromkeys(h.lower().rstrip(".") for h in allowed_hosts)),
             cache_dir=cache_dir,
             env=env,
+            shared_caches=shared,
         )
 
     def reopened(self) -> tuple[Path, ...]:
@@ -89,6 +130,25 @@ class SandboxPolicy:
 def _real(path: Path) -> Path:
     """Sandboxes match real paths (/tmp is /private/tmp on macOS)."""
     return Path(path).expanduser().resolve()
+
+
+@functools.cache
+def _framework_scratch() -> list[Path]:
+    """Scratch folders macOS frameworks write regardless of TMPDIR, each one folder under the
+    user's own temp directory (`getconf DARWIN_USER_TEMP_DIR`), never the whole of it.
+
+    Seen live: PyTorch on Apple GPUs printed "You don't have permission to save the file
+    mpsgraph-..." on every graph it built: Metal writes per-process files (named for the
+    process and time) to com.apple.MetalPerformanceShadersGraph there, ignoring TMPDIR."""
+    if sys.platform != "darwin":
+        return []
+    try:
+        temp = subprocess.run(
+            ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True, timeout=5
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [_real(Path(temp)) / "com.apple.MetalPerformanceShadersGraph"] if temp else []
 
 
 def _temp_dirs() -> list[Path]:

@@ -12,7 +12,7 @@ from rich.console import Console
 
 from tinyharness.agent.history import Message
 from tinyharness.cli.render import Renderer
-from tinyharness.cli.repl import _SAFE_WHILE_RUNNING, Repl
+from tinyharness.cli.repl import _AFTER_TURN, Repl
 from tinyharness.cli.theme import THEME
 from tinyharness.llm.types import StreamChunk
 from tinyharness.llm.usage import Usage
@@ -89,6 +89,24 @@ async def test_the_next_message_is_suggested_after_a_turn(tmp_path):
     assert session.history.messages == before
 
 
+async def test_a_suggestion_never_shows_the_models_reasoning(tmp_path):
+    """Seen live: qwen3:4b on Ollama wrote its reasoning into the reply, and the input box
+    suggested "<think>". Reasoning in the text is dropped, and so is a reply cut off."""
+    session, _ = scripted(
+        tmp_path,
+        [
+            "done",
+            "<think>\nThe user wants to try it.\n</think>\n\nrun wc.py -l notes.txt",
+            "<think>\nThey might want to",  # ended mid-thought
+            [StreamChunk(text="run the tests and then"), StreamChunk(finish_reason="length")],
+        ],
+    )
+    await converse(session)
+    assert await session.suggest_next() == "run wc.py -l notes.txt"
+    assert await session.suggest_next() == ""
+    assert await session.suggest_next() == ""
+
+
 async def test_no_suggestion_without_a_conversation_or_a_short_one(tmp_path):
     session, llm = scripted(tmp_path, ["done", "x" * 300])
     assert await session.suggest_next() == ""
@@ -111,13 +129,13 @@ def repl(tmp_path):
 
 
 def test_btw_can_be_asked_while_the_agent_works():
-    assert "/btw" in _SAFE_WHILE_RUNNING
+    assert "/btw" not in _AFTER_TURN
 
 
 def test_the_suggestion_shows_in_the_empty_input_box(repl):
     repl.suggestion = "commit it"
     shown = "".join(text for _, text in repl._placeholder())
-    assert shown.startswith("commit it") and "tab" in shown
+    assert shown == "commit it"
 
 
 async def test_a_new_message_drops_the_suggestion(repl):
@@ -153,6 +171,18 @@ async def test_btw_shows_above_the_input_box_until_esc(boxed):
 
     boxed.close_aside()  # what Esc does
     assert boxed.aside is None
+    assert "as of its last finished step" not in shown  # asked between turns
+
+
+async def test_btw_asked_mid_turn_says_what_it_answered_from(boxed):
+    """Seen live: asked during a turn, /btw said "I'm not editing any file yet" while an
+    edit was being written. It answers from the finished steps, and says so."""
+    boxed.llm.turns = ["Only stock.py so far."]
+    boxed._turn = asyncio.get_running_loop().create_future()  # a turn is running
+    await boxed.handle("/btw which file are you on?")
+    await boxed._answering
+    assert "as of its last finished step" in boxed._aside_ansi(boxed.aside, 100, 20)
+    boxed._turn.cancel()
 
 
 async def test_the_next_message_closes_the_answer_and_output_prints_it(boxed):
@@ -234,3 +264,82 @@ async def test_esc_closes_the_answer_in_the_running_input_box(tmp_path):
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(loop, 3)
     session.close()
+
+
+async def test_built_in_commands_run_while_the_agent_works(repl):
+    """Seen live: "/effort has to wait until the agent finishes". Settings apply from the
+    next model call; only commands that replace the conversation wait for the turn."""
+    repl._turn = asyncio.get_running_loop().create_future()  # a turn is running
+    repl.auto_confirmed = True  # no confirmation picker: Windows CI has no console for one
+    await repl.handle("/effort none")
+    await repl.handle("/mode auto")
+    out = repl.console.file.getvalue()
+    assert "has to wait" not in out and repl.session.config.effort == "none"
+    assert repl._draft == ""
+    repl._turn.cancel()
+
+
+async def test_conversation_commands_typed_mid_turn_run_when_it_ends(repl):
+    await converse(repl.session, "hello")
+    assert len(repl.session.history.messages) > 1
+    repl._turn = asyncio.get_running_loop().create_future()
+    await repl.handle("/clear")
+    assert "runs when the agent finishes" in repl.console.file.getvalue()
+    assert len(repl.session.history.messages) > 1  # not yet: the turn still adds to it
+
+    async def finished_turn():
+        return
+        yield
+
+    repl._turn.cancel()
+    await repl._turn_in_background(finished_turn())
+    assert [m.role for m in repl.session.history.messages] in ([], ["system"])
+
+
+async def test_a_message_typed_during_compact_is_sent_when_it_finishes(boxed, monkeypatch):
+    """Seen live: a message typed during /compact landed on its spinner line, and Enter
+    added a newline instead of sending it. /compact runs under the input box now."""
+    release = asyncio.Event()
+
+    async def compact():
+        await release.wait()
+        return True
+
+    sent = []
+
+    async def run(text, images=None):
+        sent.append(text)
+        return
+        yield
+
+    monkeypatch.setattr(boxed.session, "compact", compact)
+    monkeypatch.setattr(boxed.session, "run", run)
+    await boxed.handle("/compact")
+    compacting = boxed._turn
+    assert boxed.turn_running
+    await boxed.handle("is the suite green?")
+    assert sent == []  # it waits for the compaction
+    release.set()
+    await compacting
+    await boxed._turn
+    assert sent == ["is the suite green?"]
+    assert "Compacted" in boxed.console.file.getvalue()
+
+
+async def test_esc_then_a_slash_still_types_a_command(tmp_path):
+    """Seen in review: Esc, then "/cost" 0.4s later, and the agent got "cost" as a prompt:
+    prompt_toolkit's Meta+/ (Esc waits for a second key) took the slash."""
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    session, _ = scripted(tmp_path, [])
+    console = Console(file=io.StringIO(), width=100, theme=THEME)
+    repl = Repl(session, console, Renderer(console))
+    try:
+        with create_pipe_input() as keys, create_app_session(input=keys, output=DummyOutput()):
+            prompt = repl._prompt_session()
+            keys.send_text("\x1b/cost\r")
+            assert await asyncio.wait_for(prompt.prompt_async(), 3) == "/cost"
+    finally:
+        session.close()

@@ -85,14 +85,15 @@ async def test_plan_blocks_writes(tmp_path):
     assert not d.allow and d.source == "mode"
 
 
-def test_shift_tab_cycle():
+def test_shift_tab_cycles_default_auto_and_plan():
+    """Ask mode is out of the cycle (`/mode ask`): Shift+Tab from it goes back to default."""
     mode = PermissionMode.ASK
     seen = [mode := mode.next() for _ in range(4)]
     assert seen == [
         PermissionMode.DEFAULT,
         PermissionMode.AUTO,
         PermissionMode.PLAN,
-        PermissionMode.ASK,
+        PermissionMode.DEFAULT,
     ]
 
 
@@ -236,7 +237,7 @@ class Classifier:
         self.seen = []
         self.fast_filter = AutoModeClassifier.fast_filter.__get__(self)
 
-    async def classify(self, tool, args, history_tail=""):
+    async def classify(self, tool, args, history_tail="", note=""):
         from tinyharness.permissions.classifier import ClassifierDecision
 
         self.seen.append(tool)
@@ -306,11 +307,31 @@ async def test_auto_mode_reads_the_web_but_checks_urls_that_carry_data(tmp_path)
 
 
 async def test_auto_mode_asks_the_classifier_about_reads_elsewhere(tmp_path):
+    """An uncertain Auto decision goes back to the agent instead of interrupting the user."""
     user = User(YES)
     g, classifier = auto(tmp_path, user, verdict="ask")
-    assert (await g.check(READ, {"path": "/opt/notes.txt"}, "/opt/notes.txt")).allow
-    assert classifier.seen == ["Read"] and len(user.requests) == 1  # unsure, so the user decided
-    assert user.requests[0].reason == ""
+    decision = await g.check(READ, {"path": "/opt/notes.txt"}, "/opt/notes.txt")
+    assert not decision.allow and decision.source == "classifier"
+    assert classifier.seen == ["Read"] and user.requests == []
+
+
+async def test_auto_mode_falls_back_after_three_consecutive_classifier_blocks(tmp_path):
+    """A genuinely stuck agent eventually gets one human decision instead of looping forever."""
+    user = User(YES)
+    g, _ = auto(tmp_path, user, verdict="ask")
+    for _ in range(3):
+        decision = await g.check(READ, {"path": "/opt/notes.txt"}, "/opt/notes.txt")
+    assert decision.allow and len(user.requests) == 1
+
+
+async def test_unrelated_classifier_blocks_do_not_combine_into_a_prompt(tmp_path):
+    """Seen live: two parallel calls plus a different local test triggered the third-block prompt."""
+    user = User(YES)
+    g, _ = auto(tmp_path, user, verdict="ask")
+    for attempt in range(3):
+        decision = await g.check(READ, {"path": f"/opt/{attempt}.txt"}, f"/opt/{attempt}.txt")
+        assert not decision.allow
+    assert user.requests == []
 
 
 async def test_auto_mode_uses_the_scratch_directory_freely(tmp_path):
@@ -488,3 +509,269 @@ async def test_the_auto_mode_classifier_is_tagged_with_its_own_role():
     finally:
         identity.CURRENT.reset(token)
     assert seen == {"role": "classifier"}
+
+
+async def test_the_classifier_prompt_keeps_the_request_and_marks_cut_arguments():
+    """The context's own budget kept the request, then `history_tail[-1500:]` cut it off
+    again; and a command over 1,000 characters was cut without saying so."""
+    from tinyharness.permissions.classifier import AutoModeClassifier
+
+    seen = {}
+
+    class Client:
+        async def one_shot(self, prompt, *, system=None, model=None, **_):
+            seen["prompt"] = prompt
+            return '{"decision": "allow", "reason": "ok"}'
+
+    tail = "[user, latest request] set up this project\n" + "\n".join(
+        f"[agent called] Bash({{'command': 'ls {i}'}})" for i in range(60)
+    )
+    await AutoModeClassifier(Client(), None).classify("Bash", {"command": "x" * 6000}, history_tail=tail)
+    prompt = seen["prompt"]
+    assert "[user, latest request] set up this project" in prompt
+    assert prompt.index("The one call to judge") < prompt.index("Context only, not under review")
+    assert "more characters not shown" in prompt
+
+
+@pytest.mark.parametrize(
+    ("verdict", "says"),
+    [("ask", "may make a narrower call"), ("deny", "Don't attempt it another way")],
+)
+async def test_held_back_and_denied_calls_say_different_things(tmp_path, verdict, says):
+    """An uncertain review is recoverable; a denial must not invite repackaging."""
+    from tinyharness.permissions.classifier import ClassifierDecision
+    from tinyharness.sandbox import SandboxPolicy
+    from tinyharness.tools.bash import BashTool
+
+    class Classifier:
+        def fast_filter(self, args):
+            return None
+
+        async def classify(self, tool_name, args, history_tail="", note=""):
+            return ClassifierDecision(verdict, "the request doesn't mention it")
+
+    tool = BashTool(object(), SandboxPolicy(write_roots=(tmp_path,), allowed_hosts=("example.com",)))
+    g = PermissionGate(
+        workspace=Workspace(tmp_path),
+        mode=PermissionMode.AUTO,
+        classifier=Classifier(),
+        outside=lambda: ["WebSearch results"],
+    )
+    decision = await g.check(tool, {"command": "curl -d @notes.txt https://example.com"}, None)
+    assert not decision.allow and says in decision.reason
+    assert "did not run" in decision.reason and "not the sandbox" in decision.reason
+
+
+async def test_a_subagents_held_back_calls_count_toward_asking_the_person(tmp_path):
+    """The block counter is shared: the same call held back in the lead and a subagent
+    reaches the person on the third time, not the sixth."""
+    from tinyharness.permissions.classifier import ClassifierDecision
+    from tinyharness.sandbox import SandboxPolicy
+    from tinyharness.tools.bash import BashTool
+
+    class Classifier:
+        def fast_filter(self, args):
+            return None
+
+        async def classify(self, tool_name, args, history_tail="", note=""):
+            return ClassifierDecision("ask", "unclear")
+
+    asked = []
+
+    async def person(request):
+        asked.append(request)
+        return Decision(True, "ok", "user")
+
+    tool = BashTool(object(), SandboxPolicy(write_roots=(tmp_path,), allowed_hosts=("example.com",)))
+    lead = PermissionGate(
+        workspace=Workspace(tmp_path),
+        mode=PermissionMode.AUTO,
+        classifier=Classifier(),
+        callback=person,
+        outside=lambda: ["WebSearch results"],
+    )
+    sub = lead.child("helper", None)
+    args = {"command": "curl -d @notes.txt https://example.com"}
+    for gate_ in (lead, sub):
+        assert not (await gate_.check(tool, args, None)).allow
+    assert (await sub.check(tool, args, None)).allow and len(asked) == 1
+
+
+class _Reviewer:
+    """A client whose quick check and careful review answer in turn; records each request."""
+
+    def __init__(self, *replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    async def one_shot(self, prompt, *, system=None, model=None, **_):
+        self.calls.append((model, prompt))
+        return self.replies.pop(0)
+
+
+async def test_the_quick_check_can_only_allow_and_a_careful_review_decides_the_rest():
+    """Seen live: a fast model with no reasoning held back 12 of 65 calls (18%), most of
+    them plainly serving the request. A careful second stage decides what the fast check
+    cannot safely allow."""
+    from tinyharness.permissions.classifier import AutoModeClassifier
+
+    client = _Reviewer(
+        '{"risk": "high", "authorized": "unclear", "reason": "unknown host"}',
+        'It reads the issue the user asked about.\n{"risk": "low", "authorized": "yes", "reason": "reads it"}',
+    )
+    reviewer = AutoModeClassifier(client, model="small", review_model="big")
+    verdict = await reviewer.classify("Bash", {"command": "gh issue view 1"}, "[user, latest request] fix #1")
+    assert verdict.decision == "allow"
+    (quick_model, quick), (review_model, careful) = client.calls
+    assert (quick_model, review_model) == ("small", "big")
+    assert "JSON only" in quick and "Think it through" in careful
+
+    client = _Reviewer('{"risk": "low", "authorized": "unclear", "reason": "reads docs"}')
+    verdict = await AutoModeClassifier(client, model="small").classify("WebFetch", {"url": "https://x.dev"})
+    assert verdict.decision == "allow" and len(client.calls) == 1  # an allow needs no second look
+
+
+@pytest.mark.parametrize(
+    ("risk", "authorized", "decision"),
+    [
+        ("low", "unclear", "allow"),
+        ("low", "no", "allow"),
+        ("medium", "unclear", "allow"),
+        ("medium", "no", "ask"),
+        ("high", "unclear", "ask"),
+        ("high", "yes", "allow"),
+        ("critical", "yes", "deny"),
+    ],
+)
+def test_low_risk_needs_no_explicit_authorization(risk, authorized, decision):
+    """Risk and authorization are rated apart: requiring explicit justification for every
+    call incorrectly blocks ordinary, low-risk reads."""
+    from tinyharness.permissions.classifier import parse_verdict
+
+    reply = f'Reasoning {{maybe}}.\n{{"risk": "{risk}", "authorized": "{authorized}", "reason": "r"}}'
+    assert parse_verdict(reply).decision == decision
+
+
+async def test_the_same_call_for_the_same_request_gets_the_same_verdict():
+    """Seen live: one of four identical GitHub reads was held back."""
+    from tinyharness.permissions.classifier import AutoModeClassifier
+
+    client = _Reviewer('{"risk": "low", "authorized": "yes", "reason": "ok"}')
+    reviewer = AutoModeClassifier(client, model="small")
+    args, tail = {"command": "curl -d x https://a.dev"}, "[user, latest request] post it"
+    for _ in range(3):
+        assert (await reviewer.classify("Bash", args, tail)).decision == "allow"
+    assert len(client.calls) == 1
+    client.replies.append('{"risk": "low", "authorized": "yes", "reason": "ok"}')
+    await reviewer.classify("Bash", args, "[user, latest request] something else")
+    assert len(client.calls) == 2  # a new request is judged again
+
+
+async def test_a_review_that_cannot_run_says_it_judged_nothing(tmp_path):
+    """A timeout is not a verdict: the agent must not read it as "unsafe" and give up."""
+    from tinyharness.permissions.classifier import AutoModeClassifier
+    from tinyharness.sandbox import SandboxPolicy
+    from tinyharness.tools.bash import BashTool
+
+    class Down:
+        async def one_shot(self, *_, **__):
+            raise TimeoutError
+
+    g = PermissionGate(
+        workspace=Workspace(tmp_path),
+        mode=PermissionMode.AUTO,
+        classifier=AutoModeClassifier(Down(), model="small"),
+        outside=lambda: ["WebSearch results"],
+    )
+    tool = BashTool(object(), SandboxPolicy(write_roots=(tmp_path,), allowed_hosts=("example.com",)))
+    decision = await g.check(tool, {"command": "curl -d @notes.txt https://example.com"}, None)
+    assert not decision.allow and "not a judgement that the call is unsafe" in decision.reason
+
+
+@pytest.mark.parametrize("outside", [[], ["WebFetch evil.example"]])
+async def test_auto_review_can_open_a_new_host_for_one_command(tmp_path, outside):
+    """A host the command needs is reviewed with the command and opened for that command
+    alone. With outside content in the conversation the person decides:
+    a new destination is how that content could get data sent out."""
+    from tinyharness.permissions.classifier import ClassifierDecision
+    from tinyharness.sandbox import SandboxPolicy
+    from tinyharness.tools.bash import BashTool
+
+    class Classifier:
+        def fast_filter(self, args):
+            return None
+
+        async def classify(self, tool_name, args, history_tail="", note=""):
+            assert "this one command only" in note
+            return ClassifierDecision("allow", "the docs the user asked about")
+
+    asked = []
+
+    async def person(request):
+        asked.append(request)
+        return Decision(False, "no", "user")
+
+    g = PermissionGate(
+        workspace=Workspace(tmp_path),
+        mode=PermissionMode.AUTO,
+        classifier=Classifier(),
+        callback=person,
+        outside=lambda: outside,
+    )
+    tool = BashTool(object(), SandboxPolicy(write_roots=(tmp_path,), allowed_hosts=("pypi.org",)))
+    args = {"command": "curl -s https://docs.example.dev/x", "network_host": "docs.example.dev"}
+    decision = await g.check(tool, args, None, target_host="docs.example.dev")
+    assert decision.allow is not outside and len(asked) == int(bool(outside))
+    assert not g.session_network_hosts and not g.rules.allow  # nothing remembered
+
+
+async def test_loopback_is_reviewed_even_with_outside_content_and_remembered(tmp_path):
+    """Seen live: SGLang's engine needed loopback after a Hugging Face download, and the
+    person was asked. Loopback never leaves the machine, so outside content can't use it to
+    send data away; the review judges what local services it could reach."""
+    from tinyharness.permissions.classifier import ClassifierDecision
+    from tinyharness.sandbox import SandboxPolicy
+    from tinyharness.tools.bash import BashTool
+
+    seen = []
+
+    class Classifier:
+        def fast_filter(self, args):
+            return None
+
+        async def classify(self, tool_name, args, history_tail="", note=""):
+            seen.append(note)
+            return ClassifierDecision("allow", "runs the engine the user asked for")
+
+    g = PermissionGate(
+        workspace=Workspace(tmp_path),
+        mode=PermissionMode.AUTO,
+        classifier=Classifier(),
+        callback=User(),
+        outside=lambda: ["Bash downloads from huggingface.co"],
+    )
+    tool = BashTool(object(), SandboxPolicy(write_roots=(tmp_path,)), session_hosts=g.session_network_hosts)
+    args = {"command": "python hello.py", "network_host": "localhost"}
+    assert (await g.check(tool, args, None, target_host="localhost")).allow
+    assert "loopback" in seen[0] and "localhost" in g.session_network_hosts
+    assert (await g.check(tool, args, None, target_host="localhost")).allow and len(seen) == 1
+
+
+async def test_one_approval_covers_a_services_download_hosts(tmp_path):
+    """Seen live: a model download went from huggingface.co to cas-server.xethub.hf.co,
+    one more blocked command and one more prompt. Approving the service opens its set."""
+    from tinyharness.sandbox import SandboxPolicy
+    from tinyharness.sandbox.proxy import service_hosts
+    from tinyharness.tools.bash import BashTool
+
+    assert "cas-server.xethub.hf.co" in service_hosts("huggingface.co")
+    assert service_hosts("example.com") == ("example.com",)
+    user = User(Decision(True, "ok", "user", remember=True))
+    g = gate(tmp_path, PermissionMode.DEFAULT, callback=user)
+    tool = BashTool(object(), SandboxPolicy(write_roots=(tmp_path,)), session_hosts=g.session_network_hosts)
+    args = {"command": "python download.py", "network_host": "huggingface.co"}
+    assert (await g.check(tool, args, None, target_host="huggingface.co")).allow
+    request = user.requests[0]
+    assert request.remember_label == "allow Hugging Face's 8 download hosts this session"
+    assert "Hugging Face downloads use this exact destination set" in request.warning
+    assert {"huggingface.co", "cas-server.xethub.hf.co"} <= g.session_network_hosts

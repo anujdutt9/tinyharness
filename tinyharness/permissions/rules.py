@@ -73,6 +73,10 @@ class PermissionRules:
             return "allow"
         return None
 
+    def hidden_tools(self) -> set[str]:
+        """Tools a deny rule refuses outright (`deny = ["WebFetch"]`): not offered at all."""
+        return {rule.tool for rule in self.deny if rule.pattern is None and rule.tool != "*"}
+
     def add_allow(self, rule: Rule) -> None:
         if rule not in self.allow:
             self.allow.append(rule)

@@ -1,4 +1,4 @@
-"""Read, Pdf, Write and Edit act on exactly the path that was approved; writes are all or nothing."""
+"""Read, Write and Edit act on exactly the path that was approved; writes are all or nothing."""
 
 import errno
 import os
@@ -10,7 +10,6 @@ from conftest import call, make_ctx
 from tinyharness.permissions import PermissionGate, PermissionMode
 from tinyharness.tools.base import ToolError
 from tinyharness.tools.edit import EditTool
-from tinyharness.tools.pdf import PdfTool
 from tinyharness.tools.read import ReadTool
 from tinyharness.tools.write import WriteTool
 from tinyharness.workspace import Workspace, files
@@ -95,7 +94,7 @@ async def test_without_a_gate_paths_are_resolved_as_before(project, tmp_path):
 
 
 @pytest.mark.parametrize("swap", ["directory", "file"])
-@pytest.mark.parametrize(("tool", "name"), [(ReadTool(), "f.txt"), (PdfTool(), "doc.pdf")])
+@pytest.mark.parametrize(("tool", "name"), [(ReadTool(), "f.txt"), (ReadTool(), "doc.pdf")])
 async def test_reads_refuse_a_path_that_became_a_symlink(project, tool, name, swap):
     """A read approved inside the project can't be pointed at a file outside it."""
     root, outside = project

@@ -67,7 +67,8 @@ from tinyharness.llm.textcalls import (
 )
 from tinyharness.llm.types import LLMError, RunawayOutputError, StreamChunk
 from tinyharness.llm.usage import Usage
-from tinyharness.security import mask_secrets
+from tinyharness.permissions.modes import PermissionMode
+from tinyharness.security import mask_secrets, redact_settings
 from tinyharness.tools.base import Tool, ToolContext, ToolError, ToolOutput, note_outside
 from tinyharness.tools.todo import format_todos
 
@@ -114,6 +115,14 @@ STEP_LIMIT_NOTE = (
     "what is left unfinished."
 )
 STEP_LIMIT_RESULT = "(not run: the step limit was reached)"
+# Answer to a call plan mode hid, from the main agent. The turn ends there, leaving the
+# switch to build to the user (Done "plan_mode"). Seen live: told only "unknown or
+# unavailable tool", a model decided the session had no write access and printed a whole
+# notebook into its reply instead.
+PLAN_MODE_CALL = (
+    "(not run: plan mode is on, so nothing changes files or runs commands. The turn ended "
+    "here; the user switches modes when they want you to build, and you'll be told)"
+)
 # A tool failing the same way again: the model is told to change approach after NOTE_AT
 # failures in a row. The turn isn't stopped for it; the step limit bounds a loop.
 REPEAT_NOTE_AT = 2
@@ -122,7 +131,7 @@ _CHANGE_APPROACH = {
     "earlier edits changed it), or edit a smaller block, or rewrite the file with Write.",
     "Bash": "Read the error and fix the command, or try a different command or tool.",
 }
-RETRY_IMAGE_SIDE = 1568  # px: what images shrink to after a provider rejects one (Anthropic's sweet spot)
+RETRY_IMAGE_SIDE = 1568  # px: what images shrink to after a provider rejects one
 MAX_STOP_BLOCKS = 2  # a Stop hook can keep a turn going this many times
 # A reply ending in a tool call written as text that couldn't be read (seen live from Gemma 4:
 # a made-up tool, a command that didn't parse). Answered this many times per turn.
@@ -133,6 +142,7 @@ UNREADABLE_CALL_NOTE = (
     "Make the call through the tool-calling interface, with one of the available tools: {tools}."
 )
 TEAMMATE_NOTE = "<teammate-message"  # how the team board delivers a teammate's message
+HARNESS_NOTE = "[tinyharness]"  # how the harness's own notes to the model start
 
 
 @dataclass
@@ -154,6 +164,12 @@ class LoopDeps:
     # so two never write at the same moment, while their model calls overlap freely.
     write_lock: asyncio.Lock | None = None
     turn_id: str = ""
+    # The main agent's turn: in plan mode, a call to a tool that changes things ends the turn
+    # so the user can choose to build (PLAN_MODE_CALL). A subagent keeps researching instead.
+    plan_handoff: bool = False
+    # A session with a plan uses this hard precondition before ordinary permissions.
+    # Empty means the call may continue; a message explains how the model can recover.
+    plan_guard: Callable[[Tool[Any], Any], str] | None = None
 
 
 @dataclass
@@ -172,6 +188,7 @@ class _Batch:
     approved: list[_ApprovedCall] = field(default_factory=list)
     interrupted: bool = False  # the user said "no": skip everything else in this turn
     feedback: str = ""  # ...and optionally told the agent what to do instead
+    build_requested: bool = False  # it called a tool plan mode hides: end the turn after this batch
 
 
 @dataclass
@@ -232,6 +249,8 @@ async def _run_agent_loop(
         prompt = f"{prompt}\n\n{submitted['context'].strip()}"  # an extension's note for the model
     deps.transcript.write("user", text=prompt, images=[image.name for image in images])
     history.append(Message(role="user", content=prompt, images=list(images)))
+    # A subagent's context is its own copy, so each agent's commands ask its own gate.
+    deps.ctx.ask_network = lambda tool, args, host: _ask_network(deps, history, tool, args, host)
 
     stuck_once = False  # a reply got stuck this turn and the model was asked to carry on
     empty_replies = 0  # empty replies in a row
@@ -252,7 +271,10 @@ async def _run_agent_loop(
 
         # 1. Ask the model, streaming text to the caller as it arrives. If the provider
         #    says the conversation no longer fits, summarize it and ask once more.
-        available = {t.name: t for t in deps.tools.available(deps.gate.mode, deps.allowed_tools)}
+        available = {
+            t.name: t
+            for t in deps.tools.available(deps.gate.mode, deps.allowed_tools, deps.gate.rules.hidden_tools())
+        }
         turn = _Turn()
         try:
             async for event in _ask_model(history, available, deps, turn):
@@ -319,7 +341,9 @@ async def _run_agent_loop(
         if not calls and text:
             # A call written as text (the server's tool-call parser failed on it) would
             # otherwise be taken for the final answer.
-            text, calls = recover_calls(text, functools.partial(_schema, available))
+            text, calls = recover_calls(
+                text, functools.partial(_schema, available), functools.partial(_from_json, available)
+            )
             if calls:
                 deps.transcript.write("recovered_calls", tools=[c.name for c in calls])
                 # Saved reasoning would be sent back in place of these calls, without them.
@@ -437,6 +461,9 @@ async def _run_agent_loop(
 
         approved = batch.approved
         if not approved:
+            if batch.build_requested:
+                yield Done(reason="plan_mode")
+                return
             continue
 
         # 4. Run the approved calls. Read-only batches run concurrently.
@@ -457,7 +484,9 @@ async def _run_agent_loop(
         try:
             async for i, (result, is_error) in _in_order_finished(approved, parallel, deps):
                 item = approved[i]
-                output = mask_secrets(result.text, _config_key(deps))
+                output = _hide_outside_secrets(
+                    item.tool, item.args, mask_secrets(result.text, _config_key(deps)), deps
+                )
                 after = await _fire_hook(
                     deps,
                     "PostToolUse",
@@ -503,6 +532,13 @@ async def _run_agent_loop(
             for i, item in enumerate(approved):
                 if i in finished:
                     history.add_tool_result(item.call.id, *finished[i])
+        if batch.build_requested:  # its read-only neighbors ran; now the user decides
+            yield Done(reason="plan_mode")
+            return
+        if deps.ctx.hand_back:  # a plan ready for review: the user's turn now
+            reason, deps.ctx.hand_back = deps.ctx.hand_back, ""
+            yield Done(reason=reason)
+            return
 
     # Out of steps. One more reply, without running tools, so the work so far isn't lost:
     # a subagent's answer is its last text, and the caller sees nothing else.
@@ -516,7 +552,10 @@ async def _wrap_up(history: History, deps: LoopDeps) -> AsyncGenerator[Event, No
     history.append(Message(role="user", content=STEP_LIMIT_NOTE))
     # The tools are still described (some APIs require that once tool calls are in the
     # history); any it calls anyway are dropped.
-    available = {t.name: t for t in deps.tools.available(deps.gate.mode, deps.allowed_tools)}
+    available = {
+        t.name: t
+        for t in deps.tools.available(deps.gate.mode, deps.allowed_tools, deps.gate.rules.hidden_tools())
+    }
     turn = _Turn()
     try:
         async for event in _ask_model(history, available, deps, turn):
@@ -585,6 +624,13 @@ def _error_kind(output: str) -> str:
     return re.sub(r"\d+", "N", first)[:80]
 
 
+def _hidden_by_plan(deps: LoopDeps, name: str) -> bool:
+    """Whether `name` is a tool the session has but plan mode doesn't offer."""
+    everything = {n: t for n in deps.tools.names() if (t := deps.tools.get(n)) is not None}
+    tool = _find_tool(everything, name)
+    return tool is not None and not tool.read_only
+
+
 def _find_tool(available: dict[str, Tool[Any]], name: str) -> Tool[Any] | None:
     """The tool a call names; models sometimes get the case wrong ("read")."""
     if name in available:
@@ -595,6 +641,11 @@ def _find_tool(available: dict[str, Tool[Any]], name: str) -> Tool[Any] | None:
 def _schema(available: dict[str, Tool[Any]], name: str) -> dict[str, Any] | None:
     tool = _find_tool(available, name)
     return tool.input_schema() if tool is not None else None
+
+
+def _from_json(available: dict[str, Tool[Any]], name: str) -> bool:
+    tool = _find_tool(available, name)
+    return tool is not None and tool.taken_from_json
 
 
 def _arguments(call: ToolCall, *, repair: bool) -> dict[str, Any] | json.JSONDecodeError:
@@ -867,6 +918,15 @@ async def _prepare_call(
         return
 
     tool = _find_tool(available, call.name)
+    if (
+        tool is None
+        and deps.plan_handoff
+        and deps.gate.mode == PermissionMode.PLAN
+        and _hidden_by_plan(deps, call.name)
+    ):
+        batch.build_requested = True
+        yield reject(PLAN_MODE_CALL)
+        return
     if tool is None:
         yield reject(
             f"error: unknown or unavailable tool {call.name!r}. Available: {', '.join(sorted(available))}"
@@ -898,6 +958,12 @@ async def _prepare_call(
         tool_call=call.id,
     )
 
+    if deps.plan_guard is not None and (problem := deps.plan_guard(tool, args)):
+        deps.transcript.write("permission", tool=tool.name, allow=False, source="plan", reason=problem)
+        yield PermissionDecision(tool.name, False, "plan", problem)
+        yield reject(f"denied by plan: {problem}")
+        return
+
     started = time.monotonic()
     with trace_scope(
         model_call=model_call or None,
@@ -912,7 +978,7 @@ async def _prepare_call(
             target_host=tool.target_host(args),
             approval_boundary=tool.approval_boundary(args),
             summary=summary,
-            history_tail=_tail(history),
+            history_tail=_tail(history, current=call.id),
         )
         deps.transcript.write(
             "permission",
@@ -971,8 +1037,11 @@ async def _execute(item: _ApprovedCall, deps: LoopDeps) -> tuple[ToolOutput, boo
 
 
 def summary_notes(ctx: ToolContext) -> str:
-    """Current state a summary must keep: the todo list as it is now."""
-    return f"[current todo list]\n{format_todos(ctx.todos)}" if ctx.todos else ""
+    """Current state a summary must keep: the todo list and running background jobs."""
+    notes = [f"[current todo list]\n{format_todos(ctx.todos)}" if ctx.todos else ""]
+    notes.append(ctx.jobs.summary() if ctx.jobs is not None else "")
+    notes.append(ctx.plan_summary)
+    return "\n\n".join(note for note in notes if note)
 
 
 def _account(turn: _Turn, deps: LoopDeps) -> TokenUsage:
@@ -1032,6 +1101,22 @@ async def _fire_hook(deps: LoopDeps, event: str, payload: dict[str, Any]) -> dic
     return await deps.hooks.fire(event, payload) if deps.hooks is not None else None
 
 
+def _hide_outside_secrets(tool: Tool[Any], args: Any, output: str, deps: LoopDeps) -> str:
+    """For a call on a file outside the project (~/.zshrc, a tool's config), hide secret
+    values the session doesn't know about. Seen live: auto mode read a user's ~/.zshrc to
+    add an alias, and Edit's "the changed lines as they are now" showed a key from it."""
+    target = tool.target_path(args)
+    if not target or deps.ctx.workspace.is_trusted(target):
+        return output
+    hidden = redact_settings(output)
+    if hidden == output:
+        return output
+    return (
+        f"{hidden}\n(secret values in this file are shown as [REDACTED]; when editing it, leave "
+        "those lines out of old_string)"
+    )
+
+
 def _config_key(deps: LoopDeps) -> dict[str, str]:
     """Resolved keys that are not necessarily present in the environment."""
     return deps.ctx.config.credential_values()
@@ -1062,14 +1147,56 @@ def _shrink_images(history: History) -> int:
     return changed
 
 
-def _tail(history: History, items: int = 8, chars: int = 500) -> str:
-    """Recent context for the auto-mode classifier: the user's messages and the agent's
-    tool calls. Not tool output, the agent's own text or teammates' messages: a web page
-    or file could say "the user already approved this", and the classifier would read it."""
-    lines: list[str] = []
+async def _ask_network(
+    deps: LoopDeps, history: History, tool: Tool[Any], args: dict[str, Any], host: str
+) -> bool:
+    """A running command wants `host`, which its sandbox doesn't allow yet (the proxy holds the
+    connection meanwhile). Decided exactly as a call naming it as `network_host` would be:
+    the same rules, outside-content check, auto review and question, while the command runs."""
+    raw = {**args, "network_host": host}
+    try:
+        summary = tool.describe(tool.parse(raw))
+    except (ToolError, ValidationError):
+        summary = f"{tool.name}(network: {host})"
+    deps.transcript.write("permission_start", tool=tool.name, host=host, live=True)
+    decision = await deps.gate.check(
+        tool, raw, None, target_host=host, summary=summary, history_tail=_tail(history)
+    )
+    deps.transcript.write(
+        "permission", tool=tool.name, allow=decision.allow, source=decision.source, reason=decision.reason,
+        host=host, live=True,
+    )  # fmt: skip
+    return decision.allow
+
+
+def _tail(
+    history: History, current: str = "", calls: int = 6, chars: int = 500, request_chars: int = 2000
+) -> str:
+    """Context for the auto-mode classifier: what the user asked, then what the agent did.
+
+    Only the user's messages and the agent's tool calls. Not tool output, the agent's own
+    text, teammates' messages or the harness's notes (a background job's, say): a web page or file could say "the user already approved
+    this", and the classifier would read it. Each part has its own budget, so a long run of
+    tool calls can't push the user's request out (seen live: after 13 calls the classifier
+    blocked the setup the user asked for). The call under review (`current`) is left out,
+    and the calls beside it in the same step are labeled as context: they were read as
+    part of the decision, and one fetch was blocked as "a repeated call" of itself.
+    """
+    requests: list[str] = []
+    earlier: list[str] = []
+    same_step: list[str] = []
     for m in history.messages:
-        if m.role == "user" and m.content and not m.content.startswith(TEAMMATE_NOTE):
-            lines.append(f"[user] {m.content[:chars]}")
-        elif m.role == "assistant":
-            lines += [f"[agent called] {c.name}({c.arguments[:200]})" for c in m.tool_calls]
-    return "\n".join(lines[-items:])
+        if m.role == "user" and m.content and not m.content.startswith((TEAMMATE_NOTE, HARNESS_NOTE)):
+            requests.append(m.content)
+        elif m.role == "assistant" and m.tool_calls:
+            step = current and any(c.id == current for c in m.tool_calls)
+            for c in m.tool_calls:
+                if c.id == current:
+                    continue
+                (same_step if step else earlier).append(f"{c.name}({c.arguments[:200]})")
+    lines = [f"[user] {text[:chars]}" for text in requests[-3:-1]]
+    if requests:
+        lines.append(f"[user, latest request] {requests[-1][:request_chars]}")
+    lines += [f"[agent called] {call}" for call in earlier[-calls:]]
+    lines += [f"[same step, not under review] {call}" for call in same_step[:calls]]
+    return "\n".join(lines)

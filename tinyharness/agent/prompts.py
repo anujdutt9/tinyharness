@@ -117,8 +117,12 @@ def build_system_prompt(
         parts.append(extra)
     parts.append(
         "# This session\n"
-        f"Working directory: {working_dir} (files you create go here unless the user says otherwise)\n"
-        f"Scratch directory, deleted when the session ends: {scratch_dir}\n"
+        f"Working directory: {working_dir} (files you create go here unless the user says otherwise, "
+        "and so do the scripts and sources that produce them, such as a notebook's generator or a "
+        "page's build script, so the user can rerun or change them)\n"
+        f"Scratch directory, deleted when the session ends: {scratch_dir} (only for throwaway "
+        "files: downloads to inspect, logs, screenshots, quick experiments. Tools such as pip, npm "
+        "and Playwright already keep their downloads in a persistent cache: don't point them here)\n"
         f"Today's date: {datetime.date.today().isoformat()}"
     )
     return "\n\n".join(parts)

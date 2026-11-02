@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
@@ -19,6 +19,9 @@ from prompt_toolkit.layout.processors import BeforeInput
 from prompt_toolkit.shortcuts.choice_input import ChoiceInput
 
 from tinyharness.cli.theme import BRAND, PROMPT, PT_STYLE, SUBTLE
+
+if TYPE_CHECKING:
+    from tinyharness.tools.ask import AskQuestion
 
 T = TypeVar("T")
 
@@ -208,3 +211,61 @@ async def ask(
     except (KeyboardInterrupt, EOFError):
         return ""
     return text.strip()
+
+
+_OWN_ANSWER = "\x00own"  # "Type your own answer…"
+
+
+async def answer_question(question: AskQuestion, number: int, total: int) -> str | None:
+    """One of the agent's questions (the Ask tool), as a picker that starts on the
+    recommended answer: number keys or arrows and Enter pick one; the last row lets you type
+    your own. Cleared from the screen once answered. None on Esc: answer in chat."""
+    while True:
+        try:
+            choice = await _question_picker(question, number, total).run_async()
+        except (KeyboardInterrupt, EOFError):
+            return None
+        if choice != _OWN_ANSWER:
+            return choice
+        if own := await ask(question.question, hint="your answer (empty goes back to the options)"):
+            return own
+
+
+def _question_picker(question: AskQuestion, number: int, total: int) -> Application[str | None]:
+    keys = KeyBindings()
+    values = [option.label for option in question.options] + [_OWN_ANSWER]
+
+    def bind(key: str, result: str | None) -> None:
+        @keys.add(key, eager=True)
+        def _(event: KeyPressEvent) -> None:
+            event.app.exit(result=result)
+
+    for i, value in enumerate(values, start=1):
+        bind(str(i), value)
+    bind("escape", None)
+    options: list[tuple[str, FormattedText]] = []
+    for i, option in enumerate(question.options):
+        label = [("", option.label)]
+        if i == 0:
+            label.append((SUBTLE, "  recommended"))
+        if option.description:
+            label.append((SUBTLE, f"  · {option.description}"))
+        options.append((option.label, FormattedText(label)))
+    options.append((_OWN_ANSWER, FormattedText([("", "Type your own answer…")])))
+    counter = f"Question {number} of {total} · " if total > 1 else ""
+    picker = ChoiceInput[str | None](
+        message=FormattedText(
+            [
+                (SUBTLE, f" {counter}{question.header}  ·  esc answers in chat\n"),
+                ("bold", f" {question.question}"),
+            ]
+        ),
+        options=options,
+        default=question.options[0].label,
+        style=PT_STYLE,
+        symbol=PROMPT,
+        key_bindings=keys,
+    )
+    app = picker._create_application()  # ChoiceInput has no option to erase itself; its app does
+    app.erase_when_done = True
+    return app

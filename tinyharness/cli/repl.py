@@ -16,10 +16,12 @@ import contextlib
 import inspect
 import json
 import logging
+import os
 import re
 import shlex
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
@@ -31,6 +33,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application, get_app
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, AnyFormattedText, FormattedText, StyleAndTextTuples
@@ -54,6 +57,7 @@ from tinyharness.cli.commands import COMMANDS
 from tinyharness.cli.markdown import render as render_markdown
 from tinyharness.cli.render import Renderer, dollars, tokens, without_links
 from tinyharness.cli.theme import (
+    MODE_HINT,
     MODE_LABEL,
     MODE_STYLE,
     PROMPT,
@@ -66,6 +70,7 @@ from tinyharness.cli.theme import (
 from tinyharness.cli.widgets import pick
 from tinyharness.events import (
     AssistantText,
+    Done,
     Event,
     Reasoning,
     SubagentUpdate,
@@ -85,12 +90,20 @@ from tinyharness.tools.read import load_image
 log = logging.getLogger(__name__)
 
 EXIT_CONFIRM_SECONDS = 2.0
+RESIZE_SETTLE_SECONDS = 0.15  # a resize this long ago with none since: redraw for it
 _CONFIRM_AUTO = "\x00confirm-auto-mode"  # returned by the prompt when Shift+Tab reaches auto mode
 _PAUSE = "\x00pause"  # returned by the prompt when a question (approval) needs the keyboard
-# Commands that don't touch the conversation, so they can run while the agent works.
-_SAFE_WHILE_RUNNING = {
-    "/help", "/mode", "/context", "/theme", "/thinking", "/cwd", "/tools", "/skills", "/output", "/btw",
-}  # fmt: skip
+BUILD_PLAN = "Build the approved plan."  # sent for the user who picks "build it" at the hand-off
+# Built-in commands run at once while the agent works (seen live: /effort "has to wait"),
+# except these, which replace or rewrite the conversation the running turn is adding to:
+# they run as soon as the turn ends.
+_AFTER_TURN = {"/clear", "/sessions", "/compact"}
+# A new model takes over from the next turn: the running one finishes on the model it began with.
+_NEXT_TURN = {"/model", "/provider"}
+# Commands that wait on the model run under the input box like a turn, so what's typed
+# meanwhile waits for them. Seen live: a message typed during /compact landed on its
+# spinner line, and Enter added a newline instead of sending it.
+_IN_BACKGROUND = {"/compact"}
 
 _MODE_ICON = {
     PermissionMode.ASK: "○",
@@ -172,6 +185,9 @@ class Aside:
 
     question: str
     answer: str | None = None
+    # Asked while the agent worked: it's answered from the steps finished by then. Seen
+    # live: "I'm not editing any file yet" while an edit was being written.
+    mid_turn: bool = False
 
 
 class _CompactPrompt(PromptSession[str]):
@@ -214,6 +230,44 @@ class _CompactPrompt(PromptSession[str]):
         )
         return Layout(HSplit([above, layout.container]), focused_element=layout.current_window)
 
+    def _create_application(self, *args: Any, **kwargs: Any) -> Application[str]:
+        """Redraw once a resize settles. Seen live in iTerm2: dragging the window edge sent
+        a resize every few milliseconds, and each redraw (or a spinner's, meanwhile) was
+        for a size the window had already left, so old boxes piled up. Held back until the
+        size stops changing, the box is erased and redrawn once, from the width it was
+        drawn at to the one it ends at (`_count_reflowed_rows`)."""
+        app = super()._create_application(*args, **kwargs)
+        resize, render = app._on_resize, app.renderer.render
+        waiting: list[asyncio.TimerHandle] = []
+
+        def settled() -> None:
+            waiting.clear()
+            if not (pushed_up := _count_reflowed_rows(app)):
+                resize()
+                return
+            # prompt_toolkit's resize, with a move back down to where the box was drawn
+            # between the erase and the redraw (see `_count_reflowed_rows`). Scrolling the
+            # screen down first (SD) brings the conversation down with it, so no gap opens
+            # between them; the blank rows go to the top of the screen instead.
+            app.renderer.erase(leave_alternate_screen=False)
+            app.output.write_raw(f"\x1b[{pushed_up}T" + "\n" * pushed_up)
+            app.output.flush()
+            app._request_absolute_cursor_position()
+            app._redraw()
+
+        def on_resize() -> None:
+            for timer in waiting:
+                timer.cancel()
+            waiting[:] = [asyncio.get_running_loop().call_later(RESIZE_SETTLE_SECONDS, settled)]
+
+        def render_when_settled(app: Application[Any], layout: Layout, is_done: bool = False) -> None:
+            if not waiting or is_done:
+                render(app, layout, is_done)
+
+        app._on_resize = on_resize  # type: ignore[method-assign]
+        app.renderer.render = render_when_settled  # type: ignore[method-assign]
+        return app
+
     def _get_default_buffer_control_height(self) -> Dimension:
         width = max(get_app().output.get_size().columns - 6, 10)  # frame + prompt
         lines = sum(len(line) // width + 1 for line in self.default_buffer.document.lines)
@@ -225,6 +279,40 @@ class _CompactPrompt(PromptSession[str]):
         menu = 0 if state is None or get_app().is_done else len(state.completions)
         height = lines + min(menu, self.reserve_space_for_menu)
         return Dimension(min=height, max=height, preferred=height)
+
+
+def _count_reflowed_rows(app: Application[Any]) -> int:
+    """Before prompt_toolkit erases the box for a narrower terminal: count the rows its last
+    drawing takes now. Terminals rewrap each line to the new width, so a full-width frame
+    line becomes two rows, but the erase moves up by the rows it drew. Seen live: dragging
+    the window narrower left a stack of broken frame lines above the box.
+
+    Returns how far the rewrap pushed the drawing up, for the redraw to move back down.
+    Terminals differ, and both cases were measured:
+    - iTerm2 keeps the bottom row fixed: rows added anywhere in the drawing push it all
+      up, so only the rows above the cursor lie between it and the drawing's top. Left
+      alone, the box climbed a few rows per resize until its top line went into the
+      scrollback, out of the erase's reach, and came back into view on widening.
+    - xterm.js (VS Code's terminal) keeps the top fixed and moves the cursor down by every
+      row added. Counting those elsewhere would erase transcript lines, so this count is
+      used only where the terminal says it's xterm.js."""
+    renderer = app.renderer
+    screen, size = renderer._last_screen, renderer._last_size
+    columns = app.output.get_size().columns
+    if screen is None or size is None or columns <= 0 or columns >= size.columns:
+        return 0  # nothing drawn yet, or wider: nothing rewraps onto more rows
+    cursor = renderer._cursor_pos
+    added = []
+    for y in range(screen.height):
+        row = screen.data_buffer.get(y)
+        used = max((x + 1 for x, cell in row.items() if cell.char.strip()), default=0) if row else 0
+        added.append(max(-(-used // columns) - 1, 0))  # ceil(used / columns) rows, less the one it had
+    if os.environ.get("TERM_PROGRAM") == "vscode":
+        renderer._cursor_pos = Point(x=cursor.x % columns, y=cursor.y + sum(added))
+        return 0
+    above = sum(added[: cursor.y]) + cursor.x // columns  # the cursor's own line rewraps around it
+    renderer._cursor_pos = Point(x=cursor.x % columns, y=cursor.y + above)
+    return sum(added)
 
 
 @cache
@@ -242,9 +330,12 @@ class Repl:
         self._context_approximate = False
         self._exit_armed_until = 0.0  # a second Ctrl-C before this time exits
         self._draft = ""  # pre-filled into the next prompt (a message that wasn't sent)
+        self._after_turn: list[str] = []  # commands typed mid-turn that wait for it to end
         self.expanded = False  # ctrl+o: the last output / running subagents, above the input box
         # Started with --mode auto counts as agreeing to it; otherwise it's asked once.
         self.auto_confirmed = session.mode == PermissionMode.AUTO
+        self._plan_ready = False  # the last turn ended with a plan to review (hand_off_plan)
+        self._last_done = ""  # why the last turn ended (events.Done.reason)
         self.auto_declined = False  # said no once: Shift+Tab skips auto mode (/mode auto still asks)
         self.git = git_status(session.workspace.root)  # refreshed after each turn, not on every redraw
         self._prompt: _CompactPrompt | None = None
@@ -254,6 +345,7 @@ class Repl:
         self._sending_now = False  # Esc stopped the turn to send the waiting messages
         self.suggestion = ""  # the likely next message, shown in the empty input box (Tab takes it)
         self._suggesting: asyncio.Task[None] | None = None
+        self._offering: asyncio.Task[None] | None = None  # questions from a prose reply (_offer_questions)
         self.aside: Aside | None = None  # the /btw answer shown above the input box (Esc closes it)
         self._answering: asyncio.Task[None] | None = None
         self._live_input_tokens = 0  # estimated current call, until its TokenUsage arrives
@@ -266,18 +358,26 @@ class Repl:
     def _toolbar(self) -> StyleAndTextTuples:
         if time.monotonic() < self._exit_armed_until:
             return [("class:toolbar.warn", "  Press Ctrl+C again to exit")]
-        mode = self.session.mode
-        key, hint = ("ctrl+c", " to stop") if self.turn_running else ("shift+tab", " to switch")
-        left: StyleAndTextTuples = [
-            ("class:mode", f"  {_MODE_ICON[mode]} {MODE_LABEL[mode]}"),
-            ("class:toolbar.dim", " · "),
-            ("class:toolbar.key", key),
-            ("class:toolbar.dim", hint),
-        ]
+        left = self._mode_part()
         width = get_app().output.get_size().columns
         right = self._status(width - _cells(left) - 4)
         gap = max(width - _cells(left) - _cells(right) - 2, 2)
         return [*left, ("", " " * gap), *right, ("", "  ")]
+
+    def _mode_part(self) -> StyleAndTextTuples:
+        """`⏸ plan · Token refresh · shift+tab to approve`: the mode, and what the key does."""
+        mode = self.session.mode
+        # In plan mode with a plan written, the footer names it: leaving plan mode approves it.
+        plan = self.session.plan_tool.current if mode == PermissionMode.PLAN else None
+        key, hint = ("ctrl+c", " to stop") if self.turn_running else ("shift+tab", " to switch")
+        if plan is not None and not self.turn_running:
+            hint = " to approve"
+        left: StyleAndTextTuples = [("class:mode", f"  {_MODE_ICON[mode]} {MODE_LABEL[mode]}")]
+        if plan is not None:
+            title = plan.title if len(plan.title) <= 40 else plan.title[:39] + "…"
+            left += [("class:toolbar.dim", " · "), ("", title + (" (edited)" if plan.edited() else ""))]
+        left += [("class:toolbar.dim", " · "), ("class:toolbar.key", key), ("class:toolbar.dim", hint)]
+        return left
 
     def _status(self, room: int) -> StyleAndTextTuples:
         """`sonnet-5 · sandbox · ⎇ main ✱ · 38% context · 12.3k out · $0.42`, dropping the
@@ -291,7 +391,11 @@ class Repl:
         if session.sandbox is not None:
             parts.append((3, [("class:toolbar.ok", "sandbox")]))
         elif "Bash" in session.tools.names():
-            parts.append((4, [("class:toolbar.err", "no sandbox")]))
+            parts.append((4, [("class:toolbar.warn", "sandbox off")]))
+        if running := len(session.jobs.running()):
+            parts.append(
+                (4, [("class:toolbar.brand", f"{running} job{'s' if running != 1 else ''} · /jobs")])
+            )
         if self.git is not None:
             branch, dirty = self.git
             parts.append(
@@ -362,6 +466,17 @@ class Repl:
             if self._turn is not None:
                 self._turn.cancel()
 
+        @keys.add("escape", "/")
+        def _escape_then_slash(event: KeyPressEvent) -> None:
+            """Esc, then / before Esc's wait for a second key ran out (Alt+key arrives as
+            Esc and the key). Seen in review: prompt_toolkit's Meta+/ took both keys, so
+            "/cost" went to the agent as "cost". Esc does what it does, then / is typed."""
+            if self.aside is not None:
+                _close_aside(event)
+            elif self.turn_running and self.session.pending_steering:
+                _send_now(event)
+            event.current_buffer.insert_text("/")
+
         @keys.add("escape", "enter")
         @keys.add("c-j")
         def _newline(event: KeyPressEvent) -> None:
@@ -386,6 +501,12 @@ class Repl:
             elif is_command(buffer.text):
                 buffer.start_completion(select_first=False)
 
+        @keys.add("c-b", filter=Condition(lambda: self.session.jobs.has_foreground()))
+        def _to_background(event: KeyPressEvent) -> None:
+            """Move the running command to the background: it keeps going as a job, and the
+            agent carries on (Ctrl+B otherwise moves the cursor back)."""
+            self.session.jobs.detach_foreground()
+
         @keys.add("c-t")
         def _toggle_thinking(event: KeyPressEvent) -> None:
             """Show or hide the model's reasoning (turning it on shows the latest)."""
@@ -406,7 +527,8 @@ class Repl:
                 self._draft = event.current_buffer.text
                 event.app.exit(result=_CONFIRM_AUTO)
                 return
-            self.session.set_mode(mode)
+            if notice := self.session.set_mode(mode):
+                self.console.print(f"\n  [ok]✓[/] {notice}\n")
 
         history_file = home_dir() / "repl_history"
         history_file.parent.mkdir(parents=True, exist_ok=True)
@@ -504,7 +626,7 @@ class Repl:
         if self.turn_running:
             return [(SUBTLE, "Message the agent: it gets this before its next step")]
         if self.suggestion:
-            return [(SUBTLE, self.suggestion), ("class:toolbar.dim", "  · tab to use")]
+            return [(SUBTLE, self.suggestion)]
         return [(SUBTLE, "Ask anything, or type / for commands")]
 
     # -- side calls -------------------------------------------------------------
@@ -513,7 +635,7 @@ class Repl:
         """/btw: answered in the background, shown above the input box until Esc, so the
         input box and a running turn carry on and nothing is left in the scrollback."""
         self.close_aside()
-        aside = Aside(question)
+        aside = Aside(question, mid_turn=self.turn_running)
         if self._prompt is not None:
             self.aside = aside
         else:  # no input box to show it above: print it when it comes
@@ -576,10 +698,38 @@ class Repl:
                 note = "esc to close · /output prints it all"
             else:
                 note = "esc to close · not added to the conversation"
+            if aside.mid_turn:
+                note = f"as of its last finished step · {note}"
             body = Text("\n").join(lines)
         with self.console.capture() as captured:
             self.console.print(self._aside_panel(aside, body, note), width=width, highlight=False)
         return without_links(captured.get().rstrip("\n"))
+
+    def _offer_questions(self) -> None:
+        """A plan-mode turn that ended asking in prose: the same picker Ask shows, once the
+        questions are read (`Session.questions_in_reply`), and the picks go as the next
+        message. Read in the background: typing or sending something first skips it, and
+        with no questions found the next message is suggested as usual."""
+
+        async def offer() -> None:
+            try:
+                questions = await self.session.questions_in_reply()
+            except Exception as e:  # a missed picker isn't worth an error panel
+                log.debug("no questions read from the reply: %s", e)
+                questions = []
+            typed = self._prompt is not None and bool(self._prompt.default_buffer.text.strip())
+            if not questions or typed or self.turn_running or not self.running:
+                if not questions and not typed and not self.turn_running:
+                    self._suggest()
+                return
+            answers = await self.renderer.ask_questions(questions)
+            if answers is None or self.turn_running:
+                return  # Esc: they'll answer in chat
+            line = "\n".join(f"{q.header}: {a}" for q, a in zip(questions, answers, strict=True))
+            self._echo(line)
+            await self._run(self.session.run(line))
+
+        self._offering = asyncio.create_task(offer())
 
     def _suggest(self) -> None:
         """Once a turn ends: guess the next message, to show in the empty input box."""
@@ -656,8 +806,12 @@ class Repl:
         while one runs is passed to the agent."""
         self._prompt = prompt = self._prompt_session()
         self.renderer.embedded = True  # the prompt draws the live region now
+        self.renderer.can_detach = self.session.jobs.has_foreground
         self.renderer.exclusive = self.exclusive
         with patch_stdout(raw=True):  # output scrolls above the input box
+            plan = self.session.plan_tool.current
+            if self.session.resume_report is not None and plan is not None and not plan.approved:
+                await self.hand_off_plan()  # left while it waited for review: ask again
             while self.running:
                 async with self._ui:
                     if self._questions:
@@ -707,7 +861,10 @@ class Repl:
 
         name, _, arg = line.partition(" ")
         arg = arg.strip()
-        if cmd := COMMANDS.get(name):
+        if name in _IN_BACKGROUND and name in COMMANDS and self._prompt is not None:
+            self.console.print()
+            self._turn = asyncio.create_task(self._command_in_background(line))
+        elif cmd := COMMANDS.get(name):
             self.console.print()
             result = cmd.handler(self, arg)
             if inspect.isawaitable(result):
@@ -733,10 +890,12 @@ class Repl:
     def show_thinking(self, show: bool) -> None:
         self.renderer.show_thinking = show
         self.session.set_show_thinking(show)
+        # Reasoning already printed is in the terminal's scrollback, which nothing can take
+        # back; the switch is for what comes next, including a thought still being written.
         if not show:
-            self.console.print("  [muted]∴ Reasoning hidden (ctrl+t shows it)[/]")
+            self.console.print("  [muted]∴ Reasoning hidden from here on (ctrl+t shows it again)[/]")
             return
-        self.console.print("  [muted]∴ Reasoning shown (ctrl+t hides it)[/]")
+        self.console.print("  [muted]∴ Reasoning shown from here on (ctrl+t hides it again)[/]")
         # The latest reasoning, if it was hidden when it happened; once is enough.
         renderer = self.renderer
         if renderer.last_thought and not renderer.last_thought_shown and not self.turn_running:
@@ -796,6 +955,7 @@ class Repl:
             str(selected.workspace.root),
             selected.ctx.usage,
             show_thinking=selected.config.show_thinking,
+            scratch=str(selected.scratch.dir),
         )
         self.context_used = 0.0
         self.git = git_status(selected.workspace.root)
@@ -903,20 +1063,31 @@ class Repl:
         return False
 
     async def _while_running(self, line: str) -> None:
-        """Input while the agent works: a message goes to it; commands that don't touch the
-        conversation run; the rest wait."""
+        """Input while the agent works: a message goes to it; built-in commands run now, or
+        when the turn ends if they replace the conversation; other commands wait."""
         name = line.partition(" ")[0]
         if not is_command(line):
             if await self._safe_to_send(line):
                 self.session.steer(line)
             return
-        if name in _SAFE_WHILE_RUNNING and (cmd := COMMANDS.get(name)):
-            result = cmd.handler(self, line.partition(" ")[2].strip())
-            if inspect.isawaitable(result):
-                await result
+        if name in _AFTER_TURN and name in COMMANDS:
+            self._after_turn.append(line)
+            self.console.print(f"  [muted]{name} runs when the agent finishes (ctrl+c stops it now).[/]")
             return
+        if name in COMMANDS:
+            await self._command(line)
+            if name in _NEXT_TURN:
+                self.console.print("  [muted]The current turn finishes on the model it started with.[/]")
+            return
+        # Skills and extension commands talk to the agent, so they wait for it.
         self.console.print(f"  [muted]{name} has to wait until the agent finishes (ctrl+c stops it).[/]")
         self._draft = line
+
+    async def _command(self, line: str) -> None:
+        name, _, arg = line.partition(" ")
+        result = COMMANDS[name].handler(self, arg.strip())
+        if inspect.isawaitable(result):
+            await result
 
     # -- turns ----------------------------------------------------------------
 
@@ -943,10 +1114,34 @@ class Repl:
             self._sending_now = False
             self._measure_context()
             self.console.print()
-        # Messages that arrived after the agent's last step: they start the next turn.
+        await self._after_work(finished)
+
+    async def _command_in_background(self, line: str) -> None:
+        """A command that waits on the model (`_IN_BACKGROUND`), run as a turn is."""
+        finished = False
+        try:
+            await self._command(line)
+            finished = True
+        except asyncio.CancelledError:
+            self.console.print("\n[warn]■ Stopped.[/]")
+        except Exception as e:
+            report_error(self.console, e)
+        await self._after_work(finished, suggest=False)
+
+    async def _after_work(self, finished: bool, *, suggest: bool = True) -> None:
+        """Once a turn (or a command run like one) ends: the commands that waited for it,
+        then the messages that arrived meanwhile, else the plan hand-off or a suggestion."""
+        waiting, self._after_turn = self._after_turn, []
+        for line in waiting:
+            if self.running:
+                await self._command(line)
         if (left := self.session.take_steering()) and self.running:
             self._turn = asyncio.create_task(self._turn_in_background(self.session.run("\n\n".join(left))))
-        elif finished:
+        elif finished and self.running and self._plan_ready:
+            await self.hand_off_plan()
+        elif finished and suggest and self._last_done == "stop" and self.session.mode == PermissionMode.PLAN:
+            self._offer_questions()
+        elif finished and suggest:
             self._suggest()
 
     async def run_turn(self, events: AsyncGenerator[Event, None]) -> None:
@@ -955,8 +1150,10 @@ class Repl:
         loop = asyncio.get_running_loop()
         with contextlib.suppress(NotImplementedError):  # not available on Windows
             loop.add_signal_handler(signal.SIGINT, task.cancel)
+        finished = False
         try:
             await task
+            finished = True
         except asyncio.CancelledError:
             self.console.print("\n[warn]■ Interrupted.[/] [muted]What should it do instead?[/]")
         except Exception as e:
@@ -965,12 +1162,57 @@ class Repl:
             with contextlib.suppress(NotImplementedError):
                 loop.remove_signal_handler(signal.SIGINT)
             self._measure_context()
+        if finished and self._plan_ready:
+            await self.hand_off_plan()
+
+    async def hand_off_plan(self) -> None:
+        """A plan is ready for review: ask once whether to build it, and in which mode.
+
+        Picking a mode approves the plan on screen and starts the build; that pick is the
+        user's "build it". Esc or "keep planning" stays in plan mode, and whatever they type
+        next is their feedback. Shift+Tab still approves without building."""
+        self._plan_ready = False
+        session = self.session
+        if session.mode != PermissionMode.PLAN or session.plan_tool.current is None:
+            return  # a command that waited for the turn (/clear, /mode) already moved on
+        before = session.mode_before_plan
+        modes = [
+            m
+            for m in dict.fromkeys([before, PermissionMode.AUTO, PermissionMode.DEFAULT])
+            if m != PermissionMode.PLAN
+        ]
+        options = [(m.value, f"Yes, build it in {MODE_LABEL[m]} mode · {MODE_HINT[m]}") for m in modes]
+        options.append((PermissionMode.PLAN.value, "No, keep planning"))
+        # The turn's last lines (plan ready, the footer) may still be in patch_stdout's
+        # queue, which writes in batches; seen live: the picker showed up above them.
+        await asyncio.sleep(getattr(sys.stdout, "sleep_between_writes", 0) + 0.05)
+        async with self.exclusive():
+            choice = await pick("Build this plan?", options, modes[0].value, mark_current=False)
+        if choice in (None, PermissionMode.PLAN.value):
+            self.console.print(
+                "  [muted]Still planning. Say what to change, or press shift+tab to approve it later.[/]\n"
+            )
+            return
+        mode = PermissionMode(choice)
+        if mode == PermissionMode.AUTO:
+            self.auto_confirmed = True  # chosen with its description on screen
+        notice = session.set_mode(mode)
+        plan = session.plan_tool.current
+        if plan is not None and plan.approved:
+            notice = f"Plan approved · building in {MODE_LABEL[mode]} mode"
+        self.console.print(f"  [ok]✓[/] {notice}")
+        self._echo(BUILD_PLAN)
+        await self._run(session.run(BUILD_PLAN))
 
     async def _status_events(self, events: AsyncGenerator[Event, None]) -> AsyncGenerator[Event, None]:
         """Keep the toolbar moving during a model call, then replace estimates with usage."""
         self._clear_live_usage()
+        self._plan_ready = False
         async for event in events:
-            if isinstance(event, TokenUsage):
+            if isinstance(event, Done):
+                self._plan_ready = event.reason == "plan_ready"
+                self._last_done = event.reason
+            elif isinstance(event, TokenUsage):
                 if self.session.context_window:
                     self.context_used = (event.input + event.cached) / self.session.context_window
                     self._context_approximate = False

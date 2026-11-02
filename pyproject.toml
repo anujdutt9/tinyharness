@@ -36,6 +36,7 @@ dependencies = [
     "rich>=13.8",  # 13.7 printed reasoning above its "∴ Thinking" header
     "pillow>=10.0",
     "pyjwt[crypto]>=2.10",
+    "json-repair>=0.30",  # last-resort repair of tool-call JSON (llm/textcalls.py)
 ]
 
 [project.urls]

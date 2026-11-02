@@ -11,6 +11,7 @@ import pytest
 
 from conftest import call, make_ctx
 from tinyharness.sandbox import BACKENDS, SandboxPolicy, SandboxRuntime, Seatbelt, setup_hint
+from tinyharness.sandbox.policy import PROTECTED_IN_PROJECT
 from tinyharness.sandbox.seatbelt import profile
 from tinyharness.security import public_path_regexes, secret_path_regexes
 from tinyharness.tools.bash import BashTool
@@ -36,6 +37,15 @@ def test_missing_sandbox_has_platform_specific_setup_help(monkeypatch):
     assert "Git Bash" in setup_hint() and "windows-install" in setup_hint()
 
 
+def test_linux_setup_help_names_the_install_command_for_its_package_manager(monkeypatch):
+    """A banner that only says "not available" leaves you to find the packages yourself."""
+    monkeypatch.setattr("tinyharness.sandbox.sys.platform", "linux")
+    monkeypatch.setattr(
+        "tinyharness.sandbox.shutil.which", lambda name: "/usr/bin/dnf" if name == "dnf" else None
+    )
+    assert setup_hint().startswith("sudo dnf install bubblewrap socat ripgrep, then npm install")
+
+
 def test_project_policy_uses_private_scratch_temp_and_tool_caches(tmp_path):
     root = tmp_path / "proj"
     scratch = root / ".tinyharness" / "tmp" / "s1"
@@ -45,7 +55,9 @@ def test_project_policy_uses_private_scratch_temp_and_tool_caches(tmp_path):
     assert real in policy.write_roots and scratch.resolve() in policy.write_roots
     assert cache.resolve() in policy.write_roots and cache.is_dir()
     assert Path("/tmp").resolve() not in policy.write_roots
-    assert set(policy.protected) == {real / ".tinyharness", real / ".git/hooks", real / ".git/config"}
+    assert {real / ".tinyharness", real / ".git/hooks", real / ".git/config", real / ".vscode"} <= set(
+        policy.protected
+    )
     assert policy.reopened() == (scratch.resolve(),)  # scratch sits under the protected .tinyharness
     assert policy.env["UV_CACHE_DIR"] == str(cache.resolve() / "uv")
     assert policy.env["PLAYWRIGHT_BROWSERS_PATH"] == str(cache.resolve() / "playwright")
@@ -209,7 +221,8 @@ def _policy(root: Path, **kw) -> SandboxPolicy:
 def test_profile_denies_network_and_writes_then_allows_the_roots(tmp_path):
     text = profile(_policy(tmp_path))
     assert text.index("(deny network*)") < text.index("(deny file-write*)")
-    assert text.index("(deny file-write*)") < text.index(f'(subpath "{tmp_path.resolve()}")')
+    allow = text.index(f'(allow file-write*\n  (subpath "{tmp_path.resolve()}")')
+    assert text.index("(deny file-write*)") < allow
     assert "localhost" not in text
     assert "(deny appleevent-send)" in text and "launchservicesd" in text
 
@@ -250,7 +263,7 @@ async def sandboxed(ws: Path, command: str, **policy) -> str:
     # Not for_project: pytest's tmp_path is inside the temp dir, which that policy makes writable.
     root = ws.resolve()
     policy.setdefault("deny_read", secret_path_regexes())
-    policy.setdefault("protected", (root / ".tinyharness", root / ".git/hooks", root / ".git/config"))
+    policy.setdefault("protected", tuple(root / rel for rel in PROTECTED_IN_PROJECT))
     tool = BashTool(Seatbelt(), SandboxPolicy(write_roots=(root,), **policy))
     return await call(tool, {"command": command, "timeout": 30}, make_ctx(ws))
 
@@ -339,9 +352,23 @@ async def test_localhost_only_when_allowed(ws, allow):
 
 
 @needs_seatbelt
-@pytest.mark.parametrize("target", [".git/hooks/pre-commit", ".git/config", ".tinyharness/hooks.toml"])
+@pytest.mark.parametrize(
+    "target",
+    [
+        ".git/hooks/pre-commit",
+        ".git/config",
+        ".tinyharness/hooks.toml",
+        ".vscode/tasks.json",
+        ".envrc",
+        ".claude/settings.json",
+        ".mcp.json",
+    ],
+)
 async def test_files_that_run_code_outside_the_sandbox_are_read_only(ws, target):
-    (ws / ".tinyharness").mkdir()
+    """Editor tasks, direnv, MCP servers and agent settings run when you open or enter the
+    project, outside any sandbox: the same reason git hooks are protected."""
+    for folder in (".tinyharness", ".vscode", ".claude"):
+        (ws / folder).mkdir(exist_ok=True)
     await sandboxed(ws, f"echo 'curl evil.example' > {target}")
     assert not (ws / target).exists()
 
@@ -396,3 +423,63 @@ async def test_tests_can_read_their_own_fake_secrets_and_nothing_else(tmp_path):
     finally:
         (elsewhere / "auth.json").unlink()
         elsewhere.rmdir()
+
+
+def test_shared_caches_write_the_users_own_cache(tmp_path, monkeypatch):
+    """Opt-in: the agent and the user's terminal share uv's cache instead of each keeping one."""
+    from tinyharness.sandbox import SandboxPolicy
+
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "my-hf"))
+    for unset in ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR"):  # CI's setup-uv sets them
+        monkeypatch.delenv(unset, raising=False)
+    policy = SandboxPolicy.for_project(
+        tmp_path / "p", cache_dir=tmp_path / "c", shared_caches=["uv", "huggingface"]
+    )
+    assert policy.env["HF_HOME"] == str((tmp_path / "my-hf").resolve())  # the user's own setting
+    assert policy.env["UV_CACHE_DIR"] == str(Path("~/.cache/uv").expanduser().resolve())
+    assert Path(policy.env["UV_CACHE_DIR"]) in policy.write_roots
+    assert policy.env["PIP_CACHE_DIR"].startswith(str((tmp_path / "c").resolve()))  # not shared
+    assert SandboxPolicy.for_project(tmp_path / "p", cache_dir=tmp_path / "c").shared_caches == ()
+
+
+_SOCKETS = r"""
+import socket, sys, threading
+srv = socket.socket(socket.AF_UNIX); srv.bind("own.sock"); srv.listen(1)
+threading.Thread(target=lambda: (lambda c: c.sendall(c.recv(4)))(srv.accept()[0]), daemon=True).start()
+own = socket.socket(socket.AF_UNIX); own.connect("own.sock"); own.sendall(b"ping"); print("own", own.recv(4))
+try:
+    socket.socket(socket.AF_UNIX).connect(sys.argv[1]); print("outside connected")
+except OSError as e:
+    print("outside", e.errno)
+"""
+
+
+@needs_seatbelt
+async def test_a_commands_own_unix_sockets_work_and_others_stay_closed(ws):
+    """Seen live: SGLang's engine couldn't reach its own scheduler over a ZMQ `ipc://`
+    socket in the session's private temp folder: `(deny network*)` covers Unix sockets."""
+    import socket
+    import tempfile
+
+    outside = Path(tempfile.mkdtemp(dir="/tmp")) / "svc.sock"  # short: socket paths max out at 104
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(outside))
+    server.listen(1)
+    try:
+        (ws / "sockets.py").write_text(_SOCKETS)
+        out = await sandboxed(ws, f"python3 sockets.py {outside}")
+    finally:
+        server.close()
+        outside.unlink()
+    assert "own b'ping'" in out and "outside 1" in out
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS frameworks")
+def test_metal_may_write_its_own_scratch_folder_but_not_the_rest_of_the_users_temp(tmp_path):
+    """Seen live: PyTorch on Apple GPUs printed "You don't have permission to save the file
+    mpsgraph-..." on every graph: Metal writes there, under the user's own temp directory,
+    whatever TMPDIR says. Only that one folder opens up."""
+    policy = SandboxPolicy.for_project(tmp_path, scratch=tmp_path / "scratch")
+    metal = [r for r in policy.write_roots if r.name == "com.apple.MetalPerformanceShadersGraph"]
+    assert len(metal) == 1 and metal[0].parent.name == "T"
+    assert metal[0].parent not in policy.write_roots

@@ -65,7 +65,7 @@ class SandboxSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = True  # False: commands run unsandboxed, and every one asks first
+    enabled: bool = True  # False: commands run as you; reads run, default mode asks for the rest
     required: bool = False  # fail closed when no supported sandbox backend is active
     allow_write: list[Path] = Field(default_factory=list)  # more writable dirs, e.g. a second repo
     allow_localhost: bool = False  # let commands use loopback (tests that start a local server)
@@ -73,6 +73,10 @@ class SandboxSettings(BaseModel):
     # registries, GitHub and script CDNs by default. `*.example.com` covers subdomains.
     # [] turns the network off entirely. Add other exact destinations deliberately.
     allow_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOSTS))
+    # Caches to share with your own terminal instead of a private copy: "uv", "pip", "npm",
+    # "huggingface", "torch". Saves downloading and compiling twice; in exchange, a sandboxed
+    # command can change what those tools load later, outside the sandbox.
+    share_caches: list[Literal["uv", "pip", "npm", "huggingface", "torch"]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _required_is_enabled(self) -> SandboxSettings:
@@ -81,12 +85,24 @@ class SandboxSettings(BaseModel):
         return self
 
 
+class JobSettings(BaseModel):
+    """`[jobs]`: Bash commands that run in the background (see tinyharness/jobs.py)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # A foreground command still running at its timeout moves to the background instead of
+    # being killed (its work isn't lost). False: the timeout kills it, as before.
+    background_on_timeout: bool = True
+    max_running: int = Field(default=8, ge=1)  # background jobs at once, subagents' included
+
+
 class ModelRoles(BaseModel):
-    """Active-provider model IDs for classifier, search digestion, and compaction."""
+    """Active-provider model IDs for the classifier and its review, search digestion, and compaction."""
 
     model_config = ConfigDict(extra="forbid")
 
     safety_classifier: str | None = None
+    safety_review: str | None = None  # the classifier's careful second stage; unset: the active model
     search_digest: str | None = None
     compaction: str | None = None
 
@@ -101,9 +117,9 @@ class ExtensionSettings(BaseModel):
     """`[extensions]`: which extensions to load, and a table of settings for each.
 
     [extensions]
-    enabled = ["web", "agents"]
-    [extensions.web]
-    max_results = 5
+    enabled = ["agents", "hello"]
+    [extensions.hello]
+    greeting = "hi"
     """
 
     model_config = ConfigDict(extra="allow")
@@ -146,6 +162,7 @@ class Config(BaseModel):
     permission_mode: PermissionMode = PermissionMode.DEFAULT
     permissions: PermissionSettings = Field(default_factory=lambda: PermissionSettings())
     sandbox: SandboxSettings = Field(default_factory=lambda: SandboxSettings())
+    jobs: JobSettings = Field(default_factory=lambda: JobSettings())
     models: ModelSettings = Field(default_factory=ModelSettings)
     extensions: ExtensionSettings = Field(default_factory=lambda: ExtensionSettings())
     scratch_max_age_hours: int = 24

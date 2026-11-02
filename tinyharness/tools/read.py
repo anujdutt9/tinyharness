@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 from pathlib import Path
 
 from pydantic import Field
@@ -78,16 +79,46 @@ def resolve_readable(args: ToolInput, path_arg: str, ctx: ToolContext) -> Path:
     return path
 
 
+def pdf_lines(data: bytes, name: str, stop: int) -> tuple[list[str], int, int]:
+    """A PDF's text as lines, with a `----- page N -----` line before each page.
+
+    Pages are extracted only until there are more than `stop` lines, so reading the start
+    of a long PDF doesn't wait for all of it. Returns (lines, pages read, pages in all).
+    """
+    from pypdf import PdfReader  # only when a PDF is read: it's slow to import
+
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        if reader.is_encrypted:
+            reader.decrypt("")
+        total = len(reader.pages)
+    except Exception as e:
+        raise ToolError(f"can't read {name}: not a readable PDF ({type(e).__name__}: {e})") from None
+    lines: list[str] = []
+    read = 0
+    for read, page in enumerate(reader.pages, start=1):
+        try:
+            text = (page.extract_text() or "").strip()
+        except Exception as e:
+            text = f"[couldn't extract this page: {type(e).__name__}]"
+        lines.append(f"----- page {read} of {total} -----")
+        lines.extend(text.split("\n") if text else ["(no text on this page: it may be a scanned image)"])
+        if len(lines) > stop:
+            break
+    return lines, read, total
+
+
 class ReadTool(Tool[ReadInput]):
     name = "Read"
     description = (
-        "Read a UTF-8 text file, or an image (PNG, JPEG, GIF, WebP), which you then see: a "
-        "screenshot, a chart, a rendered page. Text comes back as numbered lines (`    42\\tcode`); "
-        "the numbers aren't part of the file. Up to 2000 lines or 50 KB per call: for more, "
-        "continue with the offset it gives you."
+        "Read a UTF-8 text file; a PDF, as its text page by page; or an image (PNG, JPEG, GIF, "
+        "WebP), which you then see: a screenshot, a chart, a rendered page. Text comes back as "
+        "numbered lines (`    42\\tcode`); the numbers aren't part of the file. Up to 2000 lines "
+        "or 50 KB per call: for more, continue with the offset it gives you."
     )
     Input = ReadInput
     read_only = True
+    taken_from_json = True
 
     async def run(self, args: ReadInput, ctx: ToolContext) -> str | ToolOutput:
         path = resolve_readable(args, args.path, ctx)
@@ -108,13 +139,17 @@ class ReadTool(Tool[ReadInput]):
                 f"{path.name}: {media_type} image, {len(data) // 1024:,} KB{note or ' (shown to you)'}",
                 [image],
             )
-        if b"\x00" in data[:4096]:  # an archive, a binary: text would be noise in the context
-            kind = "a PDF: use the Pdf tool" if path.suffix.lower() == ".pdf" else "not text"
-            raise ToolError(f"can't read {path.name}: it's a binary file ({kind})")
-        text = data.decode("utf-8", errors="replace")
-        # Lines as Edit and Grep count them: split at \n only (not at form feeds and the like),
-        # with a Windows \r dropped from the end.
-        lines = [line.removesuffix("\r") for line in text.removesuffix("\n").split("\n")] if text else []
+        pages = None  # (pages read, pages in all), for a PDF
+        if data.startswith(b"%PDF-"):  # its content, not its name, like images
+            lines, *counts = pdf_lines(data, path.name, stop=args.offset + args.limit)
+            pages = tuple(counts)
+        elif b"\x00" in data[:4096]:  # an archive, a binary: text would be noise in the context
+            raise ToolError(f"can't read {path.name}: it's a binary file (not text)")
+        else:
+            text = data.decode("utf-8", errors="replace")
+            # Lines as Edit and Grep count them: split at \n only (not at form feeds and the
+            # like), with a Windows \r dropped from the end.
+            lines = [line.removesuffix("\r") for line in text.removesuffix("\n").split("\n")] if text else []
 
         mark_seen(ctx, path)
         if not lines:
@@ -133,7 +168,14 @@ class ReadTool(Tool[ReadInput]):
             page.append(entry)
             size += entry_bytes + 1
         end = args.offset + len(page)
-        if end < len(lines):
+        if pages is not None and (end < len(lines) or pages[0] < pages[1]):
+            # Its length isn't known until every page is extracted: say where it got to.
+            marker = next((line for line in reversed(lines[:end]) if line.startswith("----- page ")), "")
+            at = marker.removeprefix("----- ").removesuffix(" -----")
+            page.append(
+                f"... (showing lines {args.offset + 1}-{end}, up to {at}; continue with offset={end})"
+            )
+        elif end < len(lines):
             page.append(
                 f"... (showing lines {args.offset + 1}-{end} of {len(lines)}; continue with offset={end})"
             )

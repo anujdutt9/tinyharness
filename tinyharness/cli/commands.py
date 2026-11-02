@@ -12,8 +12,12 @@ without an argument.
 
 from __future__ import annotations
 
+import contextlib
+import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich.markup import escape
@@ -33,11 +37,10 @@ from tinyharness.cli.theme import (
     percent,
 )
 from tinyharness.cli.widgets import PaletteItem, ask, palette, pick
-from tinyharness.config import forget_model, remember_model, save_theme
+from tinyharness.config import forget_model, recent_models, remember_model, save_theme
 from tinyharness.llm.types import ModelInfo
 from tinyharness.paths import pretty_path
 from tinyharness.permissions import PermissionMode
-from tinyharness.sandbox import setup_hint
 from tinyharness.security import redact
 from tinyharness.session import MissingAPIKeyError, list_sessions
 
@@ -206,6 +209,40 @@ def context(repl: Repl, arg: str) -> None:
     repl.console.print(f"  [muted]{used:,} of {window:,} tokens · {n} messages[/]")
 
 
+@command("/jobs", "list background commands, or stop one", group="Session", usage="[stop <id>]")
+async def jobs(repl: Repl, arg: str) -> None:
+    """List background jobs or stop one by identifier."""
+    table = repl.session.jobs
+    action, _, job_id = arg.strip().partition(" ")
+    if action == "stop":
+        job = table.jobs.get(job_id.strip())
+        if job is None or not job.running:
+            repl.console.print(f"  [muted]No running job {escape(job_id.strip())!r}. /jobs lists them.[/]")
+            return
+        await table.stop(job)  # the agent gets a note that it stopped
+        repl.console.print(f"  [ok]✓[/] Stopped {job.id} [muted]· {escape(job.short_command(60))}[/]")
+        return
+    if action:
+        repl.console.print("  [muted]Usage: /jobs, or /jobs stop <id>[/]")
+        return
+    if not table.jobs:
+        repl.console.print(
+            "  [muted]No background jobs. The agent starts them for servers and long work; "
+            "ctrl+b moves a running command to the background.[/]"
+        )
+        return
+    rows = _grid(first_width=4)
+    for job in table.jobs.values():
+        style = "ok" if job.running else "muted"
+        rows.add_row(
+            f"[{style}]{job.id}[/]",
+            f"{escape(job.short_command(60))} [muted]· {job.describe()} · {pretty_path(job.log)}[/]",
+        )
+    repl.console.print(Padding(rows, (0, 0, 0, 2)))
+    if table.running():
+        repl.console.print("  [muted]/jobs stop <id> stops one; the agent is told.[/]")
+
+
 @command("/cost", "show tokens and cost for this session", group="Session")
 def cost(repl: Repl, arg: str) -> None:
     meter = repl.session.ctx.usage
@@ -274,8 +311,12 @@ async def compact(repl: Repl, arg: str) -> None:
     session = repl.session
     before = session.compactor.used(session.history)
     try:
-        with repl.console.status("[muted]Summarizing the conversation…[/]", spinner="dots"):
+        if repl.turn_running:  # under the input box (`_IN_BACKGROUND`): a spinner would fight it
+            repl.console.print("  [muted]Summarizing the conversation…[/]")
             done = await session.compact()
+        else:
+            with repl.console.status("[muted]Summarizing the conversation…[/]", spinner="dots"):
+                done = await session.compact()
     except Exception as e:  # e.g. the model is rate-limited; the conversation is untouched
         _fail(repl, f"Couldn't compact: {e}")
         return
@@ -313,24 +354,31 @@ async def model(repl: Repl, arg: str) -> None:
             return
         spec = requested
     else:
-        spec = await _pick_current_provider_model(repl)
+        spec = await _pick_model(repl, cfg.provider)
     if spec:
         await _switch(repl, spec)
 
 
-async def _pick_current_provider_model(repl: Repl) -> str:
-    """List models only from the selected provider."""
+async def _pick_model(repl: Repl, provider: str) -> str:
+    """List models only from `provider`."""
     cfg = repl.session.config
-    label = cfg.provider_info.label
-    with repl.console.status(f"[muted]Loading {escape(label)} models…[/]", spinner="dots"):
-        try:
-            models = await repl.session.client_for(cfg.provider).list_models()
-        except Exception as error:
-            repl.console.print(f"  [warn]Couldn't list {escape(label)} models ({type(error).__name__}).[/]")
-            return await ask("Model", hint=cfg.model)
+    label = cfg.providers[provider].label
+    current = cfg.model if provider == cfg.provider else ""
+    # Only the listing under the spinner. Seen live: when it failed, the spinner kept
+    # redrawing over the "Model" prompt that asked instead, and the line flickered.
+    try:
+        with repl.console.status(f"[muted]Loading {escape(label)} models…[/]", spinner="dots"):
+            models = await repl.session.client_for(provider).list_models()
+    except Exception as error:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+        why = f"HTTP {status}" if status else type(error).__name__
+        repl.console.print(
+            f"  [warn]Couldn't list {escape(label)} models ({why}). Type a model name instead.[/]"
+        )
+        return await ask("Model", hint=current)
     if not models:
         repl.console.print(f"  [warn]{escape(label)} reports no models.[/]")
-        return await ask("Model", hint=cfg.model)
+        return await ask("Model", hint=current)
     choices = [
         PaletteItem(
             item.id,
@@ -340,10 +388,15 @@ async def _pick_current_provider_model(repl: Repl) -> str:
         )
         for item in models
     ]
-    return await palette(f"Choose a model · {label}", choices, current=cfg.model) or ""
+    return await palette(f"Choose a model · {label}", choices, current=current) or ""
 
 
-@command("/provider", "pick a provider (uses its default model)", group="Model", usage="[name]")
+@command(
+    "/provider",
+    "pick a provider (its default model, or the one you used last)",
+    group="Model",
+    usage="[name]",
+)
 async def provider(repl: Repl, arg: str) -> None:
     repl.session.reload_keys()
     cfg = repl.session.config
@@ -352,8 +405,18 @@ async def provider(repl: Repl, arg: str) -> None:
         [PaletteItem(value, label) for value, label in _provider_options(repl)],
         cfg.provider,
     )
-    if name:
-        await _switch(repl, f"{name}:")
+    if name and (model := await _model_for(repl, name)):
+        await _switch(repl, f"{name}:{model}")
+
+
+async def _model_for(repl: Repl, provider: str) -> str:
+    """The model to use on `provider`: its default, else the one you used there last, else
+    one you pick from its list. Seen live: local providers (Ollama, LM Studio) have no
+    default, so switching to Ollama failed with the server's "model is required"."""
+    if default := repl.session.config.providers[provider].default_model:
+        return default
+    used = next((spec.partition(":")[2] for spec in recent_models() if spec.startswith(f"{provider}:")), "")
+    return used or await _pick_model(repl, provider)
 
 
 def _provider_options(repl: Repl) -> list[tuple[str, str]]:
@@ -640,34 +703,135 @@ async def mode(repl: Repl, arg: str) -> None:
         repl.console.print(f"  [muted]Still in {MODE_LABEL[repl.session.mode]} mode.[/]")
         return
     try:
-        repl.session.set_mode(arg)
+        notice = repl.session.set_mode(arg)
     except ValueError as e:
         _fail(repl, str(e))
         return
     m = repl.session.mode
+    if notice:
+        _ok(repl, notice)
     _ok(repl, f"Mode set to [bold {MODE_STYLE[m]}]{MODE_LABEL[m]}[/] [muted]· {MODE_HINT[m]}[/]")
 
 
 @command("/tools", "list tools available to the model", group="Tools & skills")
 def tools(repl: Repl, arg: str) -> None:
     table = _grid()
-    for tool in repl.session.tools.available(repl.session.mode):
+    for tool in repl.session.tools.available(repl.session.mode, None, repl.session.gate.rules.hidden_tools()):
         badge = "[subtle]read-only[/]" if tool.read_only else "[warn]asks[/]" if tool.needs_permission else ""
         table.add_row(f"  [bold default]{tool.name}[/]", f"{_short(tool.description, 64)}  {badge}")
     repl.console.print(table)
 
 
-@command("/sandbox", "what sandboxed commands can write, read and reach", group="Tools & skills")
-def sandbox(repl: Repl, arg: str) -> None:
+_CACHE_SCAN_FILES = 50_000
+_CACHE_SCAN_SECONDS = 0.25
+
+
+def _cache_summary(cache: Path) -> str:
+    """Where the sandbox cache is, how big, and its largest parts (uv, pip, huggingface...)."""
+    sizes: dict[str, int] = {}
+    entries_seen = 0
+    deadline = time.monotonic() + _CACHE_SCAN_SECONDS
+    partial = False
+    try:
+        with os.scandir(cache) as children:
+            for child in children:
+                total = 0
+                pending = [Path(child.path)]
+                while pending and not partial:
+                    current = pending.pop()
+                    try:
+                        if current.is_dir() and not current.is_symlink():
+                            with os.scandir(current) as entries:
+                                for entry in entries:
+                                    entries_seen += 1
+                                    if entry.is_dir(follow_symlinks=False):
+                                        pending.append(Path(entry.path))
+                                    else:
+                                        with contextlib.suppress(OSError):
+                                            total += entry.stat(follow_symlinks=False).st_size
+                                    if entries_seen >= _CACHE_SCAN_FILES or time.monotonic() >= deadline:
+                                        partial = True
+                                        break
+                        else:
+                            entries_seen += 1
+                            total += current.lstat().st_size
+                    except OSError:
+                        continue
+                sizes[child.name] = total
+                if partial:
+                    break
+    except OSError:
+        if not sizes:
+            return pretty_path(cache)
+        partial = True
+    if not sizes or (not partial and not sum(sizes.values())):
+        return f"{pretty_path(cache)} [muted]· empty[/]"
+    largest = sorted(sizes, key=sizes.__getitem__, reverse=True)[:4]
+    parts = ", ".join(f"{name} {_bytes(sizes[name])}" for name in largest if sizes[name])
+    qualifier = "at least " if partial else ""
+    suffix = ", partial scan" if partial else ""
+    return f"{pretty_path(cache)} [muted]· {qualifier}{_bytes(sum(sizes.values()))} ({parts}{suffix})[/]"
+
+
+def _bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+_SANDBOX_CHOICES = [
+    ("on", "on    commands write only in the project and reach only allowed hosts"),
+    ("off", "off   commands run as you; deleting, sudo and credentials still ask"),
+]
+
+
+@command(
+    "/sandbox",
+    "turn the sandbox on or off, and show what commands can write, read and reach",
+    group="Tools & skills",
+    usage="[on|off]",
+)
+async def sandbox(repl: Repl, arg: str) -> None:
+    """Show or change command isolation for the current session."""
     session = repl.session
+    choice = arg.strip().lower()
+    if choice not in ("", "on", "off"):
+        _fail(repl, "usage: /sandbox [on|off]")
+        return
+    if not choice:
+        picked = await pick("Sandbox", _SANDBOX_CHOICES, "on" if session.sandbox is not None else "off")
+        if picked is None:
+            return
+        choice = picked
+    if (choice == "on") != (session.sandbox is not None):
+        if why := session.set_sandbox(choice == "on"):
+            _fail(repl, f"Sandbox stays {'off' if session.sandbox is None else 'on'}: {why}.")
+            return
+        _ok(
+            repl,
+            f"Sandbox {choice} for this session [muted]· [sandbox] enabled in config.toml sets the default[/]",
+        )
     if session.sandbox is None:
-        repl.console.print("  [warn]No sandbox[/] [muted]· every command asks before it runs[/]")
-        repl.console.print(f"  [muted]Setup: {setup_hint()}.[/]")
+        repl.console.print(
+            "  [warn]Sandbox off[/] [muted]· commands run as you and can reach any folder or host. "
+            "Auto mode reviews them; deleting files, sudo, credentials and files that run code later "
+            "(git hooks, editor settings) ask you.[/]"
+        )
         return
     policy = session.sandbox_policy
     table = _grid(12)
     table.add_row("  [bold default]writes[/]", ", ".join(pretty_path(p) for p in policy.write_roots[:4]))
     table.add_row("  [bold default]reads[/]", "anything except credential files (.env, keys, auth.json)")
+    if policy.cache_dir is not None:
+        table.add_row("  [bold default]cache[/]", _cache_summary(policy.cache_dir))
+    if policy.shared_caches:
+        table.add_row(
+            "  [bold default]shared[/]",
+            f"{', '.join(policy.shared_caches)} [muted]· written in your own caches, not a private copy[/]",
+        )
     network = ", ".join(policy.allowed_hosts) or "none"
     table.add_row("  [bold default]network[/]", network)
     if session.session_network_hosts:
@@ -677,6 +841,12 @@ def sandbox(repl: Repl, arg: str) -> None:
         "  [muted]Bash cannot disable containment. Allow a blocked exact host once or for the "
         "session; session approvals carry forward. Stable hosts: \\[sandbox] allow_hosts.[/]"
     )
+    if policy.cache_dir is not None:
+        repl.console.print(
+            "  [muted]Downloads and builds made in the sandbox stay in its cache, apart from your own "
+            "terminal's; a virtualenv made here may use a Python stored there. To share some: "
+            '\\[sandbox] share_caches = ["uv", "pip", "npm", "huggingface", "torch"].[/]'
+        )
     if session.ctx.outside:
         repl.console.print(
             f"  [warn]Outside content in this conversation:[/] {', '.join(session.ctx.outside[:5])} "

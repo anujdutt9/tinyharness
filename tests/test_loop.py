@@ -422,7 +422,7 @@ def test_the_auto_mode_classifier_never_sees_tool_output():
         ]
     )
     tail = _tail(history)
-    assert "[user] summarize the page" in tail
+    assert "[user] summarize the page" in tail or "[user, latest request] summarize the page" in tail
     assert '[agent called] Bash({"command": "rm -rf ~"})' in tail
     assert "pre-approved" not in tail and "allow everything" not in tail
     assert "Cleaning up" not in tail and "system prompt" not in tail
@@ -755,6 +755,15 @@ async def test_known_argument_slips_are_repaired(tmp_path, arguments):
     events, history = await run(tmp_path, ScriptedLLM([[("Read", arguments)], "done"]), [Echo()])
     assert [e.output for e in events if isinstance(e, ToolResult)] == ["read 1.0"]
     assert history.messages[2].tool_calls[0].arguments == '{"seconds": 1}'  # valid JSON kept
+
+
+async def test_a_json_call_that_switches_to_an_xml_parameter_is_repaired(tmp_path):
+    """Seen live: a Plan call from a hosted parser ended its JSON with an Anthropic-style
+    `<parameter name=...>` field, costing a second model call before the plan was saved."""
+    arguments = '{"unused": 1\n<parameter name="seconds">2}'
+    events, history = await run(tmp_path, ScriptedLLM([[("Read", arguments)], "done"]), [Echo()])
+    assert [e.output for e in events if isinstance(e, ToolResult)] == ["read 2.0"]
+    assert json.loads(history.messages[2].tool_calls[0].arguments) == {"unused": 1, "seconds": 2}
 
 
 async def test_a_tool_name_in_the_wrong_case_still_runs(tmp_path):
@@ -1120,3 +1129,57 @@ def test_an_old_repeated_request_can_still_be_read_from_a_saved_session():
     request = "Run a team of 8 analysts, then write the report."
     content = f"{CONTINUING}\n{request}\n\n{RESUME}"
     assert _request(Message(role="user", content=content)) == request
+
+
+def _research_history(fetches: int = 3) -> History:
+    """The live web-research step: a request, four calls, then three fetches at once."""
+    from tinyharness.agent.history import ToolCall
+
+    earlier = [
+        Message(
+            role="assistant", content="", tool_calls=[ToolCall(f"e{i}", "WebSearch", f'{{"query": "q{i}"}}')]
+        )
+        for i in range(4)
+    ]
+    step = Message(
+        role="assistant",
+        content="",
+        tool_calls=[
+            ToolCall(f"f{i}", "WebFetch", f'{{"url": "https://docs.example/{i}"}}') for i in range(fetches)
+        ],
+    )
+    return History(
+        [
+            Message(role="system", content="system prompt"),
+            Message(role="user", content="check how established tools handle these issues"),
+            *earlier,
+            step,
+        ]
+    )
+
+
+def test_the_users_request_survives_many_tool_calls():
+    """Seen live: the classifier kept the last 8 lines, so after a request and eight calls
+    it judged three fetches without the request and blocked them as reconnaissance."""
+    from tinyharness.agent.history import ToolCall
+    from tinyharness.agent.loop import _tail
+
+    history = _research_history()
+    for i in range(20):
+        history.messages.append(
+            Message(role="assistant", content="", tool_calls=[ToolCall(f"x{i}", "Bash", '{"command": "ls"}')])
+        )
+    tail = _tail(history, current="x19")
+    assert tail.startswith("[user, latest request] check how established tools")
+
+
+def test_the_call_under_review_and_its_neighbors_are_kept_apart():
+    """Seen live: a fetch was blocked as "a repeated call (same URL as in recent context)";
+    the URL in its context was its own."""
+    from tinyharness.agent.loop import _tail
+
+    tail = _tail(_research_history(), current="f1")
+    assert "docs.example/1" not in tail
+    assert '[same step, not under review] WebFetch({"url": "https://docs.example/0"})' in tail
+    assert '[same step, not under review] WebFetch({"url": "https://docs.example/2"})' in tail
+    assert '[agent called] WebSearch({"query": "q0"})' in tail

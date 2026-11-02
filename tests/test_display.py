@@ -1,5 +1,6 @@
 """What the CLI shows: tool rows, the turn footer, the status bar, tokens and cost."""
 
+import inspect
 import json
 import re
 import subprocess
@@ -202,12 +203,120 @@ def test_who_allowed_a_call_without_asking_is_credited_under_it(renderer):
     assert row.endswith("no output") and credit.strip() == "⎿ auto mode · read-only listing"
 
 
-def test_failed_commands_show_why_underneath(renderer):
+def test_nonzero_commands_are_neutral_and_keep_their_evidence(renderer):
+    """Seen live: every nonzero subprocess looked like a tinyharness crash to new users."""
     output = "> build\nsrc/app.ts(12,5): error TS2322: bad type\n(exit code 2)"
     replay(renderer, ("Bash(npm run build)", "Bash", {"command": "npm run build"}, output, False))
     row, *why = shown(renderer)
-    assert row.startswith("✗ Bash    npm run build") and row.endswith("exit 2")
+    assert row.startswith("· Bash    npm run build") and row.endswith("exit 2")
     assert [line.strip() for line in why] == ["⎿ > build", "src/app.ts(12,5): error TS2322: bad type"]
+
+
+def test_no_output_nonzero_command_is_neutral(renderer):
+    """Seen live: a grep with no match showed as a red `exit 1` though the tool worked."""
+    command = 'cd sglang && grep -rn "apple silicon" docs'
+    output = "(no output)\n(exit code 1)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    row, *preview = shown(renderer)
+    assert row.startswith("· Bash") and row.endswith("exit 1")
+    assert preview == []
+
+
+def test_status_queries_need_no_command_specific_outcome_parser(renderer):
+    for command in ("which missing && which python", "grep -rn x docs"):
+        replay(renderer, (f"Bash({command})", "Bash", {"command": command}, "(exit code 1)", False))
+    rows = shown(renderer)
+    assert all(row.startswith("· Bash") and row.endswith("exit 1") for row in rows)
+
+
+def test_installing_pytest_is_not_a_test_run(renderer):
+    """Seen live: `uv pip install -e ".[srt_mps]" pytest pre-commit` counted as a test run,
+    so a failed build showed `exit 1` (not `build failed`) and the footer said tests ✗."""
+    command = 'cd python && uv pip install -e ".[srt_mps]" pytest pre-commit 2>&1 | tail -15'
+    output = "hint: Build failures usually indicate a problem with the package\n(exit code 1)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    renderer.handle(Done())
+    lines = shown(renderer)
+    assert lines[0].endswith("build failed") and "tests" not in lines[-1]
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["pytest -q", "uv run pytest -x", ".venv/bin/python -m pytest tests", "cd py && python3.12 -m unittest",
+     "FOO=1 npx jest", "npm test", "cargo test", "ls && ../.venv/bin/pytest --co | tail -3"],
+)  # fmt: skip
+def test_a_step_that_runs_tests_is_a_test_run(command):
+    from tinyharness.cli.render import _is_test_command, _RunningTool
+
+    assert _is_test_command(_RunningTool(f"Bash({command})", {"command": command}))
+
+
+def test_a_sandbox_block_in_a_command_that_runs_tests_is_still_a_block(renderer):
+    """Seen live: `import sglang` hit ~/.cache/sglang in a command that also ran
+    `pytest --co`; the tests never ran, so the row should say the sandbox blocked it."""
+    from pathlib import Path
+
+    blocked = Path.home() / ".cache" / "sglang"
+    command = ".venv/bin/python -c 'import sglang'; .venv/bin/python -m pytest test --co"
+    output = (
+        f"PermissionError: Operation not permitted: '{blocked}'\n"
+        f"[tinyharness:filesystem_or_process_denied path={blocked}] This command stayed sandboxed.\n"
+        "(exit code 1)"
+    )
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    assert shown(renderer)[0].replace("\\", "/").endswith("sandbox blocked a write to ~/.cache/sglang")
+
+
+def test_a_protected_path_block_says_it_needs_the_users_approval(renderer):
+    command = ".venv/bin/pre-commit install"
+    output = (
+        "PermissionError: [Errno 1] Operation not permitted: '.git/hooks/pre-commit'\n"
+        "[tinyharness:protected_path_denied path=.git/hooks/pre-commit] This command stayed sandboxed.\n"
+        "(exit code 3)"
+    )
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    row, *why = shown(renderer)
+    row = row.replace("\\", "/")  # Windows shows its own separator
+    assert row.startswith("⊘ Bash") and row.endswith("sandbox blocked a write to .git/hooks/pre-commit")
+    assert "changing them needs your approval" in " ".join(line.strip() for line in why)
+
+
+def test_tests_that_passed_before_a_later_step_failed_count_as_passed(renderer):
+    """Seen live: `...; .venv/bin/pytest | tail -15; ls -a | grep pre-commit` printed
+    `1 passed`, then the grep found nothing, and the footer said tests ✗."""
+    command = ".venv/bin/pytest 2>&1 | tail -15; ls -a | grep pre-commit"
+    output = "1 passed in 0.01s\n(exit code 1)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    renderer.handle(Done())
+    lines = shown(renderer)
+    assert lines[0].startswith("· Bash") and lines[0].endswith("exit 1")
+    assert "tests ✓" in lines[-1]
+
+
+def test_failing_tests_piped_into_tail_still_show_as_failed(renderer):
+    """Seen live: Sonnet ran `uv run pytest -q 2>&1 | tail -15`, which exits 0, and the row
+    said "3 passed" in green and the footer "tests ✓" over `1 failed, 3 passed`."""
+    command = "uv run pytest -q 2>&1 | tail -15"
+    output = "FAILED tests/test_stock.py::test_remove - DID NOT RAISE\n1 failed, 3 passed, 1 warning in 0.58s"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    renderer.handle(Done())
+    lines = shown(renderer)
+    assert lines[0].startswith("✗ Bash") and lines[0].endswith("1 failed, 3 passed, 1 warning in 0.58s")
+    assert "tests ✗" in lines[-1]
+
+
+def test_a_zero_error_count_is_not_a_failure(renderer):
+    command = "uv run pytest -q"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, "12 passed, 0 errors in 1.2s", False))
+    assert shown(renderer)[0].startswith("✓ Bash")
+
+
+def test_a_failed_setup_step_keeps_its_error_without_becoming_a_harness_failure(renderer):
+    command = "cd /missing && grep -rn x docs"
+    output = "bash: line 1: cd: /missing: No such file or directory\n(exit code 1)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    row, preview = shown(renderer)
+    assert row.startswith("· Bash") and preview.strip().startswith("⎿ bash: line 1: cd:")
 
 
 def test_rejected_and_denied_calls(renderer):
@@ -240,7 +349,20 @@ def test_the_footer_sums_up_the_turn(renderer):
 def test_a_failing_test_run_is_a_red_cross(renderer):
     replay(renderer, ("Bash(pytest)", "Bash", {"command": "pytest -x"}, "1 failed\n(exit code 1)", False))
     renderer.handle(Done())
-    assert "tests ✗" in shown(renderer)[-1]
+    lines = shown(renderer)
+    assert lines[0].endswith("1 failed") and "exit 1" not in lines[0]
+    assert "tests ✗" in lines[-1]
+
+
+def test_a_direct_python_test_file_failure_has_a_semantic_outcome(renderer):
+    """Seen live: a unittest file piped through grep showed raw `exit 120` four rows into
+    diagnosing the same macOS-only failure, although the meaningful outcome was test failure."""
+    command = "python test/registered/unit/mem_cache/test_radix_cache_unit.py 2>&1 | grep -m1 Error"
+    output = "RuntimeError: native hash is only supported on Linux\n(exit code 120)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    row, detail = shown(renderer)
+    assert row.endswith("tests failed") and "exit 120" not in row
+    assert "RuntimeError" in detail
 
 
 def test_plain_answers_get_no_footer(renderer):
@@ -323,8 +445,8 @@ def test_the_status_bar_says_what_matters(repl):
     bar = text(repl._status(200))
     assert "OpenAI · GPT / gpt-6-sol" in bar
     assert "⎇ main" in bar and "38% context" in bar and "300 out" in bar and "$0.42" in bar
-    # "no sandbox" when there's none (as when tinyharness itself runs in one: they don't nest)
-    assert ("no sandbox" in bar) == (repl.session.sandbox is None)
+    # "sandbox off" when there's none (as when tinyharness itself runs in one: they don't nest)
+    assert ("sandbox off" in bar) == (repl.session.sandbox is None)
 
 
 async def test_context_status_refreshes_after_each_model_call(repl):
@@ -483,6 +605,23 @@ async def test_a_message_sent_mid_turn_reaches_the_agent_at_its_next_step(tmp_pa
         session.close()
 
 
+def test_scratch_paths_are_shown_short_and_link_to_the_real_file(renderer):
+    """Seen live: rows read `/Users/…/.tinyharness/projects/app-63fe…/tmp/1793…/make_nb.py`,
+    burying the file name and making scratch work look like it happened somewhere odd."""
+    renderer.scratch = "/home/u/.tinyharness/projects/app/tmp/1793-abc/"
+    shown = renderer._relative("cd /home/u/.tinyharness/projects/app/tmp/1793-abc && python3 make_nb.py")
+    assert shown == "cd (scratch) && python3 make_nb.py"
+    assert (
+        renderer._relative("/home/u/.tinyharness/projects/app/tmp/1793-abc/make_nb.py")
+        == "(scratch)/make_nb.py"
+    )
+    assert renderer._relative("/repo/notebook.ipynb") == "notebook.ipynb"  # project paths as before
+    assert (
+        renderer._absolute("(scratch)/make_nb.py")
+        == "/home/u/.tinyharness/projects/app/tmp/1793-abc/make_nb.py"
+    )
+
+
 def test_the_live_region_never_shows_raw_link_codes():
     from tinyharness.cli.render import without_links
 
@@ -506,12 +645,52 @@ def test_reasoning_is_hidden_by_default_but_kept(renderer):
     assert renderer.last_thought == "The bug is in the retry loop."
 
 
+def test_a_thought_under_a_second_gets_no_row(renderer):
+    """Seen in review: "∴ Thought for 0s" rows, which say nothing; ctrl+t still shows it."""
+    think(renderer, "Easy.", seconds=0.2)
+    renderer.handle(AssistantText("Done."))
+    assert not any("Thought" in line for line in shown(renderer))
+    assert renderer.last_thought == "Easy."
+
+
 def test_reasoning_can_be_shown(renderer):
     renderer.show_thinking = True
     think(renderer, "The bug is in the retry loop.")
     assert "The bug is in the retry loop." in renderer.live_ansi(100)  # while it thinks
     renderer.handle(AssistantText("Found it."))
     assert shown(renderer)[:2] == ["∴ Thinking", "  The bug is in the retry loop."]
+
+
+def test_long_reasoning_streams_line_by_line_and_keeps_its_top(renderer):
+    """Seen live: the live region showed the last 8 lines of a thought, so the top of a long
+    one was never readable while it streamed. Finished lines now go to the scrollback."""
+    renderer.show_thinking = True
+    lines = [f"Step {i}: check the part numbered {i}." for i in range(1, 21)]
+    think(renderer, *(line + "\n" for line in lines), "Now the last idea, still")
+    printed = shown(renderer)
+    assert printed[0] == "∴ Thinking" and printed[1] == "  Step 1: check the part numbered 1."
+    assert "  Step 20: check the part numbered 20." in printed
+    live = renderer.live_ansi(100)
+    assert "Now the last idea, still" in live and "Step 1:" not in live
+    renderer.handle(AssistantText("Found it."))
+    text = "\n".join(printed + shown(renderer))  # shown() returns what's new since it was last called
+    assert text.count("Step 1: check") == 1 and text.count("Now the last idea, still") == 1
+
+
+def test_a_very_long_reasoning_line_shows_its_end_while_it_streams(renderer):
+    renderer.show_thinking = True
+    think(renderer, "start " + "word " * 2000 + "the latest words")
+    live = renderer.live_ansi(100)
+    assert live.rstrip().endswith("words") and "start" not in live and "…" in live
+
+
+def test_ctrl_t_says_it_applies_from_now_on():
+    """Reasoning already printed stays in the terminal's scrollback: the notice says so,
+    instead of promising to hide what's on screen."""
+    from tinyharness.cli.repl import Repl
+
+    source = inspect.getsource(Repl.show_thinking)
+    assert "hidden from here on" in source and "shown from here on" in source
 
 
 def test_a_model_that_keeps_its_reasoning_private_just_shows_the_time(renderer):
@@ -551,10 +730,77 @@ def test_a_sandboxed_test_run_that_fails_shows_as_failed(renderer):
     row = next(line for line in lines if line.startswith("✗ Bash"))
     first = next(line for line in lines if "PermissionError" in line)
     footer = lines[-1]
-    assert row.startswith("✗ Bash") and "exit 1" in row
+    assert row.startswith("✗ Bash") and "8 failed" in row and "exit 1" not in row
     assert first.strip() == "⎿ E   PermissionError: Operation not permitted"
     assert any(line.strip() == "8 failed, 462 passed in 10.29s" for line in lines)
     assert "tests ✗" in footer
+
+
+def test_a_sandbox_block_is_its_own_row_not_a_crash(renderer):
+    """Seen live: a blocked write to ~/.cache/sglang showed as a red `exit 1` under a
+    40-line traceback, which read as SGLang being broken."""
+    from pathlib import Path
+
+    blocked = Path.home() / ".cache" / "sglang"
+    output = (
+        f"Traceback (most recent call last):\n  ...\nPermissionError: Operation not permitted: '{blocked}'\n"
+        f"[tinyharness:filesystem_or_process_denied path={blocked}] This command stayed sandboxed.\n"
+        "(exit code 1)"
+    )
+    command = "python -c 'import sglang'"
+    for _ in range(2):
+        replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    lines = shown(renderer)
+    rows = [line for line in lines if line.startswith("⊘ Bash")]
+    assert len(rows) == 2 and rows[0].replace("\\", "/").endswith(
+        "sandbox blocked a write to ~/.cache/sglang"
+    )
+    said = " ".join(line.strip() for line in lines if not line.startswith("⊘"))
+    assert said.count("/sandbox") == 1 and "runs later, unsandboxed" in said  # said once
+    assert "Traceback" not in said  # folded: the model has it
+
+
+def test_a_nonzero_pipeline_status_is_neutral(renderer):
+    command = "git branch -a | head -3"
+    output = "main\n(exit code 141)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    text = "\n".join(shown(renderer))
+    assert "· Bash" in text and "exit 141" in text and "pipeline stopped" not in text
+
+
+def test_package_build_failure_has_a_semantic_outcome(renderer):
+    """Seen live: a missing Cargo toolchain appeared only as a scary raw `exit 1`."""
+    command = "cd python && uv pip install -e ."
+    output = (
+        "RuntimeError: cargo is required to discover the Rust extension modules\n"
+        "hint: Build failures usually indicate a problem with the package or the build environment\n"
+        "[tinyharness:venv_uses_sandbox_python path=.venv] Tell the user about the cache.\n"
+        "(exit code 1)"
+    )
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    text = "\n".join(shown(renderer))
+    assert "build failed" in text and "exit 1" not in text
+
+
+def test_github_cli_auth_failure_has_a_semantic_outcome(renderer):
+    """Seen live: probing public issues with an unauthenticated gh CLI showed raw exit 4."""
+    command = 'gh issue list -R org/repo -l "good first issue"'
+    output = "To get started with GitHub CLI, please run:  gh auth login\n(exit code 4)"
+    replay(renderer, (f"Bash({command})", "Bash", {"command": command}, output, False))
+    row, *preview = shown(renderer)
+    assert row.endswith("GitHub login required") and "exit 4" not in row
+    assert preview == ["  ⎿ To get started with GitHub CLI, please run:  gh auth login"]
+
+
+def test_the_spinner_shows_minutes_and_seconds(renderer, monkeypatch):
+    import tinyharness.cli.render as render
+    from tinyharness.events import ToolInputStreaming
+
+    now = [100.0]
+    monkeypatch.setattr(render.time, "monotonic", lambda: now[0])
+    renderer.handle(ToolInputStreaming("Bash", 10))
+    now[0] += 515
+    assert "8m 35s · ctrl+c to interrupt" in Text.from_ansi(renderer.live_ansi(100)).plain
 
 
 def test_an_app_that_crashes_in_the_sandbox_says_to_run_it_outside():
@@ -655,6 +901,7 @@ def test_writing_a_file_is_not_called_thinking(renderer):
 
     renderer.wait("Working")
     renderer.handle(Reasoning("Planning the deck."))
+    renderer._thought_since -= 3  # as if it took that long
     assert renderer._activity == "Thinking"
     renderer.handle(ToolInputStreaming("Write", 0))
     assert renderer._activity == "Writing a file"
@@ -962,3 +1209,231 @@ def test_a_passing_test_row_needs_no_output_under_it():
     renderer._stop_live()
     out = console.export_text()
     assert "3 passed" in out and "Ran 3 tests" not in out
+
+
+@pytest.mark.parametrize(
+    ("verdict", "label"),
+    [
+        (
+            "auto review held this call back (high risk: it posts project data). It did not run",
+            "auto review held back",
+        ),
+        ("auto review denied this call (it sends .env away). It did not run", "auto review denied"),
+        (
+            "auto review couldn't run (the review couldn't run: TimeoutError). It did not run",
+            "auto review couldn't run",
+        ),
+    ],
+)
+def test_a_call_auto_review_stopped_says_how_and_why(renderer, verdict, label):
+    """Seen live: "denied by classifier: Pattern…" for calls that were only held back, with
+    the reason cut off at 60 characters."""
+    replay(renderer, ("WebFetch(https://x.dev)", "WebFetch", {}, f"denied by classifier: {verdict}", True))
+    row, reason = shown(renderer)
+    assert row.startswith("⊘ WebFetch") and row.rstrip().endswith(label)
+    assert verdict.split("(", 1)[1].split(")")[0] in reason
+
+
+def test_a_saved_plan_is_shown_in_full_with_where_to_edit_it(renderer):
+    from tinyharness.events import PlanSaved
+
+    renderer.handle(ToolUse("Plan", {"title": "Token refresh"}, "Plan(Token refresh)"))
+    renderer.handle(ToolsDispatched(["Plan"], False))
+    renderer.handle(ToolResult("Plan", "Saved the plan to ~/x.md (2 steps).", False))
+    text = "# Token refresh\n\n## Goal\n\nRefresh tokens.\n\n## Steps\n\n### S1: Add refresh\n"
+    renderer.handle(PlanSaved("Token refresh", "/home/u/.tinyharness/plans/token-refresh.md", text))
+    out = "\n".join(shown(renderer))
+    assert "Plan  Token refresh" in out and "token-refresh.md · edit it to change the plan" in out
+    assert "Refresh tokens." in out and "S1: Add refresh" in out
+    assert "Saved the plan to" not in out  # the plan itself, not the tool's note to the model
+
+
+async def test_plan_mode_names_the_plan_in_the_footer(repl):
+    """Shift+tab is how a plan gets approved and built, so the footer says which plan and
+    what the key does."""
+    from conftest import call, make_ctx
+
+    assert text(repl._mode_part()).endswith("shift+tab to switch")
+    repl.session.set_mode("plan")
+    assert "plan · shift+tab to switch" in text(repl._mode_part())
+    ctx = make_ctx(repl.session.workspace.root)
+    await call(repl.session.plan_tool, {"plan": "# Token refresh\n\n1. a\n"}, ctx)
+    assert "⏸ plan · Token refresh · shift+tab to approve" in text(repl._mode_part())
+    current = repl.session.plan_tool.current
+    current.path.write_text(current.path.read_text() + "\nmore\n")
+    assert "Token refresh (edited)" in text(repl._mode_part())
+    current.path.write_text(current.text().removesuffix("\nmore\n"))  # undo the edit
+    await call(repl.session.plan_tool, {"plan": "# " + "x" * 60 + "\n\n1. a\n"}, ctx)
+    assert f"{'x' * 39}… · shift+tab" in text(repl._mode_part())
+    repl.session.set_mode("default")
+    assert "xxx" not in text(repl._mode_part())
+
+
+def test_a_plan_ready_for_review_leaves_the_choice_to_the_hand_off(renderer):
+    renderer.handle(Done(reason="plan_ready"))
+    out = "\n".join(shown(renderer))
+    assert "Plan ready for review" in out and "build it" not in out
+
+
+def test_a_plan_from_the_reply_shows_where_it_is_without_repeating_it(renderer):
+    from tinyharness.cli import markdown
+    from tinyharness.events import PlanSaved
+
+    renderer.handle(
+        PlanSaved("Token refresh", "/home/u/plans/token-refresh.md", "# Token refresh\n\nBODY\n", True)
+    )
+    out = "\n".join(shown(renderer))
+    assert "Plan  Token refresh" in out and "token-refresh.md" in out and "BODY" not in out
+    console = Console(width=60, record=True)
+    console.print(markdown.render("<plan>\n# Token refresh\n</plan>"))
+    text = console.export_text()
+    assert "<plan>" not in text and "Token refresh" in text
+
+
+def test_a_job_row_shows_where_the_job_got_to():
+    """Seen live: a finished 18-epoch run showed "epoch 1/18 loss=1.7000" on its row."""
+    from tinyharness.cli.render import summarize_output
+
+    out = "epoch 1/18 loss=1.7000\nepoch 18/18 loss=0.1073\nfinal loss: 0.1073\n(job j1 running for 3m00s: python3 train.py)"
+    assert summarize_output("Job", out) == "final loss: 0.1073"
+    assert summarize_output("Job", "(job j1 finished: exit 0, no output)").startswith("(job j1")
+
+
+def test_a_stopped_job_row_says_stopped():
+    """Seen in review: a stopped server's row showed the last request it logged."""
+    from tinyharness.cli.render import summarize_output
+
+    out = "GET / 200\n(job j3 stopped: python3 -m http.server · stopped it)"
+    assert summarize_output("Job", out) == "stopped"
+
+
+def test_a_command_that_moved_to_the_background_does_not_look_finished(renderer):
+    """Seen in review: a command still running at its 5s timeout became job j3, and its row
+    read "✓ Bash … 5s" as if it had finished."""
+    out = (
+        "building...\n(still running after 5s, so it moved to the background as job j3 instead "
+        "of being killed; you'll get a note when it ends. Job(id='j3', action='wait') waits.)"
+    )
+    replay(renderer, ("Bash(make)", "Bash", {"command": "make"}, out, False))
+    text = renderer.console.export_text()
+    assert "running in the background as j3" in text and "✓" not in text
+
+
+def test_files_changed_by_subagents_count_in_the_footer(renderer):
+    """Seen live: two subagents changed files, and the footer said "1 file +3 −1"."""
+    from tinyharness.events import SubagentUpdate
+
+    replay(renderer, ("Edit(a.py, -1/+3 lines)", "Edit", {"path": "a.py"}, "edited a.py", False))
+    renderer.handle(
+        SubagentUpdate(
+            "r1", "general-purpose", "tests", "done", tools_used=3,
+            edits=("Edit(a.py, -2/+2 lines)", "Write(tests/test_b.py, 10 lines)"),
+        )
+    )  # fmt: skip
+    renderer.handle(Done())
+    footer = shown(renderer)[-1]
+    assert "2 files +15 −3" in footer
+
+
+def test_narrowing_the_terminal_erases_the_box_as_it_rewrapped(monkeypatch):
+    """Seen live in iTerm2: dragging the window narrower left broken frame lines above the
+    input box. Each full-width line rewraps onto more rows, which the erase has to cover,
+    and the rows added push the drawing up, which the redraw undoes."""
+    from types import SimpleNamespace
+
+    from prompt_toolkit.data_structures import Point, Size
+    from prompt_toolkit.layout.screen import Char, Screen
+
+    from tinyharness.cli.repl import _count_reflowed_rows
+
+    screen = Screen()
+    for y, width in enumerate([100, 100, 100, 40]):  # frame top, input, frame bottom, toolbar
+        for x in range(width):
+            screen.data_buffer[y][x] = Char("─")
+    screen.height = 4
+    renderer = SimpleNamespace(
+        _last_screen=screen, _last_size=Size(rows=30, columns=100), _cursor_pos=Point(3, 1)
+    )
+
+    def app(columns):
+        renderer._cursor_pos = Point(3, 1)  # on the input line, below the frame's top
+        return SimpleNamespace(renderer=renderer, output=SimpleNamespace(get_size=lambda: Size(30, columns)))
+
+    monkeypatch.delenv("TERM_PROGRAM", raising=False)
+    # iTerm2 keeps the bottom row fixed: the frame's top line now takes two rows above the
+    # cursor, and the three frame lines' extra rows pushed the drawing up by three.
+    assert _count_reflowed_rows(app(60)) == 3 and renderer._cursor_pos == Point(3, 2)
+    assert _count_reflowed_rows(app(30)) == 10 and renderer._cursor_pos == Point(3, 4)
+    assert _count_reflowed_rows(app(120)) == 0 and renderer._cursor_pos == Point(3, 1)  # wider
+    # xterm.js (VS Code) keeps the top fixed and moves the cursor down by every row added.
+    monkeypatch.setenv("TERM_PROGRAM", "vscode")
+    assert _count_reflowed_rows(app(60)) == 0 and renderer._cursor_pos == Point(3, 4)
+
+
+async def test_a_burst_of_resizes_redraws_once_it_settles(monkeypatch):
+    """Seen live in iTerm2: dragging the window edge sent a resize every few milliseconds,
+    and redraws for sizes the window had already left piled up old boxes."""
+    import asyncio
+
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.renderer import Renderer as PTRenderer
+
+    from tinyharness.cli import repl as repl_module
+
+    resized, rendered = [], []
+    monkeypatch.setattr(Application, "_on_resize", lambda self: resized.append(1))
+    monkeypatch.setattr(
+        PTRenderer, "render", lambda self, app, layout, is_done=False: rendered.append(is_done)
+    )
+    monkeypatch.setattr(repl_module, "RESIZE_SETTLE_SECONDS", 0.05)
+    with create_pipe_input() as pipe:
+        app = repl_module._CompactPrompt(input=pipe, output=DummyOutput()).app
+        for _ in range(3):
+            app._on_resize()
+            app.renderer.render(app, app.layout)  # e.g. a spinner redrawing meanwhile
+        assert resized == [] and rendered == []  # held back while the size keeps changing
+        app.renderer.render(app, app.layout, is_done=True)  # leaving is never held back
+        await asyncio.sleep(0.15)
+        assert resized == [1] and rendered == [True]
+        app.renderer.render(app, app.layout)
+        assert rendered == [True, False]
+
+
+def test_printed_lines_end_where_their_text_ends():
+    """Seen live in iTerm2: Scout and every reply broke into rows with gaps between them
+    when the window narrowed. rich padded their lines with spaces to the full width, and
+    the terminal rewrapped the spaces like text."""
+    import io
+
+    from rich.padding import Padding
+    from rich.text import Text
+
+    from tinyharness.cli.theme import TrimmedConsole
+
+    out = io.StringIO()
+    console = TrimmedConsole(file=out, width=80, color_system="truecolor", force_terminal=True)
+    console.print(Padding(Text("hello"), (0, 0, 0, 2)))
+    console.print(Text("code   ", style="on #202020"))  # a background shows: kept
+    console.print("partial ", end="")  # the line isn't finished: more may follow
+    console.print("rest")
+    lines = out.getvalue().split("\n")
+    assert lines[0] == "  hello"  # was "  hello" and 73 spaces
+    assert lines[1] == "\x1b[48;2;32;32;32mcode   \x1b[0m"
+    assert lines[2] == "partial rest"
+
+
+def test_auto_modes_reason_stays_on_one_line():
+    """Seen in review: auto mode wrote two lines of review reasoning under each call."""
+    from tinyharness.events import PermissionDecision
+
+    renderer = Renderer(Console(width=60, record=True))
+    renderer.handle(ToolUse("Bash", {"command": "ls"}, "Bash(ls)"))
+    reason = "listing files in the project is read-only and matches what the user asked for here"
+    renderer.handle(PermissionDecision("Bash", True, "classifier", reason))
+    renderer.handle(ToolsDispatched(["Bash"], False))
+    renderer.handle(ToolResult("Bash", "a.py", False))
+    lines = renderer.console.export_text().splitlines()
+    [note] = [line for line in lines if "auto mode" in line]
+    assert "…" in note and len(lines) == 4  # blank, the row, its output, the one-line note

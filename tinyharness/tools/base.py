@@ -7,7 +7,8 @@ A tool is a class with:
   * `run(args, ctx)`       — does the work and returns text for the model
 
 Flags tell the harness how to treat it:
-  * `read_only`        — no side effects: allowed in plan mode, safe to run in parallel
+  * `read_only`        — no side effects: safe to run in parallel
+  * `available_in_plan_mode` — an intentional bookkeeping write offered while planning
   * `needs_permission` — False for bookkeeping tools (e.g. TodoWrite) that skip the gate
   * `network`          — reaches other machines (WebFetch): asks per site, never free
   * `approval_boundary`— a contained capability that still needs an explicit decision
@@ -20,7 +21,7 @@ import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr, model_validator
 
@@ -29,10 +30,11 @@ from tinyharness.llm.types import ToolSpec
 from tinyharness.llm.usage import UsageMeter
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from tinyharness.config import Config
     from tinyharness.events import Event
+    from tinyharness.jobs import JobScope
     from tinyharness.workspace import Scratch, Workspace
 
 
@@ -124,14 +126,28 @@ class ToolContext:
     usage: UsageMeter = field(default_factory=UsageMeter)  # tokens and cost, subagents included
     # The user's latest message, so agents started on its behalf know what it's for.
     request: str = ""
+    # Approved plan checkpoint included in compaction summaries. The session owns it;
+    # Plan clears it when a new draft supersedes the approved revision.
+    plan_summary: str = ""
+    # Set by a tool that hands the turn back to the user: Plan, when its plan is ready for
+    # review; Ask, when they'd rather answer in chat. The
+    # loop ends the turn after that batch.
+    hand_back: Literal["", "plan_ready", "awaiting_answer"] = ""
     # Where content from other machines in this conversation came from ("WebFetch
-    # docs.python.org"): once there is any, calls that can send data out need a person's
-    # yes (permissions/gate.py). Shared with subagents; changed in place, never replaced.
+    # docs.python.org"): once there is any, calls that can send data out are reviewed
+    # again (permissions/gate.py). Shared with subagents; changed in place, never replaced.
     outside: list[str] = field(default_factory=list)
     # Trusted correlation metadata for durable tool records. Tools must not ask the
     # model to supply these: the session sets them itself.
     session_id: str = ""
     turn_id: str = ""
+    # This agent's background jobs (tinyharness/jobs.py). None: commands only run in the
+    # foreground, and a timeout kills them.
+    jobs: JobScope | None = None
+    # Decides whether a running command (tool, its arguments) may reach a host its sandbox
+    # doesn't allow yet, while the connection waits: this agent's permission gate, set by
+    # the agent loop. None (a tool run outside a loop): such hosts are refused.
+    ask_network: Callable[[Tool[Any], dict[str, Any], str], Awaitable[bool]] | None = None
 
 
 def note_outside(ctx: ToolContext, source: str) -> None:
@@ -166,6 +182,27 @@ def mark_seen(ctx: ToolContext, path: Path) -> None:
         ctx.seen_versions[str(path)] = version
 
 
+def _decode_json_fields(raw: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    """A list or object argument that arrived as its JSON text, decoded. Seen live: Llama
+    3.1 8B sent Ask's `questions` as the string "[{...}]", and the call was refused. Only
+    fields the schema says aren't strings, so text the tool takes as given (a file's
+    content, a command) is never touched."""
+    properties = schema.get("properties") or {}
+    fixed = dict(raw)
+    for key, value in raw.items():
+        prop = properties.get(key) or {}
+        kinds = {prop.get("type")} | {option.get("type") for option in prop.get("anyOf", [])}
+        if not isinstance(value, str) or "string" in kinds or not kinds & {"array", "object"}:
+            continue
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, list | dict):
+            fixed[key] = decoded
+    return fixed
+
+
 class Tool(ABC, Generic[InputT]):
     """Define the interface implemented by every tool.
 
@@ -177,11 +214,16 @@ class Tool(ABC, Generic[InputT]):
     description: str
     Input: type[InputT]
     read_only: ClassVar[bool] = False
+    available_in_plan_mode: ClassVar[bool] = False
     needs_permission: ClassVar[bool] = True
     network: ClassVar[bool] = False
     # What it saves is read by every later session as context (the agent's memory), so
     # instructions planted by outside content could outlive this conversation.
     persists: ClassVar[bool] = False
+    # A call to it written as plain JSON in a reply, with no call marker, is run (see
+    # llm/textcalls.py). Only for tools that change nothing and reach nothing outside: such
+    # JSON may be an example the user asked for, and running one of those must cost nothing.
+    taken_from_json: ClassVar[bool] = False
 
     @abstractmethod
     async def run(self, args: InputT, ctx: ToolContext) -> str | ToolOutput:
@@ -226,6 +268,11 @@ class Tool(ABC, Generic[InputT]):
         """A contained capability that still needs explicit user approval, if any."""
         return None
 
+    def offered(self) -> bool:
+        """Whether to offer this tool to the model now (WebSearch: only where the provider
+        can search). Checked on every request, so it can follow /model."""
+        return True
+
     def outside_source(self, args: InputT) -> str | None:
         """Where this call's result comes from, if it's another machine (and so could carry
         instructions the user didn't write); None for local results."""
@@ -239,9 +286,21 @@ class Tool(ABC, Generic[InputT]):
         Gets the raw arguments, since it runs before they're validated."""
         return None
 
+    def nameable_risk(self, args: dict[str, Any]) -> str | None:
+        """For a call `risk` flags: a note for auto mode's review when the user may have
+        asked for exactly this (deleting a folder they named), so the review can allow it
+        instead of asking. None (the default): it always asks."""
+        return None
+
     def contained(self, args: dict[str, Any]) -> bool:
         """Whether this call runs inside the OS sandbox (writes only to the project, no
         network), so modes that allow project edits may allow it without asking."""
+        return False
+
+    def runs_unsandboxed(self, args: dict[str, Any]) -> bool:
+        """Whether this call runs a program with the sandbox turned off (`/sandbox off`),
+        so it can reach anything the user can. A blanket rule given while the sandbox was
+        on doesn't cover it."""
         return False
 
     def can_send_out(self, args: dict[str, Any]) -> bool:
@@ -290,7 +349,7 @@ class Tool(ABC, Generic[InputT]):
         InputT
             Validated input model.
         """
-        return self.Input.model_validate(raw)
+        return self.Input.model_validate(_decode_json_fields(raw, self.input_schema()))
 
     def input_schema(self) -> dict[str, Any]:
         """Return the provider-ready JSON schema for this tool's input."""

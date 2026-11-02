@@ -27,10 +27,12 @@ from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from tinyharness import trust
 from tinyharness.agent import world
 from tinyharness.agent.compaction import SUMMARY_MARK, Compactor
-from tinyharness.agent.history import History, Image, Message
+from tinyharness.agent.history import History, Image, Message, ToolCall
 from tinyharness.agent.loop import LoopDeps, record_usage, run_agent_loop, summary_notes
 from tinyharness.agent.prompts import build_system_prompt, load_instructions
 from tinyharness.agent.sessionlog import (
@@ -43,16 +45,17 @@ from tinyharness.agent.sessionlog import (
 )
 from tinyharness.agent.transcript import Transcript, trace_id
 from tinyharness.config import Config, dotenv_paths, dotenv_values, load_config, resolve_credentials
-from tinyharness.events import Compacted, Done, Event, SkillLoaded, ToolResult, ToolUse
+from tinyharness.events import Compacted, Done, Event, PlanSaved, SkillLoaded, ToolResult, ToolUse
 from tinyharness.ext import Command as ExtCommand
 from tinyharness.ext import Extension, LoadError, NeedsConsent, RunResult, load_extensions
 from tinyharness.hooks import Hook, HookRunner, load_hooks
+from tinyharness.jobs import JobTable
 from tinyharness.llm import identity
 from tinyharness.llm.calibration import CalibrationStore
-from tinyharness.llm.client import LLMClient, Ping
+from tinyharness.llm.client import LLMClient, Ping, ToolCallAccumulator
 from tinyharness.llm.models import ModelDirectory
 from tinyharness.llm.providers import DEFAULT_CONTEXT, Provider
-from tinyharness.llm.textcalls import recover_calls
+from tinyharness.llm.textcalls import recover_calls, repair_arguments
 from tinyharness.llm.tokens import count_tokens, estimate_tokens, model_counter
 from tinyharness.llm.types import Effort
 from tinyharness.llm.usage import Usage, UsageMeter
@@ -74,14 +77,111 @@ from tinyharness.sandbox.proxy import AllowlistProxy
 from tinyharness.skills import Skill, SkillRegistry, build_skill_prompt, load_skills, skills_section
 from tinyharness.subagents import AgentSpec, load_agents
 from tinyharness.subagents.runner import run_subagent
+from tinyharness.tools.ask import AskQuestion, AskTool, QuestionCallback
 from tinyharness.tools.base import Tool, ToolContext, ToolError, file_version
 from tinyharness.tools.bash import BashInput, BashTool
+from tinyharness.tools.job import JobTool
+from tinyharness.tools.plan import PlanInput, PlanTool
 from tinyharness.tools.registry import default_registry
 from tinyharness.tools.todo import normalize_todo_ids
+from tinyharness.tools.web import WebFetchTool, WebSearchTool
 from tinyharness.trust import TrustStore
 from tinyharness.workspace import Scratch, Workspace
 
+# A line that asks something: the reply ends its turn with questions for the user.
+_ASKS = re.compile(r"\?\s*(?:\*\*|\*|_)?\s*$", re.MULTILINE)
+QUESTIONS_NOTE = (
+    "Your last reply asked the user questions in writing. Call the Ask tool once with exactly "
+    "those questions: a one- or two-word header each, the question, and its options with the "
+    "one you recommend first (for a yes/no question, the two answers). Don't add, drop or "
+    "change any, call no other tool, and write nothing else."
+)
 MAX_SUGGESTION = 120  # chars: a longer "next message" is the model explaining, not a suggestion
+# Reasoning a model wrote into its reply instead of a separate field (open models served
+# without a reasoning parser); unclosed when the reply ended mid-thought.
+INLINE_REASONING = re.compile(r"^\s*<think>.*?(?:</think>|\Z)", re.DOTALL)
+# Told to the model when the conversation doesn't already say which side of plan mode it's
+# on (`_plan_note_says_planning`). Leaving plan mode is always the user's switch.
+PLAN_TAG = "<plan-mode>"
+PLAN_BLOCK = re.compile(r"<plan>\s*(.*?)\s*</plan>", re.DOTALL)  # a plan in the reply (_plan_in_reply)
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})\s*([\w+-]*)")
+# A plan's title line: "# Title", and as Gemma 3 also wrote it, "**# Title**" or "**Title: …**".
+PLAN_TITLE = re.compile(r"^\*{0,2}(?:# |Title:\s*)(\S.*?)\*{0,2}\s*$")
+
+
+def plan_in_reply(text: str) -> str:
+    """The plan in a plan-mode reply that didn't call Plan, or "".
+
+    Whatever is between <plan> tags (no title needed), or else Markdown from a '# Title' line
+    on, as the Plan tool asks for (inside a ```markdown fence, it ends with the fence). Seen
+    live: Gemma 3 12B wrote its plans that way, fenced or not, its title also as '**# Title**'
+    or '**Title: …**', and they were lost. A '# ' line in a code block is a comment, and
+    replies that only asked questions never had a title line."""
+    tagged = [block.strip() for block in PLAN_BLOCK.findall(text) if block.strip()]
+    titled = _titled_plan(PLAN_BLOCK.sub("", text))
+    # Whatever is between the tags is the plan, unless it's one line beside a whole plan
+    # written above it (seen live: qwen3-4b-2507 wrote its plan, then "<plan>done</plan>").
+    if tagged and ("\n" in tagged[-1] or not titled):
+        return tagged[-1]
+    return titled
+
+
+def _titled_plan(text: str) -> str:
+    """Markdown from a plan's title line on, outside code blocks; "" when there's none."""
+    lines = text.splitlines()
+    fence = ""  # the open fence's marker, while in a code block
+    markdown = False
+    for i, line in enumerate(lines):
+        if found := FENCE.match(line):
+            if not fence:
+                fence, markdown = found.group(1), found.group(2).lower() in ("", "markdown", "md")
+            elif line.strip() == fence:
+                fence = ""
+            continue
+        if (fence and not markdown) or not (title := PLAN_TITLE.match(line)):
+            continue
+        rest = lines[i + 1 :]
+        if fence:
+            end = next((j for j, after in enumerate(rest) if after.strip() == fence), len(rest))
+            rest = rest[:end]
+        return "\n".join([f"# {title.group(1).strip('* ')}", *rest]).strip()
+    return ""
+
+
+# The order is look, ask, plan, then revise: enough context before questions, and answers
+# before the plan is committed for review.
+PLAN_ON = (
+    "You are in plan mode: you can read, search and research, but nothing that changes files "
+    "or runs commands is available. Work in this order:\n"
+    "1. Look: read the files the request touches and what they use, enough to ask good "
+    "questions; don't explore everything first. Don't ask for facts the project or the web "
+    "can tell you.\n"
+    "2. Ask, only if an answer would change scope, data, keys, tools or checks: at most three "
+    "questions, each with options and your recommended one first. With the Ask tool, the user "
+    "picks the answers and you carry on. Without it, number them in your reply with your "
+    'recommended default for each, so "defaults" is a full answer, and end your turn to wait. '
+    "Offer different approaches only for a real trade-off. Ask another round only when an "
+    "answer opens a new blocking choice.\n"
+    "3. Plan: once every blocking choice is answered or has a default, write the plan in "
+    "Markdown with the Plan tool (or, if you can't call it, put the whole plan in your reply "
+    "between <plan> and </plan>). The user reviews it right away, approves "
+    "it by leaving plan mode, and tells you when to build. A small change gets a short plan "
+    "and no questions.\n"
+    "4. Revise: when the user asks for changes, call Plan again with the whole plan, changing "
+    "only what they touched.\n"
+    "Don't write the finished work (whole files or programs) into your reply; you'll be told "
+    "when plan mode is off."
+)
+PLAN_OFF = "Plan mode is off: the tools that change files and run commands are available again."
+
+
+def _plan_note_says_planning(messages: Sequence[Message]) -> bool:
+    """Whether the last plan-mode note in the conversation says plan mode is on."""
+    for message in reversed(messages):
+        content = message.content if message.role == "user" and isinstance(message.content, str) else ""
+        if content.startswith(PLAN_TAG):
+            return content.startswith(PLAN_TAG + PLAN_ON)
+    return False
 
 
 def _one_at_a_time(callback: PermissionCallback | None) -> PermissionCallback | None:
@@ -201,6 +301,9 @@ class SessionOptions:
     store: SessionStore | None = None  # where conversations are saved (default: files in the project)
 
     permission_callback: PermissionCallback | None = None
+    # Answers the agent's questions (the Ask tool): the user's pick for each, or None to
+    # answer in chat. None: Ask isn't offered, and the agent asks in its reply instead.
+    question_callback: QuestionCallback | None = None
     on_event: Callable[[Event], None] | None = None  # progress of subagents/teammates as it happens
     hooks: list[Hook] = field(default_factory=list)
     evaluators: list[Evaluator] = field(default_factory=list)
@@ -284,6 +387,14 @@ class Session:
             notify=self.options.on_event,
             session_id=self.id,
         )
+        self.jobs = JobTable(
+            self.scratch.dir / "jobs",
+            max_running=self.config.jobs.max_running,
+            background_on_timeout=self.config.jobs.background_on_timeout,
+            transcript=self.transcript,
+            first_id=(saved.last_job + 1) if saved is not None else 1,
+        )
+        self.ctx.jobs = self.jobs.scope(f"main-{self.id}", self.ctx.outside)
 
         # Extensions: skills, agents, hooks (plugins contribute to all three).
         self.skills = SkillRegistry(load_skills(root) if self.options.enable_skills else [])
@@ -330,6 +441,7 @@ class Session:
             extra_write=self.config.sandbox.allow_write,
             allow_localhost=self.config.sandbox.allow_localhost,
             allowed_hosts=self.config.sandbox.allow_hosts,
+            shared_caches=self.config.sandbox.share_caches,
         )
         hosts = self.config.sandbox.allow_hosts
         self.proxy = (
@@ -342,6 +454,8 @@ class Session:
         self._session_network_hosts: set[str] = set()
         self.extensions: list[Extension] = []
         self.extension_errors: list[LoadError] = []
+        # Made once: the plan outlives the tool set being rebuilt (/extensions on ...).
+        self.plan_tool = PlanTool(self.workspace.root, planning=lambda: self.mode == PermissionMode.PLAN)
         enabled = list(self.config.extensions.enabled)
         if self.config.todo_list and "todo" not in enabled:  # the older setting for the same thing
             enabled.append("todo")
@@ -357,6 +471,7 @@ class Session:
             hooks=self.hooks,
             callback=_one_at_a_time(self.options.permission_callback),
             session_network_hosts=self._session_network_hosts,
+            allowed_hosts=self.sandbox_policy.allowed_hosts,
             scratch=self.scratch,
             # Files that would run code outside the sandbox: writing them always asks.
             protected=(
@@ -380,6 +495,11 @@ class Session:
         self._agent_writes = asyncio.Lock()
         self.resume_report: world.ResumeReport | None = None  # what changed while away, when resumed
         self._resume_note = ""
+        self._sandbox_note = ""  # told to the model with the next prompt (see set_sandbox)
+        self._plan_note = ""  # approved plan handed to the builder on its next turn
+        self._planned = False  # a turn ran in plan mode since it was last entered
+        # Where a plan builds by default: the mode the user worked in before planning.
+        self.mode_before_plan = PermissionMode.DEFAULT
         if saved is not None:
             self._restore(saved)
             try:
@@ -444,12 +564,39 @@ class Session:
             history.messages[0] = Message(role="system", content=self._system_prompt())
         self.history = history
         self.ctx.todos = normalize_todo_ids(saved.todos)
+        self.plan_tool.restore(saved.plan)
+        if self.plan_tool.current is not None and not self.plan_tool.current.approved:
+            # It was waiting for review. Resumed in another mode, every write was refused as
+            # unapproved, and only Shift+Tab into plan mode and out again approved it (seen
+            # in review). Back in plan mode, leaving it approves the plan, as before.
+            if self.mode != PermissionMode.PLAN:
+                self.mode_before_plan = self.mode
+                self.gate.set_mode(PermissionMode.PLAN)
+        elif self.plan_tool.current is not None:
+            plan = self.plan_tool.current
+            self.ctx.plan_summary = (
+                f"[approved plan] {plan.path} revision {plan.approved}; follow its steps in order "
+                "and stop for re-approval if it changes"
+            )
+            self._plan_note = (
+                f'<approved-plan path="{plan.path}" revision="{plan.approved}">\n'
+                "This approved plan was restored with the session. Read it before continuing "
+                "and stop for re-approval if it changed.\n</approved-plan>"
+            )
         self.ctx.read_paths = set(report.current_reads)
         # Those files are as the agent last saw them, so a change from now on (the user
         # editing one) must make Edit and Write ask for a fresh Read, as in a live session.
         self.ctx.seen_versions = {p: v for p in report.current_reads if (v := file_version(Path(p)))}
         self.resume_report = report
         self._resume_note = report.note()
+        if saved.jobs:  # the history may still talk about them as running
+            stopped = ", ".join(
+                f"{job_id} ({' '.join(cmd.split())[:60]})" for job_id, cmd in saved.jobs.items()
+            )
+            self._resume_note = (
+                (f"{self._resume_note}\n" if self._resume_note else "")
+                + f"Background jobs stopped when the earlier session ended: {stopped}. Start them again if you still need them."
+            )
         self._sync()
         if report.now:
             self.transcript.write("files", files=report.now)
@@ -486,7 +633,10 @@ class Session:
             calibration=self._calibration,
         )
         self.llm.show_reasoning = cfg.show_thinking
-        self.gate.classifier = AutoModeClassifier(self.llm, model=cfg.role_model("safety_classifier"))
+        # Unset, the review uses whatever model the session is on now (it follows /model).
+        self.gate.classifier = AutoModeClassifier(
+            self.llm, model=cfg.role_model("safety_classifier"), review_model=cfg.models.roles.safety_review
+        )
         self.compactor = Compactor(
             self.llm,
             context_window=lambda: self.context_window,
@@ -538,6 +688,7 @@ class Session:
                 extra_tools=extra_tools,
                 inbox=inbox,
                 write_lock=self._agent_writes,
+                plan_guard=self._plan_guard,
                 **({"max_steps": spec.max_steps} if spec.max_steps else {}),
             )
         finally:
@@ -651,8 +802,16 @@ class Session:
                     self.sandbox_policy,
                     proxy=self.proxy,
                     session_hosts=self._session_network_hosts,
+                    background=True,
                 )
             )
+            self.tools.register(JobTool())
+        # Reading the web is core: WebFetch works with any provider, WebSearch only where the
+        # provider has built-in search (`WebSearchTool.offered`).
+        self.tools.register(WebSearchTool(lambda: self.llm, lambda: self.config.role_model("search_digest")))
+        self.tools.register(WebFetchTool())
+        self.tools.register(self.plan_tool)  # offered in plan mode only
+        self.tools.register(AskTool(self.options.question_callback))  # when someone can answer
         for tool in self.options.tools:  # before the Agent tool, so subagents can use them too
             self.tools.register(tool)
         for ext in self.extensions:
@@ -723,7 +882,9 @@ class Session:
     def prefix_tokens(self) -> int:
         """Tokens sent before the conversation on every request: the system prompt and the
         tool definitions. The provider caches them, as long as they stay the same."""
-        tools = [t.spec().__dict__ for t in self.tools.available(self.mode)]
+        tools = [
+            t.spec().__dict__ for t in self.tools.available(self.mode, None, self.gate.rules.hidden_tools())
+        ]
         return count_tokens(self._system_prompt() + json.dumps(tools, default=str))
 
     def extension_tokens(self, ext: Extension) -> int:
@@ -777,10 +938,115 @@ class Session:
         """Exact destinations the user approved for this active session."""
         return tuple(sorted(self._session_network_hosts))
 
-    def set_mode(self, mode: PermissionMode | str) -> None:
-        """For the session and its subagents, including ones already running."""
-        self.gate.set_mode(PermissionMode.parse(mode))
+    def set_mode(self, mode: PermissionMode | str) -> str:
+        """For the session and its subagents. Leaving plan mode approves its exact draft.
+
+        Returns a short user-facing notice about the plan: approved, or ended because its file
+        was emptied or deleted. Leaving plan mode never fails: it's the user's choice.
+        """
+        target = PermissionMode.parse(mode)
+        notice = ""
+        if self.mode == PermissionMode.PLAN and target != PermissionMode.PLAN:
+            had_plan = self.plan_tool.current is not None
+            approved = self.plan_tool.approve()
+            if had_plan and not approved:
+                self.ctx.plan_summary, self._plan_note = "", ""
+                notice = "No plan approved: the plan file is empty or gone, so this builds without one"
+            elif not had_plan and self._planned:
+                # Seen live: Qwen 4B planned in its replies and never called Plan. Nothing is
+                # enforced then, which works with any model; say so, so it's no surprise.
+                notice = "No plan was saved (it's only in the conversation), so this builds without one"
+            if approved and self.plan_tool.current is not None:
+                plan = self.plan_tool.current
+                self.transcript.write(
+                    "plan_approved",
+                    id=plan.id,
+                    path=str(plan.path),
+                    revision=approved,
+                    turn=self.ctx.turn_id or None,
+                )
+                self._plan_note = (
+                    f'<approved-plan path="{plan.path}" revision="{approved}">\n'
+                    "The user approved this exact plan. Read it before building, follow its "
+                    "steps in order, and stop for re-approval if it changes.\n</approved-plan>"
+                )
+                self.ctx.plan_summary = (
+                    f"[approved plan] {plan.path} revision {approved}; follow its steps in order "
+                    "and stop for re-approval if it changes"
+                )
+                title = plan.title if len(plan.title) <= 50 else plan.title[:49] + "…"
+                notice = f"Plan approved · {title} · {approved[:8]} · say “build it” when ready"
+        self._planned = False
+        if target == PermissionMode.PLAN and self.mode != PermissionMode.PLAN:
+            self.mode_before_plan = self.mode
+        self.gate.set_mode(target)
         self.transcript.write("mode", mode=self.gate.mode.value)
+        return notice
+
+    async def _plan_in_reply(self) -> PlanSaved | None:
+        """Save a plan the model put in its reply (`plan_in_reply`), as if it had called Plan.
+
+        Seen live: Qwen 4B planned well in its replies but never called Plan; putting the
+        answer into a tool's long text argument is a habit only models trained on it have."""
+        allowed = self.options.allowed_tools
+        if self.mode != PermissionMode.PLAN or (allowed and self.plan_tool.name not in allowed):
+            return None
+        last = next((m for m in reversed(self.history.messages) if m.role == "assistant"), None)
+        found = plan_in_reply(last.content) if last is not None and isinstance(last.content, str) else ""
+        if not found:
+            return None
+        if self.plan_tool.current is not None and self.plan_tool.current.edited():
+            return None  # the user's hand edit wins; the Plan tool shows it to the model
+        await self.plan_tool.run(PlanInput(plan=found), self.ctx)
+        self.ctx.hand_back = ""  # the turn is already over
+        plan = self.plan_tool.current
+        if plan is None or (text := plan.text()) is None:
+            return None
+        self.transcript.write("plan_saved", plan=self.plan_tool.snapshot(), source="reply")
+        return PlanSaved(plan.title, str(plan.path), text, in_reply=True)
+
+    def _plan_guard(self, tool: Tool[Any], args: Any) -> str:
+        if self.mode == PermissionMode.PLAN or tool.name == self.plan_tool.name:
+            return ""
+        if tool.is_read_only(args):
+            return ""
+        return self.plan_tool.build_error()
+
+    def set_sandbox(self, on: bool) -> str:
+        """Turn the sandbox on or off for the rest of the session, subagents included.
+
+        Returns why it couldn't, or "". The Bash tool's description changes with it, so the
+        next request rebuilds the provider's prompt cache once.
+        """
+        if on and self.sandbox is None:
+            backend = detect_sandbox()
+            if backend is None:
+                return f"no sandbox backend is available here: {setup_hint()}"
+        elif not on and self.sandbox is not None:
+            if self.config.sandbox.required:
+                return "sandbox.required is true in config.toml"
+            backend = None
+        else:
+            return ""
+        if self.proxy is not None:
+            self.proxy.close()
+        self.sandbox = backend
+        hosts = self.config.sandbox.allow_hosts
+        self.proxy = (
+            AllowlistProxy(tuple(hosts))
+            if backend is not None and not getattr(backend, "manages_network", False) and hosts
+            else None
+        )
+        bash = self.tools.get("Bash")
+        if isinstance(bash, BashTool):
+            bash.set_sandbox(backend, self.proxy)
+        self._sandbox_note = (
+            "The user turned the sandbox back on: commands are contained again (see the Bash tool)."
+            if on
+            else "The user turned the sandbox off: commands now run unsandboxed (see the Bash tool)."
+        )
+        self.transcript.write("sandbox", enabled=on, backend=backend.name if backend else None)
+        return ""
 
     def set_show_thinking(self, show: bool) -> None:
         """Ask for the model's reasoning where a provider only sends it when asked (OpenAI's
@@ -836,7 +1102,13 @@ class Session:
         what the session spent (see UsageMeter.since_clear)."""
         had_conversation = any(m.role != "system" for m in self.history.messages)
         self.history.reset()
+        # The new conversation can't see the old one's jobs, so they stop with it.
+        self.jobs.stop_all_now()
         self.ctx.outside.clear()  # a new conversation has no outside content in it yet
+        # The plan belonged to that conversation: the new one can't see it, so it can't be
+        # held to it. The plan file stays where it is.
+        self.plan_tool.current = None
+        self.ctx.plan_summary, self._plan_note = "", ""
         self.ctx.usage.mark_clear()
         self.resume_report, self._resume_note = None, ""
         if had_conversation:
@@ -849,6 +1121,7 @@ class Session:
             if isinstance(self.transcript, Transcript):
                 self.transcript.set_secrets(self.config.credential_values())
             self.log = SessionLog(self.transcript)
+            self.jobs.transcript = self.transcript
             self.transcript.write(
                 "session_start",
                 model=self.config.model,
@@ -858,6 +1131,7 @@ class Session:
             )
             self._log_model()
             self._log_world()
+            self.ctx.jobs = self.jobs.scope(f"main-{self.id}", self.ctx.outside)
         self._sync()
 
     # ------------------------------------------------------------------ running
@@ -943,6 +1217,18 @@ class Session:
         if self._resume_note:  # tell the model once what changed while the session was away
             prompt = f"<session-resumed>\n{self._resume_note}\n</session-resumed>\n\n{prompt}"
             self._resume_note = ""
+        if self._sandbox_note:
+            prompt = f"<sandbox-changed>{self._sandbox_note}</sandbox-changed>\n\n{prompt}"
+            self._sandbox_note = ""
+        if self._plan_note:
+            prompt = f"{self._plan_note}\n\n{prompt}"
+            self._plan_note = ""
+        # Plan mode hides the tools that change things: say so, or the model can only guess
+        # why they're gone. Read from the conversation each turn rather than remembered:
+        # compaction can summarize the note away, and a resumed session starts with none.
+        self._planned = self._planned or self.mode == PermissionMode.PLAN
+        if (planning := self.mode == PermissionMode.PLAN) != _plan_note_says_planning(self.history.messages):
+            prompt = f"{PLAN_TAG}{PLAN_ON if planning else PLAN_OFF}</plan-mode>\n\n{prompt}"
 
         deps = LoopDeps(
             llm=self.llm,
@@ -954,12 +1240,21 @@ class Session:
             hooks=self.hooks,
             allowed_tools=set(self.options.allowed_tools) if self.options.allowed_tools else None,
             max_steps=self.options.max_steps,
-            inbox=self.take_steering,
+            inbox=self._inbox,
             turn_id=turn_id,
+            plan_handoff=True,
+            plan_guard=self._plan_guard,
         )
         skill_reads: dict[str, Skill] = {}  # Read calls of a SKILL.md, by call id
         try:
             async for event in run_agent_loop(prompt, self.history, deps, images):
+                if (
+                    isinstance(event, Done)
+                    and event.reason == "stop"
+                    and (tagged := await self._plan_in_reply())
+                ):
+                    yield tagged
+                    event = Done(reason="plan_ready")
                 if isinstance(event, (ToolUse, ToolResult, Compacted, Done)):
                     self._sync()  # saved as it goes, so a crash loses at most one step
                 if isinstance(event, Done):
@@ -977,6 +1272,11 @@ class Session:
                 read = skill_reads.pop(event.id, None) if isinstance(event, ToolResult) else None
                 if read is not None and isinstance(event, ToolResult) and not event.is_error:
                     yield SkillLoaded(read.name, count_tokens(event.output), "read")
+                if isinstance(event, ToolResult) and event.name == self.plan_tool.name and not event.is_error:
+                    plan = self.plan_tool.current
+                    if plan is not None and (text := plan.text()) is not None:
+                        self.transcript.write("plan_saved", plan=self.plan_tool.snapshot())
+                        yield PlanSaved(plan.title, str(plan.path), text)
         except (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit):
             self.transcript.write(
                 "turn_end",
@@ -1075,6 +1375,11 @@ class Session:
         """Messages from `steer` waiting for the agent's next step."""
         return tuple(self._steering)
 
+    def _inbox(self) -> list[str]:
+        """What reaches the agent between steps: your messages, then notes about its jobs."""
+        notes = self.ctx.jobs.take_notes() if self.ctx.jobs is not None else []
+        return [*self.take_steering(), *notes]
+
     def take_steering(self) -> list[str]:
         """Messages from `steer` not delivered yet (and forget them)."""
         taken, self._steering = self._steering, []
@@ -1103,10 +1408,10 @@ class Session:
         question = question.strip()
         if not question:
             raise ValueError("ask a question, e.g. /btw why this approach?")
-        answer, wanted_tool = await self._side_call(
+        answer, wanted_tools, _ = await self._side_call(
             f"{load_prompt('aside')}\n\nQuestion: {question}", "aside"
         )
-        if not answer and wanted_tool:
+        if not answer and wanted_tools:
             return "That needs a tool (reading or running something): ask it in the conversation instead."
         return answer or "(no answer)"
 
@@ -1115,16 +1420,20 @@ class Session:
         there's no conversation yet or no clear next step."""
         if not any(m.role == "assistant" for m in self.history.messages):
             return ""
-        text, _ = await self._side_call(load_prompt("next_prompt"), "suggestion")
+        text, _, finish = await self._side_call(load_prompt("next_prompt"), "suggestion")
+        if finish != "stop":
+            return ""  # cut off or broken: whatever it got to isn't a message to send
+        text = INLINE_REASONING.sub("", text)
         line = next((line.strip() for line in text.splitlines() if line.strip()), "")
         line = line.strip("\"'` ")
         return line if len(line) <= MAX_SUGGESTION else ""
 
-    async def _side_call(self, note: str, kind: str) -> tuple[str, bool]:
+    async def _side_call(self, note: str, kind: str) -> tuple[str, list[ToolCall], str | None]:
         """One model call on a copy of the conversation plus `note`, kept out of the
         conversation. It sends the agent's own system prompt and tool definitions, so the
-        provider's cached prefix covers nearly all of it; any tool call is dropped.
-        Returns the reply's text and whether the model tried to call a tool."""
+        provider's cached prefix covers nearly all of it; no tool call is run.
+        Returns the reply's text, the calls it made (written as text ones too), and the
+        normalized finish reason."""
         messages = list(self.history.messages) or [Message(role="system", content=self._system_prompt())]
         last = messages[-1]
         if last.role == "user":  # a turn that just started: one user message, not two
@@ -1133,20 +1442,59 @@ class Session:
         else:
             messages.append(Message(role="user", content=note))
         allowed = set(self.options.allowed_tools) if self.options.allowed_tools else None
-        available = {t.name: t.spec() for t in self.tools.available(self.mode, allowed)}
+        available = {
+            t.name: t.spec() for t in self.tools.available(self.mode, allowed, self.gate.rules.hidden_tools())
+        }
         text: list[str] = []
-        called = False
+        native = ToolCallAccumulator()
         usage: Usage | None = None
+        finish: str | None = None
         async for chunk in self.llm.stream(messages, list(available.values())):
             text.append(chunk.text)
-            called = called or chunk.tool_call_delta is not None
+            if chunk.tool_call_delta:
+                native.add(chunk.tool_call_delta)
             usage = chunk.usage or usage
+            finish = chunk.finish_reason or finish
         if usage is not None:
             record_usage(usage, self.llm, self.ctx, self.transcript, kind=kind)
         answer, calls = recover_calls(
-            "".join(text), lambda name: available[name].parameters if name in available else None
+            "".join(text),
+            lambda name: available[name].parameters if name in available else None,
+            lambda name: True,  # nothing in a side call runs: its calls are only read
         )
-        return answer.strip(), called or bool(calls)
+        return answer.strip(), native.calls() + calls, finish
+
+    async def questions_in_reply(self) -> list[AskQuestion]:
+        """The questions the agent's last reply asked in prose, as Ask questions for the
+        picker: one extra model call that only restates them as an Ask call. [] when the
+        last reply has none, Ask isn't offered, or they can't be read.
+
+        Seen live: models that write their questions instead of calling Ask (Ministral 8B
+        in 5 of 6 plan-mode runs, Qwen3 4B in some) left the user to type the answers.
+        Restating questions is far easier for a small model than choosing to call Ask
+        while planning, and the reply to it is never shown or kept.
+        """
+        ask = self.tools.get("Ask")
+        last = self.history.messages[-1] if self.history.messages else None
+        if (
+            ask is None
+            or not ask.offered()
+            or last is None
+            or last.role != "assistant"
+            or last.tool_calls
+            or not _ASKS.search(last.content or "")
+        ):
+            return []
+        _, calls, finish = await self._side_call(QUESTIONS_NOTE, "questions")
+        for call in calls:
+            if call.name != ask.name or finish == "length":
+                continue
+            try:
+                raw = json.loads(repair_arguments(call.arguments) or call.arguments)
+                return list(ask.parse(raw).questions)
+            except (json.JSONDecodeError, ValidationError, TypeError):
+                continue
+        return []
 
     async def run_skill(self, name: str, args: str = "") -> AsyncGenerator[Event, None]:
         """Run an installed skill as a turn.
@@ -1209,7 +1557,8 @@ class Session:
             self.gate.add_network_bundle(skill.name, tuple(skill.network_hosts))
 
     def close(self) -> None:
-        """Release proxies, logs, and temporary session data."""
+        """Stop background jobs; release proxies, logs, and temporary session data."""
+        self.jobs.stop_all_now()  # before the scratch directory holding their logs goes
         for proxy in [self.proxy, *self._extension_proxies.values()]:
             if proxy is not None:
                 proxy.close()
