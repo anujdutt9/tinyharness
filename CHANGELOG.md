@@ -7,8 +7,10 @@ the SDK, and every break is listed here.
 
 ## Unreleased
 
+## 0.1.3 (2026-11-02)
+
 ### Fixed
-- Claude models on GitHub Copilot no longer fail with `thinking.adaptive.block_binding: Extra
+- Models on GitHub Copilot no longer fail with `thinking.adaptive.block_binding: Extra
   inputs are not permitted`. Anthropic-compatible gateways that reject that field can set
   `block_binding = false` on the provider; Anthropic itself still gets it.
 
