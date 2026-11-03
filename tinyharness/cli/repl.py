@@ -1390,18 +1390,27 @@ def _image_words(text: str, cwd: Path) -> list[tuple[str, Path]]:
     """The words of `text` that name image files, and their paths. Words are split as a shell
     would, so a pasted `Screenshot\\ 2026-09-30\\ at\\ 3.11.03 PM.png` or a quoted
     drag-and-drop path is one path. Only names ending like an image count."""
-    try:
-        words = shlex.split(text)
-    except ValueError:
-        # An unmatched quote ("what's wrong here?"): split on spaces, but not escaped ones,
-        # which a dropped file's path is full of.
-        words = [re.sub(r"\\(.)", r"\1", word) for word in re.findall(r"(?:\\.|\S)+", text)]
     found = []
-    for word in words:
+    for word in _words(text, windows=os.name == "nt"):
         if word.lower().endswith(_IMAGE_NAMES):
             path = Path(word).expanduser()
             found.append((word, path if path.is_absolute() else cwd / path))
     return found
+
+
+def _words(text: str, *, windows: bool) -> list[str]:
+    """`text` split as the terminal wrote it. A macOS or Linux terminal escapes the spaces of a
+    dropped path with backslashes; a Windows one quotes the path, whose backslashes are its
+    separators (seen in CI: POSIX splitting turned `C:\\Users\\shot.png` into `C:Usersshot.png`)."""
+    if windows:
+        words = re.findall(r'"[^"]*"|\'[^\']*\'|\S+', text)
+        return [w[1:-1] if len(w) > 1 and w[0] == w[-1] and w[0] in "\"'" else w for w in words]
+    try:
+        return shlex.split(text)
+    except ValueError:
+        # An unmatched quote ("what's wrong here?"): split on spaces, but not escaped ones,
+        # which a dropped file's path is full of.
+        return [re.sub(r"\\(.)", r"\1", word) for word in re.findall(r"(?:\\.|\S)+", text)]
 
 
 def capture_pasted_images(text: str, cwd: Path) -> dict[str, Image]:
@@ -1434,7 +1443,7 @@ def attachments(
         image = (captured or {}).get(str(path))
         if image is None:
             if not path.is_file():
-                if word.startswith(("/", "~")):  # a file named outright: say it's gone
+                if Path(word).expanduser().is_absolute():  # a file named outright: say it's gone
                     problems.append(
                         f"{path.name} isn't there any more (macOS removes a screenshot dragged "
                         "from its thumbnail within seconds); drop it in again, or save it first"

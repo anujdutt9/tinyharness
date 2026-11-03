@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from tinyharness.cli.markdown import split_finished
@@ -275,7 +277,8 @@ def test_a_dropped_screenshot_is_kept_even_after_macos_deletes_it(tmp_path):
     shot = tmp_path / "TemporaryItems" / "Screenshot 2026-11-02 at 3.41.29 PM.png"
     shot.parent.mkdir()
     shot.write_bytes(png(1440, 900))
-    dropped = str(shot).replace(" ", "\\ ")  # how a terminal pastes a dropped file
+    # How a terminal pastes a dropped file: Windows quotes it, the others escape its spaces.
+    dropped = f'"{shot}"' if os.name == "nt" else str(shot).replace(" ", "\\ ")
     captured = capture_pasted_images(dropped, tmp_path)
     shot.unlink()  # macOS cleans up
     [image], problems, text = attachments(f"what's wrong here? {dropped}", tmp_path, captured)
@@ -288,6 +291,21 @@ def test_a_dropped_file_that_is_gone_says_so(tmp_path):
 
     images, problems, _ = attachments(f"see {tmp_path}/gone/Screenshot.png", tmp_path)
     assert images == [] and "isn't there any more" in problems[0]
+
+
+def test_a_windows_path_keeps_its_backslashes():
+    """Seen in CI: splitting as a POSIX shell does turned `C:\\Users\\shot.png` into
+    `C:Usersshot.png`, so a dropped screenshot wasn't found on Windows."""
+    from tinyharness.cli.repl import _words
+
+    text = r"""what's this? "C:\Users\me\My Shots\a b.png" and C:\tmp\x.png"""
+    assert _words(text, windows=True) == [
+        "what's",
+        "this?",
+        r"C:\Users\me\My Shots\a b.png",
+        "and",
+        r"C:\tmp\x.png",
+    ]
 
 
 @pytest.mark.parametrize("compact", [False, True])
