@@ -48,6 +48,7 @@ class ArtifactRef:
     target: str
     media_type: str = ""
     title: str = ""
+    offer: bool = False  # offered to open: the user's keypress opens it, the tool never does
 
 
 @dataclass
@@ -164,11 +165,16 @@ def file_version(path: Path) -> str | None:
         return None
 
 
-def check_not_stale(ctx: ToolContext, path: Path) -> None:
-    """Refuse to change a file that changed since this agent last read or wrote it (a
-    command, another agent, the user): its copy of the file is out of date."""
+def changed_since_seen(ctx: ToolContext, path: Path) -> bool:
+    """Whether the file changed since this agent last read or wrote it (a command, another
+    agent, the user): its copy of the file is out of date."""
     seen = ctx.seen_versions.get(str(path))
-    if seen is not None and file_version(path) != seen:
+    return seen is not None and file_version(path) != seen
+
+
+def check_not_stale(ctx: ToolContext, path: Path) -> None:
+    """Refuse to overwrite a file that changed since this agent last read or wrote it."""
+    if changed_since_seen(ctx, path):
         raise ToolError(
             f"{path} changed since you last read it (a command, another agent or the user "
             "changed it). Read it again, then make your change against what's there now."

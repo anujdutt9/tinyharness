@@ -58,8 +58,9 @@ Each was a real failure; each has tests. A change that weakens one needs a reaso
   dependencies without asking.
 - Public classes and functions use concise numpydoc docstrings. Keep obvious private
   helpers to a one-line summary; add sections only when they convey useful information.
-- Check established implementations and relevant standards before inventing a new
-  approach; record the rationale that matters to tinyharness.
+- Before inventing an approach, check tinyharness's own mechanisms, then how established
+  tools and standards handle it: learn from them, don't copy them, and record the reason
+  for what tinyharness does differently.
 - Verify with a real model before calling an agent-behavior change done: the test suite
   uses scripted models and can't show how a real one reacts.
 

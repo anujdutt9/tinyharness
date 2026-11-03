@@ -11,7 +11,7 @@ from tinyharness.skills import import_skills, load_skills
 
 @pytest.fixture
 def source(tmp_path, isolated_home):
-    src = tmp_path / "claude-skills"
+    src = tmp_path / "imported-skills"
     write_skill(src, "fmt", "new")
     return src
 

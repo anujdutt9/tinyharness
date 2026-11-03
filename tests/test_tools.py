@@ -198,16 +198,27 @@ async def test_a_failed_edit_whose_first_line_is_nowhere_says_so(ctx, tmp_path):
         await call(EditTool(), {"path": "a.txt", "old_string": "gamma\nbeta", "new_string": "x"}, ctx)
 
 
-async def test_edit_refuses_a_file_that_changed_since_it_was_read(ctx, tmp_path):
+async def test_an_edit_after_an_outside_change_applies_and_says_so(ctx, tmp_path):
+    """Seen live: the model changed a file with `cat >>` or a `python3 -c` script, and its
+    next Edit was refused until it re-read the whole (large) file, then refused again after
+    it checked with Grep. old_string is matched against the file as it is now, so nothing is
+    lost; the result says the file changed so the model knows its copy is out of date."""
     await call(WriteTool(), {"path": "a.txt", "content": "one\ntwo\n"}, ctx)
     (tmp_path / "a.txt").write_text("one\nTWO\n")  # a command, a teammate or the user
-    with pytest.raises(ToolError, match="changed since you last read it"):
-        await call(EditTool(), {"path": "a.txt", "old_string": "one", "new_string": "1"}, ctx)
-    await call(ReadTool(), {"path": "a.txt"}, ctx)
-    await call(EditTool(), {"path": "a.txt", "old_string": "one", "new_string": "1"}, ctx)
-    # its own edit doesn't make the file "changed since read"
-    await call(EditTool(), {"path": "a.txt", "old_string": "TWO", "new_string": "2"}, ctx)
+    said = await call(EditTool(), {"path": "a.txt", "old_string": "one", "new_string": "1"}, ctx)
+    assert "had changed since you last read it" in said
+    # its own edit doesn't count as a change since it last saw the file
+    said = await call(EditTool(), {"path": "a.txt", "old_string": "TWO", "new_string": "2"}, ctx)
+    assert "changed since" not in said
     assert (tmp_path / "a.txt").read_text() == "1\n2\n"
+
+
+async def test_an_edit_of_text_that_changed_is_still_refused(ctx, tmp_path):
+    await call(WriteTool(), {"path": "a.txt", "content": "one\ntwo\n"}, ctx)
+    (tmp_path / "a.txt").write_text("one\nTWO\n")
+    with pytest.raises(ToolError, match="old_string not found"):
+        await call(EditTool(), {"path": "a.txt", "old_string": "two", "new_string": "2"}, ctx)
+    assert (tmp_path / "a.txt").read_text() == "one\nTWO\n"
 
 
 async def test_an_edit_shows_the_changed_lines_as_they_are_now(ctx, tmp_path):
@@ -236,13 +247,11 @@ async def test_another_agents_change_counts_as_unseen(tmp_path):
     await call(ReadTool(), {"path": "a.txt"}, lead)
     await call(ReadTool(), {"path": "a.txt"}, teammate)
     await call(EditTool(), {"path": "a.txt", "old_string": "alpha", "new_string": "ALPHA"}, teammate)
-    with pytest.raises(ToolError, match="changed since you last read it"):
-        await call(EditTool(), {"path": "a.txt", "old_string": "beta", "new_string": "BETA"}, lead)
-    with pytest.raises(ToolError, match="changed since you last read it"):  # no lost update either
+    with pytest.raises(ToolError, match="changed since you last read it"):  # no lost update
         await call(WriteTool(), {"path": "a.txt", "content": "alpha\nBETA\n"}, lead)
-    await call(ReadTool(), {"path": "a.txt"}, lead)
-    await call(EditTool(), {"path": "a.txt", "old_string": "beta", "new_string": "BETA"}, lead)
-    assert (tmp_path / "a.txt").read_text() == "ALPHA\nBETA\n"
+    said = await call(EditTool(), {"path": "a.txt", "old_string": "beta", "new_string": "BETA"}, lead)
+    assert "had changed since you last read it" in said  # applied, and the lead is told
+    assert (tmp_path / "a.txt").read_text() == "ALPHA\nBETA\n"  # both changes kept
 
 
 # ---- found by the robustness audit (each was reproduced against the old code) ----

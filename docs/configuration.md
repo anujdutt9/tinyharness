@@ -73,7 +73,7 @@ Chat Completions interface.
 The Copilot connection uses GitHub device authorization, a short-lived Copilot service
 token, and GitHub's live model
 catalog. Auto, the only choice on Free and Student plans, is not a model id: tinyharness
-asks GitHub which model Auto picks for the session (as VS Code's Copilot Chat does) and
+asks GitHub which model Auto picks for the session and
 sends that model. It keeps tinyharness's own agent loop, but these service endpoints are not a
 documented standalone public model API and may require maintenance when GitHub changes
 its Copilot clients.

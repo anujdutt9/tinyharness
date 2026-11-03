@@ -118,7 +118,7 @@ ANTHROPIC_STREAM = sse(
     ("provider", "sent"), [("anthropic", True), ("openrouter", True), ("github_copilot", False)]
 )
 def test_block_binding_is_sent_only_where_the_provider_accepts_it(provider, sent):
-    """Seen live: Copilot's Claude endpoint answered `thinking.adaptive.block_binding: Extra
+    """Seen live: a hosted Anthropic-format endpoint answered `thinking.adaptive.block_binding: Extra
     inputs are not permitted`; Anthropic needs the field to survive compaction."""
     from tinyharness.llm.adapters.anthropic import AnthropicAdapter
     from tinyharness.llm.types import Request
@@ -128,6 +128,160 @@ def test_block_binding_is_sent_only_where_the_provider_accepts_it(provider, sent
     thinking = adapter.payload(request)["thinking"]
     assert thinking["type"] == "adaptive"
     assert ("block_binding" in thinking) is sent
+
+
+def anthropic_client(server: Server, tmp_path, provider: str = "anthropic", **kwargs) -> LLMClient:
+    """An Anthropic-format client whose model list says the model thinks adaptively."""
+    llm = client(provider, server, "claude-x", tmp_path=tmp_path, **kwargs)
+    llm.directory.store(provider, [ModelInfo("claude-x", adaptive_thinking=True, api="anthropic")])
+    return llm
+
+
+PROGRESS_NOTE_STREAM = sse(
+    {"type": "message_start", "message": {"id": "msg_1"}},
+    {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+    {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "R=="}},
+    {"type": "content_block_stop", "index": 0},
+    {"type": "content_block_start", "index": 1, "content_block": {"type": "thinking", "thinking": ""}},
+    {
+        "type": "content_block_delta",
+        "index": 1,
+        "delta": {"type": "thinking_delta", "thinking": "The deck is written; checking each slide."},
+    },
+    {"type": "content_block_delta", "index": 1, "delta": {"type": "signature_delta", "signature": "P=="}},
+    {"type": "content_block_stop", "index": 1},
+    {
+        "type": "content_block_start",
+        "index": 2,
+        "content_block": {"type": "tool_use", "id": "c1", "name": "Read", "input": {}},
+    },
+    {"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+    {"type": "content_block_stop", "index": 2},
+    {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+    named=True,
+)
+
+
+async def test_progress_notes_between_tool_calls_reach_the_user(tmp_path):
+    """Seen live: a recent Anthropic model checked every slide of a finished deck for five minutes
+    without a word. Its notes between tool calls come back as thinking blocks, empty unless
+    asked for; asked for, they are shown as text, and the blocks are sent back unchanged."""
+    server = Server(PROGRESS_NOTE_STREAM)
+    llm = anthropic_client(server, tmp_path)
+    text, [_call], state = await run(llm, CONVERSATION)
+    assert server.requests[0]["thinking"]["display"] == "updates"
+    assert "thinking-display-updates" in server.headers[0]["anthropic-beta"]
+    assert text == "The deck is written; checking each slide."
+    assert state.data[1] == {
+        "type": "thinking",
+        "thinking": "The deck is written; checking each slide.",
+        "signature": "P==",
+    }
+
+
+async def test_shown_reasoning_asks_for_summaries(tmp_path):
+    """Seen live: "Thinking" with nothing under ctrl+t. The model was thinking, but recent
+    Anthropic models leave the text out unless asked; with reasoning shown we ask."""
+    stream = sse(
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "Hmm."}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+        named=True,
+    )
+    server = Server(stream)
+    llm = anthropic_client(server, tmp_path)
+    llm.show_reasoning = True
+    reasoning = "".join([chunk.reasoning_text async for chunk in llm.stream(CONVERSATION, [READ])])
+    assert server.requests[0]["thinking"]["display"] == "summarized"
+    assert reasoning == "Hmm."
+
+
+async def test_a_note_after_text_starts_a_new_paragraph(tmp_path):
+    stream = sse(
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Done."}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "thinking", "thinking": ""}},
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "thinking_delta", "thinking": "Next: "},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "thinking_delta", "thinking": "tests."},
+        },
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+        named=True,
+    )
+    text, _, _ = await run(anthropic_client(Server(stream), tmp_path), CONVERSATION)
+    assert text == "Done.\n\nNext: tests."
+
+
+@pytest.mark.parametrize("retries", [0, 2])
+async def test_a_gateway_that_refuses_display_gets_requests_without_it(tmp_path, retries):
+    """A hosted gateway already refused one thinking field (`block_binding`); a gateway that
+    refuses `display` gets the request again without it, for the rest of the session, and
+    that costs none of the retries."""
+    refusal = json.dumps({"error": {"message": "thinking.adaptive.display: Extra inputs are not permitted"}})
+    server = Server(refusal, PROGRESS_NOTE_STREAM, PROGRESS_NOTE_STREAM)
+    statuses = iter([400, 200, 200])
+    respond = server.__call__
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        response = respond(request)
+        return httpx.Response(next(statuses), text=response.text)
+
+    llm = anthropic_client(server, tmp_path, retries=retries)
+    llm.transport = httpx.MockTransport(answer)
+    await run(llm, CONVERSATION)
+    await run(llm, CONVERSATION)
+    first, again, later = server.requests
+    assert first["thinking"]["display"] == "updates"
+    assert "display" not in again["thinking"] and "display" not in later["thinking"]
+    assert again["thinking"]["type"] == "adaptive"
+
+
+async def test_tool_input_streams_as_the_model_writes_it(tmp_path):
+    """Seen live: by default the API held a 25,000-character Write back and sent it after
+    87 seconds of silence (across hosted and direct providers), which looked stuck. Each tool asks
+    for its input to stream instead."""
+    server = Server(PROGRESS_NOTE_STREAM)
+    await run(anthropic_client(server, tmp_path), CONVERSATION, tools=(READ, READ))
+    assert [tool["eager_input_streaming"] for tool in server.requests[0]["tools"]] == [True, True]
+
+
+async def test_a_gateway_that_refuses_eager_streaming_gets_tools_without_it(tmp_path):
+    """A field set on every tool is dropped from every tool, once, for the session."""
+    refusal = json.dumps(
+        {"error": {"message": "tools.0.eager_input_streaming: Extra inputs are not permitted"}}
+    )
+    statuses = iter([400, 200, 200])
+    server = Server(refusal, PROGRESS_NOTE_STREAM, PROGRESS_NOTE_STREAM)
+    respond = server.__call__
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(next(statuses), text=respond(request).text)
+
+    llm = anthropic_client(server, tmp_path)
+    llm.transport = httpx.MockTransport(answer)
+    await run(llm, CONVERSATION, tools=(READ, READ))
+    await run(llm, CONVERSATION, tools=(READ, READ))
+    first, again, later = server.requests
+    assert all(tool["eager_input_streaming"] for tool in first["tools"])
+    for body in (again, later):
+        assert body["tools"] and not any("eager_input_streaming" in tool for tool in body["tools"])
+    assert again["thinking"]["display"] == "updates"  # only the refused field went
+
+
+async def test_an_error_naming_no_optional_field_is_not_retried(tmp_path):
+    server = Server(json.dumps({"error": {"message": "messages: roles must alternate"}}), status=400)
+    with pytest.raises(LLMError, match="roles must alternate"):
+        await run(anthropic_client(server, tmp_path), CONVERSATION)
+    assert len(server.requests) == 1
 
 
 async def test_anthropic_request_and_stream(tmp_path):
@@ -151,7 +305,14 @@ async def test_anthropic_request_and_stream(tmp_path):
     body = server.requests[0]
     assert body["system"] == "be brief"
     assert body["max_tokens"] == 64_000  # from the model list, not a guess
-    assert body["tools"] == [{"name": "Read", "description": "read a file", "input_schema": READ.parameters}]
+    assert body["tools"] == [
+        {
+            "name": "Read",
+            "description": "read a file",
+            "input_schema": READ.parameters,
+            "eager_input_streaming": True,
+        }
+    ]
     assert body["thinking"]["type"] == "adaptive"
     assert body["thinking"]["block_binding"] == {"prefix_mismatch_behavior": "drop_block"}
     assert body["output_config"] == {"effort": "high"}
@@ -163,6 +324,65 @@ async def test_anthropic_request_and_stream(tmp_path):
     assert (call.id, call.name, json.loads(call.arguments)) == ("c1", "Read", {"path": "a.py"})
     assert state.owner == "anthropic:claude-x"
     assert state.data[0] == {"type": "thinking", "thinking": "", "signature": "SIG=="}
+
+
+async def test_a_tool_call_cut_off_by_the_output_limit_is_sent_back_with_an_input(tmp_path):
+    """Seen live on a hosted Anthropic-format provider: a Write cut off at the output limit was answered
+    "not run", then the next request failed with `messages.59.content.2.tool_use.input:
+    Field required`, because the cut-off block never closed and was sent back without one."""
+    cut_off = sse(
+        {"type": "message_start", "message": {"id": "msg_1"}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "S=="}},
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "tool_use", "id": "c1", "name": "Read", "input": {}},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": '{"path": "a.'},
+        },
+        {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}},
+        {"type": "message_stop"},
+        named=True,
+    )
+    _, _, state = await run(client("anthropic", Server(cut_off), "claude-x"), CONVERSATION)
+    second = Server(sse({"type": "message_stop"}, named=True))
+    await run(client("anthropic", second, "claude-x"), after_tool_call(state))
+    sent = second.requests[0]["messages"][1]["content"]
+    assert sent[0] == {"type": "thinking", "thinking": "", "signature": "S=="}  # unchanged
+    assert sent[1]["type"] == "tool_use" and sent[1]["input"] == {}  # unfinished JSON: empty
+
+
+async def test_an_openai_call_cut_off_by_the_output_limit_is_sent_back_with_its_result(tmp_path):
+    """The same cut-off as on Anthropic: the saved reply keeps only finished items, so the
+    cut-off call was missing while its "not run" result was sent, which the API refuses."""
+    cut_off = sse(
+        {"type": "response.output_item.added", "output_index": 0, "item": {"type": "reasoning"}},
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {"type": "reasoning", "id": "rs_1", "encrypted_content": "E=="},
+        },
+        {
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": {"type": "function_call", "call_id": "c1", "name": "Read"},
+        },
+        {"type": "response.function_call_arguments.delta", "output_index": 1, "delta": '{"path": "a.'},
+        {"type": "response.incomplete", "response": {"incomplete_details": {"reason": "max_output_tokens"}}},
+    )
+    _, _, state = await run(client("openai", Server(cut_off), "gpt-x"), CONVERSATION)
+    second = Server(sse({"type": "response.completed", "response": {"output": []}}))
+    await run(client("openai", second, "gpt-x"), after_tool_call(state))
+    sent = second.requests[0]["input"]
+    calls = [i["call_id"] for i in sent if i.get("type") == "function_call"]
+    results = [i["call_id"] for i in sent if i.get("type") == "function_call_output"]
+    assert calls == results == ["c1"]
+    assert sent[1]["type"] == "reasoning"  # what was received is still sent back unchanged
 
 
 async def test_anthropic_sends_signed_thinking_back_unchanged(tmp_path):

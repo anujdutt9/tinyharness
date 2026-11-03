@@ -7,10 +7,64 @@ the SDK, and every break is listed here.
 
 ## Unreleased
 
+### Changed
+- Edit no longer refuses a file that changed since the agent last read it (often by the
+  agent's own command). It applies the change to the file as it is now, since the text it
+  replaces must still be there word for word, and tells the model the file had changed.
+  Write still refuses, since overwriting would lose the change.
+- Large file writes through Anthropic-format APIs no longer sit
+  silent while the model writes: the file streams in as it's written, so the spinner names
+  it and counts characters. The total time is the same.
+- The spinner always says "Working", on every provider, and adds what's known after it:
+  "thinking", what's being written and how much, or the phase the model last said it was
+  in ("Checking each slide for clipped text"), until it moves on without saying what to.
+  Its timer counts from the last thing shown.
+- When the main result is ready and the agent moves on to checking it, it says so: where
+  the result is, that you can use it now, what it's checking, and at the end what changed.
+- Opening something in your browser or viewer no longer stops the agent to ask. It offers
+  instead: "↗ deck.html is ready to view · ctrl+g to open it" sits above the spinner while
+  the work carries on, and ctrl+g opens it whenever you like. Nothing opens without that
+  key; in `-p` mode the offer is a clickable link.
+
+### Fixed
+- Screenshots you drop into the input box are attached reliably: the image is taken the
+  moment it's dropped (macOS deletes the temporary copy within seconds), it's attached to
+  messages sent while the agent works too, and the path in your message is replaced with a
+  note that the image is attached, so the model no longer tries to read it and gets refused.
+  The "attached" line shows each image's size in pixels.
+- An image path in a message with an apostrophe ("what's wrong here?") is recognised.
+- Typing a message just as the agent asks a question no longer answers the question: keys
+  pressed in the first moment after a question appears are ignored, so the Enter meant for
+  your message can't pick an option you never saw.
+- A command stopped by Esc (to send your message now) or Ctrl+C keeps its row, marked
+  "stopped", instead of vanishing from the screen.
+- A long session that has looked at many images no longer ends with "413 Request body too
+  large" (seen on a hosted provider after reading a dozen slide screenshots). The images from
+  earlier steps are dropped from the request, with a note, and it's sent again. If the latest
+  image batch is still too large, it is reduced on a second recovery instead of ending the turn.
+- Offering a second finished artifact no longer hides the first; the earlier one remains as a
+  link. The CLI also reports an artifact as opened only after the system opener succeeds.
+- A reply cut off by a dropped connection ("Network connection lost") no longer ends the
+  turn: the partial reply is dropped and the model asked again, once per turn.
+- A reply cut off at the output limit in the middle of a tool call no longer ends the turn
+  with `tool_use.input: Field required` on Anthropic-format providers. The cut-off call was
+  sent back without its input; it now carries what arrived, and the model is told the call
+  didn't run. OpenAI models had the same gap and are fixed too.
+- Long file writes on hosted providers no longer fail with "it sent nothing but blank output
+  for over 60 seconds". A provider can go silent while the model writes a large tool call,
+  and that silence was mistaken for blank output, so the reply and every retry were discarded.
+- Recent Anthropic models no longer go quiet for minutes
+  during long tasks. Their notes between tool calls ("the deck is written; checking each
+  slide") came back hidden, and now show as messages.
+- With reasoning shown (ctrl+t), recent Anthropic models' thinking now appears instead of an
+  empty "Thinking". They leave it out unless asked; tinyharness now asks.
+- A gateway that refuses one of these optional request fields gets the request again
+  without it, for the rest of the session, instead of failing.
+
 ## 0.1.3 (2026-11-02)
 
 ### Fixed
-- Models on GitHub Copilot no longer fail with `thinking.adaptive.block_binding: Extra
+- Models on a hosted subscription no longer fail with `thinking.adaptive.block_binding: Extra
   inputs are not permitted`. Anthropic-compatible gateways that reject that field can set
   `block_binding = false` on the provider; Anthropic itself still gets it.
 
@@ -91,8 +145,8 @@ the SDK, and every break is listed here.
   Continue with ChatGPT instead of creating an OpenAI API key. tinyharness validates
   the OpenID identity, stores renewable credentials privately, discovers models for
   the selected account, and follows the plan-usage Responses API restrictions.
-- GitHub Copilot subscriptions can connect through GitHub's device sign-in. tinyharness
-  loads the account's live Copilot model catalog and uses each model's advertised Chat,
+- GitHub model subscriptions can connect through GitHub's device sign-in. tinyharness
+  loads the account's live model catalog and uses each model's advertised Chat,
   Responses or Anthropic Messages endpoint while keeping the tinyharness agent loop.
 - LiteLLM is a first-class gateway choice. Setup asks for a company or local proxy URL,
   accepts an optional gateway key, discovers its models and remembers the connection.
@@ -105,7 +159,7 @@ the SDK, and every break is listed here.
 - Provider-neutral setup now offers each provider's supported connection methods. OpenRouter
   can connect through a PKCE-protected browser flow or a one-time code on remote machines;
   manually pasted keys and environment credentials remain supported.
-- Hosted-provider labels include their familiar model families (Claude, GPT and Gemini)
+- Hosted-provider labels include familiar model families
   so users do not need to know the vendor/company distinction.
 - `/connect [provider]` adds or replaces a provider connection without leaving the session.
 - Setup discovers models from Ollama, LM Studio, llama.cpp, vLLM and SGLang on their
@@ -358,14 +412,14 @@ the SDK, and every break is listed here.
   independent probe returned nonzero still count as passed.
 - Ollama setup reads each model's native capabilities and automatically uses text-based
   tool calls when a model such as `gemma3:270m` does not accept API tool definitions.
-- GitHub Copilot setup uses the account-specific API endpoint returned by GitHub and lets
+- GitHub subscription setup uses the account-specific API endpoint returned by GitHub and lets
   you choose another model without signing in again when GitHub lists one it later rejects.
-- GitHub Copilot setup recognizes Free and Student accounts as Auto-only instead of showing
+- GitHub subscription setup recognizes Free and Student accounts as Auto-only instead of showing
   catalog entries they cannot select. Paid and organization-managed accounts get Auto plus
   the named models GitHub explicitly enables for their account and policy.
-- GitHub Copilot's Auto model works. It failed with "The requested model is not supported"
+- The GitHub subscription's Auto model works. It failed with "The requested model is not supported"
   because tinyharness sent requests without a model; it now asks GitHub which model Auto
-  picks and sends that model with Auto's session token, as VS Code does.
+  picks and sends that model with Auto's session token.
 
 ## 0.1.0 (2026-10-14)
 
@@ -705,7 +759,7 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
 
 ### Reasoning
 - Models whose thinking is a per-request switch (OpenRouter lists `reasoning` among their
-  parameters: Gemma 4, Claude, Qwen3 thinking models) now reason at medium effort on agent
+  parameters: Gemma 4 and Qwen3 thinking models) now reason at medium effort on agent
   turns unless you chose an effort. They used to run with thinking off, so a Gemma 4 team
   planned, briefed and did arithmetic without reasoning. The harness's own quick calls
   (the permission classifier, summaries) stay without it. `/effort none` or
@@ -723,7 +777,7 @@ intentionally excluded because they can contain prompts, filesystem paths and pr
   6,000 in the lead's report) is saved whole in the session's scratch folder, and the next
   task and the lead are told where: it used to be cut off with no way to get the rest, so
   a report builder saw only the start of each analyst's findings.
-- A skill you name in your message ("use the claude-design-skill for the report") isn't
+- A skill you name in your message ("use the design-skill for the report") isn't
   optional: the system prompt says so. (A note appended to every message naming a skill,
   even "don't use it", was dropped as a duplicate.)
 - The system prompt and the Agent and Team tools tell the lead to brief subagents like a

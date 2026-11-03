@@ -103,9 +103,10 @@ async def test_each_answer_stays_on_screen_as_one_line(monkeypatch):
     assert "✓ Format · Jupyter notebook" in out and "answering in chat" in out
 
 
-async def test_the_picker_starts_on_the_recommended_answer():
+async def test_the_picker_starts_on_the_recommended_answer(monkeypatch):
     """Enter takes the recommended answer; a number picks another; Esc answers in chat;
     the last row types your own."""
+    monkeypatch.setattr("tinyharness.cli.widgets.TYPE_AHEAD_SECONDS", 0)
     from prompt_toolkit.application import create_app_session
     from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
@@ -122,6 +123,28 @@ async def test_the_picker_starts_on_the_recommended_answer():
         with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
             pipe.send_text(keys)
             assert await answer_question(question, 1, 2) == expected, keys
+
+
+async def test_keys_typed_as_a_question_appears_dont_answer_it():
+    """Seen live: a message being typed when a question appeared went to the question,
+    and its Enter picked an answer the user never chose."""
+    import asyncio
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from tinyharness.cli.widgets import TYPE_AHEAD_SECONDS, answer_question
+
+    question = AskQuestion.model_validate(QUESTIONS["questions"][0])
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        pipe.send_text("Make it 2 lines.\r")  # meant for the message box
+        answering = asyncio.create_task(answer_question(question, 1, 2))
+        await asyncio.sleep(0.3)
+        assert not answering.done()
+        await asyncio.sleep(TYPE_AHEAD_SECONDS)
+        pipe.send_text("2")  # now a deliberate choice
+        assert await asyncio.wait_for(answering, 3) == ".py modules"
 
 
 def test_the_ask_row_says_answered_not_the_answers_again():

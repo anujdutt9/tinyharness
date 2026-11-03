@@ -509,7 +509,7 @@ class Session:
         self._calibration = CalibrationStore(home_dir() / "cache" / "tool-calls.json")
         self._connect_llm()
         self._started = False
-        self._steering: list[str] = []  # messages for the agent while a turn runs (see steer)
+        self._steering: list[Message] = []  # messages for the agent while a turn runs (see steer)
         # Subagents run side by side; their calls that change things take turns on this.
         self._agent_writes = asyncio.Lock()
         self.resume_report: world.ResumeReport | None = None  # what changed while away, when resumed
@@ -1372,7 +1372,7 @@ class Session:
                     error=f"{type(e).__name__}: {e}"[:1000],
                 )
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[Image] = ()) -> None:
         """Queue a user message for a running turn.
 
         Parameters
@@ -1380,8 +1380,10 @@ class Session:
         text : str
             Message delivered before the agent's next step. It remains pending if the turn
             ends before delivery.
+        images : Sequence[Image], optional
+            Images attached to it (a screenshot dropped in while the agent works).
         """
-        self._steering.append(text)
+        self._steering.append(Message(role="user", content=text, images=list(images)))
 
     def record_suggestion(self, action: str, *, chars: int = 0) -> None:
         """Record suggestion UX outcomes without saving the suggested text."""
@@ -1392,14 +1394,14 @@ class Session:
     @property
     def pending_steering(self) -> tuple[str, ...]:
         """Messages from `steer` waiting for the agent's next step."""
-        return tuple(self._steering)
+        return tuple(m.content or "" for m in self._steering)
 
-    def _inbox(self) -> list[str]:
+    def _inbox(self) -> list[str | Message]:
         """What reaches the agent between steps: your messages, then notes about its jobs."""
         notes = self.ctx.jobs.take_notes() if self.ctx.jobs is not None else []
         return [*self.take_steering(), *notes]
 
-    def take_steering(self) -> list[str]:
+    def take_steering(self) -> list[Message]:
         """Messages from `steer` not delivered yet (and forget them)."""
         taken, self._steering = self._steering, []
         return taken

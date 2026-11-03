@@ -4,11 +4,10 @@ predictable. `model` accepts:
 
     "inherit" (or leave it out)     the session's model
     "small"                         the session provider's cheap model: its `small_model`
-                                    in tinyharness/llm/providers.toml (anthropic →
-                                    claude-haiku-4-5, openai → gpt-6-luna, ...), which you
+                                    in tinyharness/llm/providers.toml (for example, openai →
+                                    gpt-6-luna), which you
                                     can change under [providers.<name>] in config.toml
-    "anthropic:claude-haiku-4-5"    any provider you have a key for (a GPT session can
-                                    hand work to a Claude agent, and the other way round)
+    "openai:gpt-6-luna"             any provider you have a key for
     "gpt-6-sol"                     a bare model id, from the session's provider
 
 Here three agents each use a different form, and all three work on the same file:
@@ -19,7 +18,7 @@ Here three agents each use a different form, and all three work on the same file
                     argument it uses the session's model, so the example runs on any key)
 
 uv run python examples/06_subagent_models.py
-uv run python examples/06_subagent_models.py anthropic:claude-haiku-4-5
+uv run python examples/06_subagent_models.py openai:gpt-6-luna
 """
 
 import asyncio
@@ -54,14 +53,14 @@ from tinyharness.extensions import agents as agents_extension
 #      tinyharness/llm/providers.toml, or the session's model if it has none:
 #
 #          [openrouter]
-#          default_model = "anthropic/claude-sonnet-5"   # what the session runs on
-#          small_model   = "anthropic/claude-haiku-4.5"  # what "small" means
+#          default_model = "openai/gpt-6-sol"   # what the session runs on
+#          small_model   = "openai/gpt-6-luna"  # what "small" means
 #
-#   5. The subagent runs on that client with model="anthropic/claude-haiku-4.5".
+#   5. The subagent runs on that client with model="openai/gpt-6-luna".
 #
 # So `small` means "the cheap model of whatever provider the session is on". The
-# same file gives claude-haiku-4-5 on an anthropic session, gpt-6-luna on openai,
-# gemini-3.5-flash-lite on gemini, and never needs another API key. To change it:
+# same file follows each provider's configured small model and never needs another API key.
+# To change it:
 #
 #     # ~/.tinyharness/config.toml
 #     [providers.openrouter]

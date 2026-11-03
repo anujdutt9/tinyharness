@@ -62,7 +62,7 @@ class Provider(BaseModel):
     send_ids: bool = False
     # Anthropic API only: ask for `thinking.block_binding` so signed thinking blocks that no
     # longer match the history are dropped, not rejected. Anthropic accepts it; some
-    # Anthropic-compatible gateways (GitHub Copilot) reject the field.
+    # compatible gateways reject it.
     block_binding: bool = True
     effort_param: str = "reasoning_effort"  # chat API only: where the reasoning effort goes
     # The provider's own web search: true for APIs with a built-in search tool, a table

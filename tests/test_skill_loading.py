@@ -14,10 +14,10 @@ BODY = "Step 1: ask what the design is for. Step 2: build it."
 @pytest.fixture
 def session(tmp_path):
     session = scripted_session(tmp_path / "w", [])
-    folder = tmp_path / "skills" / "claude-design-skill"
+    folder = tmp_path / "skills" / "design-skill"
     folder.mkdir(parents=True)
-    (folder / "SKILL.md").write_text(f"---\nname: claude-design-skill\n---\n{BODY}\n")
-    session.skills.add(Skill("claude-design-skill", "Design things.", BODY, source=folder / "SKILL.md"))
+    (folder / "SKILL.md").write_text(f"---\nname: design-skill\n---\n{BODY}\n")
+    session.skills.add(Skill("design-skill", "Design things.", BODY, source=folder / "SKILL.md"))
     session.workspace.add_read_root(folder)
     yield session
     session.close()
@@ -35,20 +35,20 @@ async def events(session, prompt):
 
 async def test_a_slash_name_mid_message_loads_the_skill(session):
     play(session, ["ok"])
-    got = await events(session, "Build the report and use /claude-design-skill for the layout.")
+    got = await events(session, "Build the report and use /design-skill for the layout.")
     loaded = [e for e in got if isinstance(e, SkillLoaded)]
-    assert [(e.name, e.how) for e in loaded] == [("claude-design-skill", "named")] and loaded[0].tokens > 0
+    assert [(e.name, e.how) for e in loaded] == [("design-skill", "named")] and loaded[0].tokens > 0
     sent = next(m.content for m in session.history.messages if m.role == "user")
-    assert sent.startswith("# Skill: claude-design-skill") and BODY in sent
-    assert sent.endswith("User message: Build the report and use /claude-design-skill for the layout.")
+    assert sent.startswith("# Skill: design-skill") and BODY in sent
+    assert sent.endswith("User message: Build the report and use /design-skill for the layout.")
 
 
 @pytest.mark.parametrize(
     "prompt",
     [
-        "Don't use the claude-design-skill for this one.",  # a bare name isn't a request
-        "What's in ~/.tinyharness/skills/claude-design-skill/SKILL.md?",  # nor a path
-        "Try /claude-design-skills",  # nor another word
+        "Don't use the design-skill for this one.",  # a bare name isn't a request
+        "What's in ~/.tinyharness/skills/design-skill/SKILL.md?",  # nor a path
+        "Try /design-skills",  # nor another word
     ],
 )
 async def test_only_a_slash_name_loads_it(session, prompt):
@@ -60,25 +60,25 @@ async def test_only_a_slash_name_loads_it(session, prompt):
 
 async def test_a_skill_already_in_the_conversation_isnt_loaded_again(session):
     play(session, ["ok", "ok again"])
-    await events(session, "use /claude-design-skill")
-    got = await events(session, "and /claude-design-skill again for the second page")
+    await events(session, "use /design-skill")
+    got = await events(session, "and /design-skill again for the second page")
     assert not [e for e in got if isinstance(e, SkillLoaded)]
 
 
 async def test_running_a_skill_says_so(session):
     play(session, ["ok"])
-    got = [e async for e in session.run_skill("claude-design-skill", "a dashboard")]
+    got = [e async for e in session.run_skill("design-skill", "a dashboard")]
     assert isinstance(got[0], SkillLoaded) and got[0].how == "command"
     # its own text names the skill: that isn't a second request for it
     assert sum(isinstance(e, SkillLoaded) for e in got) == 1
 
 
 async def test_invoked_skill_enables_the_extensions_it_requires(session):
-    skill = session.skills.get("claude-design-skill")
+    skill = session.skills.get("design-skill")
     assert skill is not None
     skill.required_extensions = ["agents"]
     play(session, ["ok"])
-    await events(session, "please use /claude-design-skill")
+    await events(session, "please use /design-skill")
     assert "agents" in session.config.extensions.enabled
     assert session.tools.get("Agent") is not None
 
@@ -106,22 +106,22 @@ async def test_resumed_skill_reenables_the_extensions_it_requires(tmp_path):
 
 
 async def test_invoked_skill_registers_its_exact_network_set(session):
-    skill = session.skills.get("claude-design-skill")
+    skill = session.skills.get("design-skill")
     assert skill is not None
     skill.network_hosts = ["assets.example.com", "fonts.example.com"]
     play(session, ["ok"])
-    await events(session, "please use /claude-design-skill")
-    assert session.gate.network_bundles["claude-design-skill"] == ("assets.example.com", "fonts.example.com")
+    await events(session, "please use /design-skill")
+    assert session.gate.network_bundles["design-skill"] == ("assets.example.com", "fonts.example.com")
 
 
 async def test_the_model_reading_a_skill_file_is_shown(session):
-    path = str(session.skills.get("claude-design-skill").source)
+    path = str(session.skills.get("design-skill").source)
     play(session, [[("Read", json.dumps({"path": path}))], "done"])
     got = await events(session, "design me a landing page")
     i = next(i for i, e in enumerate(got) if isinstance(e, SkillLoaded))
     assert got[i].how == "read" and isinstance(got[i - 1], ToolResult)
     # and it counts as loaded: naming it now doesn't send it again
-    assert session.skills_named("now use /claude-design-skill") == []
+    assert session.skills_named("now use /design-skill") == []
 
 
 @pytest.mark.parametrize(
@@ -136,6 +136,6 @@ def test_the_cli_shows_a_loaded_skill(how, note):
     from tinyharness.cli.theme import THEME
 
     console = Console(file=io.StringIO(), width=100, theme=THEME)
-    Renderer(console).handle(SkillLoaded("claude-design-skill", 9_200, how))
+    Renderer(console).handle(SkillLoaded("design-skill", 9_200, how))
     out = console.file.getvalue()
-    assert "skill claude-design-skill loaded · 9.2k tokens" in out and note in out
+    assert "skill design-skill loaded · 9.2k tokens" in out and note in out
