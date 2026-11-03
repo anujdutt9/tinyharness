@@ -600,7 +600,28 @@ async def test_a_message_sent_mid_turn_reaches_the_agent_at_its_next_step(tmp_pa
         assert second_request[-1].role == "user" and second_request[-1].content == "also check the docs"
         assert session.take_steering() == []  # delivered, so nothing left over
         session.steer("too late for this turn")
-        assert session.take_steering() == ["too late for this turn"]  # the REPL starts the next turn with it
+        (left,) = session.take_steering()  # the REPL starts the next turn with it
+        assert left.content == "too late for this turn"
+    finally:
+        session.close()
+
+
+async def test_a_screenshot_sent_mid_turn_reaches_the_agent(tmp_path, monkeypatch):
+    """Seen live: a screenshot dropped in while the agent worked went as a bare path, and
+    the model's Read of it was refused. Mid-turn messages carry their images now."""
+    from tinyharness.agent.history import Image
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    session = Session(SessionOptions(config_path=tmp_path / "none.toml", working_dir=tmp_path / "w"))
+    llm = ScriptedLLM([[("Glob", '{"pattern": "*"}')], "done"])
+    session.llm.stream = llm.stream
+    shot = Image("image/png", "iVBORw0KGgo=", "Screenshot.png")
+    try:
+        async for event in session.run("look around"):
+            if isinstance(event, ToolUse):
+                session.steer("[image 1 attached: Screenshot.png] what about this?", [shot])
+        delivered = llm.requests[1][-1]
+        assert delivered.role == "user" and delivered.images == [shot]
     finally:
         session.close()
 
@@ -902,28 +923,91 @@ def test_writing_a_file_is_not_called_thinking(renderer):
     renderer.wait("Working")
     renderer.handle(Reasoning("Planning the deck."))
     renderer._thought_since -= 3  # as if it took that long
-    assert renderer._activity == "Thinking"
+    assert (renderer._activity, renderer._activity_detail) == ("Working", "thinking")
     renderer.handle(ToolInputStreaming("Write", 0))
-    assert renderer._activity == "Writing a file"
+    assert (renderer._activity, renderer._activity_detail) == ("Working", "writing a file")
     assert any(line.startswith("∴ Thought for") for line in shown(renderer))  # ended when writing began
     renderer.handle(ToolInputStreaming("Write", 18_400, "/repo/out/deck.html"))
-    assert (renderer._activity, renderer._activity_detail) == ("Writing out/deck.html", "18.4k chars")
+    assert renderer._activity_detail == "writing out/deck.html · 18.4k chars"
     spinner = Text.from_ansi(renderer.live_ansi(100)).plain  # colored or not, depending on the terminal
-    assert "Writing out/deck.html · 18.4k chars…" in spinner and "Thinking" not in spinner
+    assert "Working · writing out/deck.html · 18.4k chars…" in spinner and "thinking" not in spinner
     renderer.handle(ToolUse("Write", {"path": "/repo/out/deck.html"}, "Write(/repo/out/deck.html, 1 lines)"))
-    assert renderer._activity == "Working"
+    assert (renderer._activity, renderer._activity_detail) == ("Working", "")
 
 
-def test_other_tools_being_written_get_their_own_label(renderer):
+def test_other_tools_being_written_say_so_after_the_same_label(renderer):
     from tinyharness.events import ToolInputStreaming
 
-    for event, label in [
-        (ToolInputStreaming("Edit", 10, "/repo/src/app.py"), "Editing src/app.py"),
-        (ToolInputStreaming("Bash", 10, "pytest -q"), "Writing a command"),
-        (ToolInputStreaming("WebFetch", 10, "https://x.example"), "Preparing WebFetch"),
+    for event, detail in [
+        (ToolInputStreaming("Edit", 10, "/repo/src/app.py"), "editing src/app.py"),
+        (ToolInputStreaming("Bash", 10, "pytest -q"), "writing a command"),
+        (ToolInputStreaming("WebFetch", 10, "https://x.example"), "preparing WebFetch"),
     ]:
         renderer.handle(event)
-        assert renderer._activity == label
+        assert (renderer._activity, renderer._activity_detail) == ("Working", detail)
+
+
+def test_the_label_is_the_same_whether_or_not_the_provider_streams_tool_input(renderer):
+    """Gemini and local models send a whole tool call at the end, so nothing names the file
+    until then; Claude streams it. The label was "Writing deck.html" for one and "Working"
+    for the other; now both say "Working", and what's known follows it."""
+    from tinyharness.events import ToolInputStreaming
+
+    renderer.wait("Working")
+    whole_at_the_end = Text.from_ansi(renderer.live_ansi(100)).plain
+    renderer.handle(ToolInputStreaming("Write", 5_000, "/repo/deck.html"))
+    streamed = Text.from_ansi(renderer.live_ansi(100)).plain
+    assert "Working…" in whole_at_the_end
+    assert "Working · writing deck.html · 5k chars…" in streamed
+
+
+def test_the_spinner_says_what_the_models_latest_note_said_it_is_doing(renderer):
+    """Seen live: after writing a deck the model checked every slide for minutes, and the
+    spinner only said "Working". The last sentence of its note says what it's doing."""
+    renderer.handle(AssistantText("A first version is ready: **deck.html**.\n"))
+    renderer.handle(AssistantText("The deck is written. Checking each slide for clipped text.\n"))
+    renderer.handle(ToolUse("Bash", {"command": "render.sh"}, "Bash(render.sh)", id="c1"))
+    renderer.handle(ToolResult("Bash", "ok", id="c1"))
+    renderer.wait("Working")
+    spinner = Text.from_ansi(renderer.live_ansi(120)).plain
+    assert "Working · Checking each slide for clipped text…" in spinner
+
+
+def test_a_reply_with_no_note_leaves_the_phase_alone(renderer):
+    renderer.handle(AssistantText("Checking each slide.\n"))
+    renderer.handle(ToolUse("Bash", {"command": "a"}, "Bash(a)", id="c1"))
+    renderer.handle(ToolUse("Bash", {"command": "b"}, "Bash(b)", id="c2"))  # no text in between
+    assert renderer._phase == "Checking each slide"
+
+
+def test_a_later_reply_with_no_note_ends_the_phase(renderer):
+    """Seen live: the spinner said "Writing a short plan, then the deck" while the model
+    checked slides, long after the deck was written: the note outlived its step."""
+    renderer.handle(AssistantText("Writing a short plan, then the deck.\n"))
+    renderer.handle(ToolUse("Write", {"path": "/repo/plan.md"}, "Write(plan.md)", id="c1"))
+    renderer.handle(ToolResult("Write", "ok", id="c1"))
+    renderer.wait("Working")
+    assert "Writing a short plan, then the deck" in Text.from_ansi(renderer.live_ansi(120)).plain
+    renderer.handle(ToolUse("Bash", {"command": "render.sh"}, "Bash(render.sh)", id="c2"))
+    renderer.handle(ToolResult("Bash", "ok", id="c2"))
+    renderer.wait("Working")
+    spinner = Text.from_ansi(renderer.live_ansi(120)).plain
+    assert "Working…" in spinner and "plan" not in spinner
+
+
+def test_the_spinner_clock_counts_from_the_last_thing_printed(renderer, monkeypatch):
+    """The clock says how long since anything happened, not how long the turn has run."""
+    import tinyharness.cli.render as render
+
+    now = [100.0]
+    monkeypatch.setattr(render.time, "monotonic", lambda: now[0])
+    renderer.wait("Working")
+    now[0] += 30
+    renderer.handle(ToolUse("Read", {"path": "/repo/a.py"}, "Read(/repo/a.py)", id="c1"))
+    renderer.handle(ToolResult("Read", "1 line", id="c1"))
+    renderer.wait("Working")
+    now[0] += 4
+    assert int(now[0] - renderer._activity_since) == 4
 
 
 def test_parallel_results_land_on_their_own_rows_with_their_own_times(renderer):
@@ -1169,7 +1253,7 @@ def test_the_spinner_clock_keeps_counting_through_blank_text(renderer, monkeypat
         now[0] += 1
         renderer.handle(AssistantText("\n"))
         renderer.handle(ToolInputStreaming("Bash", 2000))
-    assert renderer._activity == "Writing a command"
+    assert renderer._activity_detail.startswith("writing a command")
     assert int(now[0] - renderer._activity_since) == 5
 
 
@@ -1437,3 +1521,100 @@ def test_auto_modes_reason_stays_on_one_line():
     lines = renderer.console.export_text().splitlines()
     [note] = [line for line in lines if "auto mode" in line]
     assert "…" in note and len(lines) == 4  # blank, the row, its output, the one-line note
+
+
+def test_an_offer_waits_above_the_spinner_while_the_agent_works(renderer):
+    """Seen live: a prompt to open a finished deck stopped the turn until it was answered.
+    The offer now sits above the spinner, and the work goes on underneath it."""
+    from tinyharness.events import ArtifactPresented
+
+    renderer.can_offer = True
+    renderer.handle(ArtifactPresented("/repo/deck.html", "text/html", "deck.html", offer=True))
+    renderer.wait("Working")
+    live = Text.from_ansi(renderer.live_ansi(120)).plain
+    assert "↗ deck.html is ready to view · ctrl+g to open it" in live
+    assert live.index("deck.html is ready") < live.index("Working")
+    assert not any("deck.html" in line for line in shown(renderer))  # not printed yet
+
+
+def test_taking_the_offer_opens_that_target_once(renderer):
+    from tinyharness.events import ArtifactPresented
+
+    renderer.can_offer = True
+    renderer.handle(ArtifactPresented("/repo/deck.html", "text/html", "deck.html", offer=True))
+    assert renderer.take_offer() == "/repo/deck.html"
+    assert renderer.take_offer() is None
+    assert any("opened deck.html" in line for line in shown(renderer))
+    assert "ready to view" not in Text.from_ansi(renderer.live_ansi(120)).plain
+
+
+def test_an_offer_left_at_the_end_of_the_turn_stays_as_a_link(renderer):
+    from tinyharness.events import ArtifactPresented, Done
+
+    renderer.can_offer = True
+    renderer.handle(ArtifactPresented("/repo/deck.html", "text/html", "deck.html", offer=True))
+    renderer.handle(Done("stop"))
+    assert renderer.offer is None
+    assert any("Artifact  deck.html" in line for line in shown(renderer))
+
+
+def test_without_a_key_to_press_an_offer_is_a_link(renderer):
+    """`-p` and scripts have no input box: the offer is shown as the clickable link."""
+    from tinyharness.events import ArtifactPresented
+
+    renderer.handle(ArtifactPresented("/repo/deck.html", "text/html", "deck.html", offer=True))
+    assert renderer.offer is None
+    assert any("Artifact  deck.html" in line for line in shown(renderer))
+
+
+async def test_ctrl_g_opens_the_offer_and_letters_just_type(repl, monkeypatch):
+    """Seen in review: a bare "o" on an empty box opened the offer and ate the first letter
+    of "ok, now…". Ctrl+G opens it, even with half a message typed, which it leaves alone."""
+    import asyncio
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from tinyharness.events import ArtifactPresented
+
+    opened: list[str] = []
+
+    async def launch(target: str) -> str:
+        opened.append(target)
+        return f"opened {target}"
+
+    monkeypatch.setattr("tinyharness.cli.repl.launch", launch)
+    with create_pipe_input() as keys, create_app_session(input=keys, output=DummyOutput()):
+        loop = asyncio.create_task(repl.loop())
+        try:
+            await asyncio.sleep(0.3)
+            repl.renderer.handle(ArtifactPresented("/repo/deck.html", "text/html", "deck.html", offer=True))
+            keys.send_text("ok, now")
+            await asyncio.sleep(0.2)
+            assert repl._prompt.app.current_buffer.text == "ok, now" and opened == []
+            keys.send_text("\x07")  # Ctrl+G
+            await asyncio.sleep(0.2)
+            assert opened == ["/repo/deck.html"] and repl._prompt.app.current_buffer.text == "ok, now"
+            assert repl.renderer.offer is None
+        finally:
+            repl.running = False
+            keys.send_text("\x15\x04")
+            await asyncio.wait_for(loop, 3)
+
+
+async def test_a_call_running_when_the_turn_is_stopped_keeps_its_row(renderer):
+    """Seen live: Esc (send now) during `sleep 60` left no row for the killed command."""
+    import asyncio
+
+    async def events():
+        yield ToolUse("Bash", {"command": "sleep 60"}, "Bash(sleep 60)", id="c1")
+        yield ToolsDispatched(["Bash"], False)
+        await asyncio.sleep(10)
+
+    task = asyncio.create_task(renderer.render(events()))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert any("sleep 60" in line and "stopped" in line for line in shown(renderer))

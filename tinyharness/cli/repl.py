@@ -12,8 +12,10 @@ asking is always visible.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import inspect
+import io
 import json
 import logging
 import os
@@ -29,6 +31,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
+from PIL import Image as PILImage
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application, get_app
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
@@ -40,6 +43,7 @@ from prompt_toolkit.formatted_text import ANSI, AnyFormattedText, FormattedText,
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import ConditionalContainer, FormattedTextControl, HSplit, Layout, Window
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -85,6 +89,8 @@ from tinyharness.paths import auth_path, home_dir, pretty_path
 from tinyharness.permissions import PermissionMode
 from tinyharness.security import find_api_key
 from tinyharness.session import MissingAPIKeyError, Session
+from tinyharness.tools.base import ToolError
+from tinyharness.tools.open import launch
 from tinyharness.tools.read import load_image
 
 log = logging.getLogger(__name__)
@@ -343,6 +349,7 @@ class Repl:
         self._ui = asyncio.Lock()  # who has the keyboard: the input box, or a question (approval)
         self._questions = 0  # questions waiting for the keyboard, or holding it
         self._sending_now = False  # Esc stopped the turn to send the waiting messages
+        self._pasted: dict[str, Image] = {}  # images named in pasted text, taken as pasted
         self.suggestion = ""  # the likely next message, shown in the empty input box (Tab takes it)
         self._suggesting: asyncio.Task[None] | None = None
         self._offering: asyncio.Task[None] | None = None  # questions from a prose reply (_offer_questions)
@@ -506,6 +513,20 @@ class Repl:
             """Move the running command to the background: it keeps going as a job, and the
             agent carries on (Ctrl+B otherwise moves the cursor back)."""
             self.session.jobs.detach_foreground()
+
+        @keys.add("c-g", filter=Condition(lambda: self.renderer.offer is not None))
+        def _open_offer(event: KeyPressEvent) -> None:
+            """Open what the agent offered. Seen in review: a bare "o" on an empty box ate the
+            first letter of messages like "ok, now…"; a chord can't be typed by accident."""
+            if (target := self.renderer.take_offer()) is not None:
+                event.app.create_background_task(self._launch(target))
+
+        @keys.add(Keys.BracketedPaste)
+        def _paste(event: KeyPressEvent) -> None:
+            """Paste (a dragged-in file arrives as one), taking any images it names right away."""
+            text = event.data.replace("\r\n", "\n").replace("\r", "\n")
+            event.current_buffer.insert_text(text)
+            self._pasted.update(capture_pasted_images(text, self.session.workspace.root))
 
         @keys.add("c-t")
         def _toggle_thinking(event: KeyPressEvent) -> None:
@@ -807,6 +828,7 @@ class Repl:
         self._prompt = prompt = self._prompt_session()
         self.renderer.embedded = True  # the prompt draws the live region now
         self.renderer.can_detach = self.session.jobs.has_foreground
+        self.renderer.can_offer = True
         self.renderer.exclusive = self.exclusive
         with patch_stdout(raw=True):  # output scrolls above the input box
             plan = self.session.plan_tool.current
@@ -850,13 +872,8 @@ class Repl:
             return
         if not is_command(line):
             if await self._safe_to_send(line):
-                images, problems = attachments(line, self.session.workspace.root)
-                for image in images:
-                    size = len(image.data) * 3 // 4 // 1024
-                    self.console.print(Text(f"  ⎿ attached {image.name} · {size:,} KB", style="subtle"))
-                for problem in problems:
-                    self.console.print(Text(f"  ⎿ not attached: {problem}", style="warn"))
-                await self._run(self.session.run(line, images))
+                text, images = self._attach(line)
+                await self._run(self.session.run(text, images))
             return
 
         name, _, arg = line.partition(" ")
@@ -886,6 +903,13 @@ class Repl:
             self.console.print(
                 f"\n  Unknown command [bold]{escape(name)}[/]. Type [key]/[/] to see what's available."
             )
+
+    async def _launch(self, target: str) -> None:
+        """Open an offered artifact; if that fails, say so where the user is looking."""
+        try:
+            await launch(target)
+        except ToolError as e:
+            self.console.print(f"  [warn]Couldn't open it: {escape(str(e))}[/]")
 
     def show_thinking(self, show: bool) -> None:
         self.renderer.show_thinking = show
@@ -1062,13 +1086,27 @@ class Repl:
         self._draft = line  # back into the input box, to edit
         return False
 
+    def _attach(self, line: str) -> tuple[str, list[Image]]:
+        """The images a message names, shown as attached, and the message as the model gets it."""
+        images, problems, text = attachments(line, self.session.workspace.root, self._pasted)
+        self._pasted = {}
+        for image in images:
+            size = len(image.data) * 3 // 4 // 1024
+            self.console.print(
+                Text(f"  ⎿ attached {image.name}{_dimensions(image)} · {size:,} KB", style="subtle")
+            )
+        for problem in problems:
+            self.console.print(Text(f"  ⎿ not attached: {problem}", style="warn"))
+        return text, images
+
     async def _while_running(self, line: str) -> None:
         """Input while the agent works: a message goes to it; built-in commands run now, or
         when the turn ends if they replace the conversation; other commands wait."""
         name = line.partition(" ")[0]
         if not is_command(line):
             if await self._safe_to_send(line):
-                self.session.steer(line)
+                text, images = self._attach(line)
+                self.session.steer(text, images)
             return
         if name in _AFTER_TURN and name in COMMANDS:
             self._after_turn.append(line)
@@ -1136,7 +1174,9 @@ class Repl:
             if self.running:
                 await self._command(line)
         if (left := self.session.take_steering()) and self.running:
-            self._turn = asyncio.create_task(self._turn_in_background(self.session.run("\n\n".join(left))))
+            text = "\n\n".join(m.content or "" for m in left)
+            images = [image for m in left for image in m.images]
+            self._turn = asyncio.create_task(self._turn_in_background(self.session.run(text, images)))
         elif finished and self.running and self._plan_ready:
             await self.hand_off_plan()
         elif finished and suggest and self._last_done == "stop" and self.session.mode == PermissionMode.PLAN:
@@ -1344,28 +1384,82 @@ def _main_arg(args: object) -> str:
 _IMAGE_NAMES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 
-def attachments(line: str, cwd: Path) -> tuple[list[Image], list[str]]:
-    """Image files named in a message, to show the model: (images, why others couldn't be).
-    Words are split as a shell would, so a pasted `Screenshot\\ 2026-09-30\\ at\\ 3.11.03 PM.png`
-    or a quoted drag-and-drop path is one path. Only names ending like an image are
-    looked at; the file's bytes decide."""
+def _image_words(text: str, cwd: Path) -> list[tuple[str, Path]]:
+    """The words of `text` that name image files, and their paths. Words are split as a shell
+    would, so a pasted `Screenshot\\ 2026-09-30\\ at\\ 3.11.03 PM.png` or a quoted
+    drag-and-drop path is one path. Only names ending like an image count."""
     try:
-        words = shlex.split(line)
-    except ValueError:  # an unmatched quote: fall back to spaces
-        words = line.split()
+        words = shlex.split(text)
+    except ValueError:
+        # An unmatched quote ("what's wrong here?"): split on spaces, but not escaped ones,
+        # which a dropped file's path is full of.
+        words = [re.sub(r"\\(.)", r"\1", word) for word in re.findall(r"(?:\\.|\S)+", text)]
+    found = []
+    for word in words:
+        if word.lower().endswith(_IMAGE_NAMES):
+            path = Path(word).expanduser()
+            found.append((word, path if path.is_absolute() else cwd / path))
+    return found
+
+
+def capture_pasted_images(text: str, cwd: Path) -> dict[str, Image]:
+    """The images named in pasted or dropped text, loaded now. Seen live: macOS deletes a
+    screenshot dragged in from its thumbnail (a copy under /var/folders/…/TemporaryItems)
+    within seconds, so by the time the message was sent the file was gone, and the model's
+    attempt to Read the path was refused."""
+    captured = {}
+    for _, path in _image_words(text, cwd):
+        with contextlib.suppress(OSError, ValueError):
+            if path.is_file():
+                captured[str(path)] = load_image(path)
+    return captured
+
+
+def attachments(
+    line: str, cwd: Path, captured: dict[str, Image] | None = None
+) -> tuple[list[Image], list[str], str]:
+    """Image files named in a message, to show the model: (images, why others couldn't be,
+    the message with each attached path replaced by a mention of its image). Images captured
+    when they were pasted come first; the file's bytes decide the rest. Seen live: with the
+    path left in, the model tried to Read the screenshot too, and auto review refused it."""
     images: list[Image] = []
     problems: list[str] = []
+    text = line
     seen: set[Path] = set()
-    for word in words:
-        if not word.lower().endswith(_IMAGE_NAMES):
+    for word, path in _image_words(line, cwd):
+        if path in seen:
             continue
-        path = Path(word).expanduser()
-        path = path if path.is_absolute() else cwd / path
-        if path in seen or not path.is_file():
-            continue
+        image = (captured or {}).get(str(path))
+        if image is None:
+            if not path.is_file():
+                if word.startswith(("/", "~")):  # a file named outright: say it's gone
+                    problems.append(
+                        f"{path.name} isn't there any more (macOS removes a screenshot dragged "
+                        "from its thumbnail within seconds); drop it in again, or save it first"
+                    )
+                continue
+            try:
+                image = load_image(path)
+            except (OSError, ValueError) as e:
+                problems.append(str(e))
+                continue
         seen.add(path)
-        try:
-            images.append(load_image(path))
-        except (OSError, ValueError) as e:
-            problems.append(str(e))
-    return images, problems
+        images.append(image)
+        text = _mention(text, word, f"[image {len(images)} attached: {image.name}{_dimensions(image)}]")
+    return images, problems, text
+
+
+def _mention(text: str, word: str, mention: str) -> str:
+    """`text` with the path `word` replaced by `mention`, however it was written."""
+    for written in (f'"{word}"', f"'{word}'", word.replace(" ", "\\ "), shlex.quote(word), word):
+        if written in text:
+            return text.replace(written, mention)
+    return text
+
+
+def _dimensions(image: Image) -> str:
+    try:
+        with PILImage.open(io.BytesIO(base64.b64decode(image.data))) as picture:
+            return f", {picture.width}×{picture.height}"
+    except (OSError, ValueError):
+        return ""

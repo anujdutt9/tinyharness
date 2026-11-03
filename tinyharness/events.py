@@ -24,9 +24,11 @@ class AssistantText:
 @dataclass(frozen=True)
 class ModelStuck:
     """The model's reply got stuck (repeating itself, or only blank output): it was stopped,
-    and the model asked once to carry on."""
+    and the model asked once to carry on. With `kind` "dropped", the reply was cut off by
+    the provider or the network instead, and the model was asked again."""
 
     reason: str
+    kind: str = "stuck"
 
 
 @dataclass(frozen=True)
@@ -127,11 +129,13 @@ class PlanSaved:
 
 @dataclass(frozen=True)
 class ArtifactPresented:
-    """A file or URL is available to the user without launching an external app."""
+    """A file or URL is available to the user without launching an external app. With
+    `offer`, the user can open it from the UI (a keypress); nothing opens it otherwise."""
 
     target: str
     media_type: str = ""
     title: str = ""
+    offer: bool = False
 
 
 @dataclass(frozen=True)

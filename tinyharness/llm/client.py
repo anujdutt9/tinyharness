@@ -53,6 +53,7 @@ from tinyharness.llm.types import (
     ModelInfo,
     ProviderConnectionError,
     Request,
+    RequestTooLargeError,
     StreamChunk,
     ToolSpec,
     normalize_finish,
@@ -114,8 +115,12 @@ _RETRYABLE_TRANSPORT = (httpx.NetworkError, httpx.ConnectTimeout, httpx.RemotePr
 # Only consulted for errors inside a stream; HTTP statuses are judged by RETRY_STATUSES.
 # A status code counts only next to a word that says it is one: overflow messages quote
 # token counts like "500 in the completion".
+_REQUEST_TOO_LARGE = re.compile(
+    r"request_too_large|request (body |entity )?(is )?too large|payload too large", re.IGNORECASE
+)
 _TRANSIENT = re.compile(
     r"overloaded|rate.?limit|too many requests|temporar|service unavailable|timed? ?out"
+    r"|connection (lost|reset|closed|dropped|error)|network (error|connection)"
     r"|internal (server )?error|try again|\b(error|status|code)\W{0,3}(429|5\d\d)\b",
     re.IGNORECASE,
 )
@@ -264,6 +269,7 @@ class LLMClient:
         self.calibration = calibration
         self._formats: dict[str, ToolFormat] = {}  # probed this session, by model
         self.no_images: set[str] = set()  # models that refused an image this session
+        self.refused: dict[str, set[str]] = {}  # optional request fields each model refused
         self._tried_listing = False
         self._access_token = ""
         self._access_expires_at = 0.0
@@ -390,7 +396,9 @@ class LLMClient:
             headers["Openai-Intent"] = "conversation-edits"
             headers["X-Initiator"] = "agent" if messages and messages[-1].role != "user" else "user"
             if adapter.name == "anthropic":
-                headers["anthropic-beta"] = "interleaved-thinking-2025-05-14"
+                headers["anthropic-beta"] = (
+                    "interleaved-thinking-2025-05-14,thinking-display-updates-2026-08-18"
+                )
             if messages and any(message.images for message in messages):
                 headers["Copilot-Vision-Request"] = "true"
         if self.provider.send_ids and (who := identity.CURRENT.get()) is not None:
@@ -573,6 +581,8 @@ class LLMClient:
             max_tokens=max_tokens,
         )
         payload = _merge(adapter.payload(request), self.provider.extra_body)
+        for field_path in self.refused.get(model, ()):
+            _drop(payload, field_path)
         log.debug("POST %s model=%s messages=%d tools=%d", endpoint, model, len(messages), len(request.tools))
 
         usage: Usage | None = None
@@ -582,8 +592,9 @@ class LLMClient:
         route = ""  # which upstream a router sent this to (OpenRouter names it in every chunk)
         other: list[str] = []  # lines that aren't server-sent events: an error page, say
         busy: LLMError | None = None  # a transient error reported inside the stream, to retry
-        for attempt in range(self.retries + 1):
-            parser = adapter.parser()
+        attempt = 0  # a refused optional field is sent again without counting as a retry
+        while attempt <= self.retries:
+            parser = adapter.parser(payload)
             try:
                 async with (
                     httpx.AsyncClient(timeout=self._timeouts(), transport=self.transport) as client,
@@ -596,6 +607,13 @@ class LLMClient:
                 ):
                     if resp.status_code >= 400:
                         body = (await resp.aread()).decode(errors="replace")
+                        if resp.status_code in (400, 422) and (refused := _refused(adapter, payload, body)):
+                            # A gateway that doesn't know a field we can do without (seen live:
+                            # Copilot and `thinking.block_binding`): drop it, here and from now on.
+                            log.warning("%s refused %s; sending without it", endpoint, refused)
+                            self.refused.setdefault(model, set()).add(refused)
+                            _drop(payload, refused)
+                            continue
                         if resp.status_code in RETRY_STATUSES and attempt < self.retries:
                             delay = retry_delay(_retry_after(resp.headers), attempt)
                             log.warning(
@@ -603,6 +621,7 @@ class LLMClient:
                                 endpoint, resp.status_code, delay, attempt + 1, self.retries,
                             )  # fmt: skip
                             await asyncio.sleep(delay)
+                            attempt += 1
                             continue
                         raise _http_error(resp.status_code, body, endpoint)
                     other.clear()
@@ -638,6 +657,7 @@ class LLMClient:
                     log.warning("%s: %s; retrying in %.1fs", endpoint, busy, delay)
                     busy = None
                     await asyncio.sleep(delay)
+                    attempt += 1
                     continue
                 break
             except httpx.TransportError as e:  # refused, reset, DNS, TLS, timeouts, dropped mid-reply
@@ -645,6 +665,7 @@ class LLMClient:
                     delay = retry_delay(None, attempt)
                     log.warning("%s: %s; retrying in %.1fs", endpoint, type(e).__name__, delay)
                     await asyncio.sleep(delay)
+                    attempt += 1
                     continue
                 failure = describe_network_error(e)
                 raise ProviderConnectionError(
@@ -842,6 +863,11 @@ def _error_message(body: str) -> str:
     return str(error)[:300]
 
 
+def is_transient(error: LLMError) -> bool:
+    """Whether asking again could succeed: a dropped connection or a busy provider."""
+    return isinstance(error, ProviderConnectionError) or bool(_TRANSIENT.search(str(error)))
+
+
 def _http_error(status: int, body: str, endpoint: str) -> LLMError:
     if status in (401, 403):
         return LLMError(
@@ -853,6 +879,8 @@ def _http_error(status: int, body: str, endpoint: str) -> LLMError:
         return ImageTooLargeError(f"an image is too large for this model: {body[:300]}")
     if status in (400, 413, 422) and _OVERFLOW.search(body):
         return ContextOverflowError(f"the conversation is too long for this model: {body[:300]}")
+    if status == 413 or (status in (400, 422) and _REQUEST_TOO_LARGE.search(body)):
+        return RequestTooLargeError(f"the request is too large for this provider: {body[:300]}")
     return LLMError(f"LLM error {status}: {body[:500]}")
 
 
@@ -864,6 +892,33 @@ def _classify(e: LLMError) -> LLMError:
     if _IMAGE_TOO_LARGE.search(text):
         return ImageTooLargeError(text)
     return ContextOverflowError(text) if _OVERFLOW.search(text) else e
+
+
+def _refused(adapter: Adapter, payload: dict[str, Any], body: str) -> str | None:
+    """The optional field the error names, if the request has it."""
+    for path in adapter.optional:
+        key = path.rsplit(".", 1)[-1]
+        holders = _holders(payload, path)
+        if any(key in node for node in holders) and re.search(rf"\b{re.escape(key)}\b", body):
+            return path
+    return None
+
+
+def _drop(payload: dict[str, Any], path: str) -> None:
+    key = path.rsplit(".", 1)[-1]
+    for node in _holders(payload, path):
+        node.pop(key, None)
+
+
+def _holders(payload: dict[str, Any], path: str) -> list[dict[str, Any]]:
+    """The objects that hold the field at `path` (`tools[].x`: every tool)."""
+    nodes: list[Any] = [payload]
+    for part in path.split(".")[:-1]:
+        name, each = part.removesuffix("[]"), part.endswith("[]")
+        found = [node.get(name) for node in nodes if isinstance(node, dict)]
+        nodes = [item for value in found if isinstance(value, list) for item in value] if each else found
+        nodes = [node for node in nodes if isinstance(node, (dict, list))]
+    return [node for node in nodes if isinstance(node, dict)]
 
 
 def _merge(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:

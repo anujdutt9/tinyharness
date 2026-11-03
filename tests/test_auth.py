@@ -376,7 +376,9 @@ async def test_copilot_catalog_drives_each_models_wire_format_and_endpoint(tmp_p
                 },
             )
         assert request.url.path == "/v1/messages"
-        assert request.headers["anthropic-beta"] == "interleaved-thinking-2025-05-14"
+        assert request.headers["anthropic-beta"] == (
+            "interleaved-thinking-2025-05-14,thinking-display-updates-2026-08-18"
+        )
         return httpx.Response(200, json={})
 
     provider = load_catalog()["github_copilot"]

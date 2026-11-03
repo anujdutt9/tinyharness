@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, TypeVar
@@ -10,9 +11,11 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import FuzzyWordCompleter
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import BufferControl, FormattedTextControl, HSplit, Layout, Window
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.processors import BeforeInput
@@ -231,12 +234,24 @@ async def answer_question(question: AskQuestion, number: int, total: int) -> str
             return own
 
 
+TYPE_AHEAD_SECONDS = 0.8  # keys this soon after a question appears were typed before it
+
+
 def _question_picker(question: AskQuestion, number: int, total: int) -> Application[str | None]:
     keys = KeyBindings()
     values = [option.label for option in question.options] + [_OWN_ANSWER]
+    shown = time.monotonic()
+    typed_before = Condition(lambda: time.monotonic() - shown < TYPE_AHEAD_SECONDS)
+
+    @keys.add(Keys.Any, filter=typed_before, eager=True)
+    @keys.add("enter", filter=typed_before, eager=True)
+    @keys.add("escape", filter=typed_before, eager=True)
+    def _typed_before(event: KeyPressEvent) -> None:
+        """Seen live: a message being typed when a question appeared went to the question,
+        and its Enter picked an answer the user never chose. Keys this early are dropped."""
 
     def bind(key: str, result: str | None) -> None:
-        @keys.add(key, eager=True)
+        @keys.add(key, eager=True, filter=~typed_before)
         def _(event: KeyPressEvent) -> None:
             event.app.exit(result=result)
 

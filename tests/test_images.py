@@ -165,3 +165,42 @@ async def test_a_model_that_takes_no_images_is_asked_again_with_notes(tmp_path):
     assert any(getattr(e, "text", "") == "I can't see images; the HTML validates." for e in events)
     assert llm.no_images == {"fake"}
     assert "Cannot read shot.png" in llm.requests[-1][1].content
+
+
+def test_a_413_is_a_request_too_large():
+    from tinyharness.llm.types import RequestTooLargeError
+
+    body = '{"type":"error","error":{"type":"request_too_large","message":"Request body too large."}}'
+    assert isinstance(
+        _http_error(413, body, "https://api.githubcopilot.com/v1/messages"), RequestTooLargeError
+    )
+    assert isinstance(_http_error(400, "request entity too large", "x"), RequestTooLargeError)
+
+
+async def test_a_request_too_large_drops_the_images_already_looked_at(tmp_path):
+    """Seen live (Copilot): after reading 13 slide screenshots the request carried 34 MB of
+    images and failed with 413 "Request body too large", ending the turn. The images from
+    earlier steps go (the model already saw them); the latest step's stay."""
+    from tinyharness.llm.types import RequestTooLargeError
+
+    class RejectsBigRequests(ScriptedLLM):
+        async def stream(self, messages, tools=None, **kw):
+            if sum(len(m.images) for m in messages) > 1:
+                raise RequestTooLargeError("LLM error 413: Request body too large.")
+            async for chunk in super().stream(messages, tools, **kw):
+                yield chunk
+
+    shot = as_image(png(800, 600))
+    history = History(
+        [
+            Message(role="system", content="s"),
+            Message(role="user", content="slide 1", images=[shot]),
+            Message(role="assistant", content="Slide 1 is fine."),
+            Message(role="user", content="slide 2", images=[shot]),
+        ]
+    )
+    events = await run_with(tmp_path, RejectsBigRequests(["Both checked."]), history)
+    assert any(getattr(e, "text", "") == "Both checked." for e in events)
+    old, latest = history.messages[1], history.messages[3]
+    assert old.images == [] and "[removed:" in (old.content or "")
+    assert len(latest.images) == 1

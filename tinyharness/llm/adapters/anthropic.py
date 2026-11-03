@@ -8,6 +8,16 @@
   `prefix_mismatch_behavior: "drop_block"` so the API drops such blocks instead of
   rejecting the request (unless the provider sets `block_binding = false`: some
   gateways, GitHub Copilot among them, reject the field).
+- Progress notes: what the model writes between tool calls ("Found it; now checking each
+  slide") comes back as `thinking` blocks, empty unless asked for. We ask for
+  `display: "updates"` and turn those notes back into text, as older models sent them;
+  with reasoning shown (ctrl+t) we ask for `"summarized"`, reasoning and notes together.
+  Seen live: Claude Opus 5.5 checked a deck's slides for five minutes without a word.
+- Tool input streams as the model writes it (`eager_input_streaming` on each tool). By
+  default the API holds a tool call's input back and sends it in one burst at the end:
+  seen live, a 25,000-character Write arrived after 87 seconds of silence, which looked
+  stuck. A reply cut off mid-call can then carry incomplete input; the loop never runs a
+  call from a reply cut off at the output limit, and bad JSON comes back as a tool error.
 - Caching: the top-level `cache_control` lets the API place the breakpoint itself.
 """
 
@@ -21,7 +31,7 @@ from tinyharness.llm.adapters.base import Adapter, StreamParser, parse_arguments
 from tinyharness.llm.types import LLMError, ModelInfo, Request, StreamChunk
 
 API_VERSION = "2023-06-01"
-BETAS = "thinking-binding-controls-2026-08-01"
+BETAS = "thinking-binding-controls-2026-08-01,thinking-display-updates-2026-08-18"
 WEB_SEARCH_TOOL = "web_search_20250305"  # runs on Anthropic's side; results come back as blocks
 DEFAULT_MAX_TOKENS = 16_000  # used only when the model list hasn't told us the model's limit
 
@@ -29,6 +39,7 @@ DEFAULT_MAX_TOKENS = 16_000  # used only when the model list hasn't told us the 
 class AnthropicAdapter(Adapter):
     name = "anthropic"
     request_path = "/messages"
+    optional = ("thinking.display", "thinking.block_binding", "tools[].eager_input_streaming")
 
     def headers(self, api_key: str) -> dict[str, str]:
         return {"x-api-key": api_key, "anthropic-version": API_VERSION, "anthropic-beta": BETAS}
@@ -46,11 +57,19 @@ class AnthropicAdapter(Adapter):
             payload["system"] = request.system
         if request.tools:
             payload["tools"] = [
-                {"name": t.name, "description": t.description, "input_schema": t.parameters}
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters,
+                    "eager_input_streaming": True,
+                }
                 for t in request.tools
             ]
         if info.adaptive_thinking:
-            payload["thinking"] = {"type": "adaptive"}
+            payload["thinking"] = {
+                "type": "adaptive",
+                "display": "summarized" if request.show_reasoning else "updates",
+            }
             if self.provider.block_binding:
                 payload["thinking"]["block_binding"] = {"prefix_mismatch_behavior": "drop_block"}
         if request.effort and (info.efforts is None or request.effort in info.efforts):
@@ -62,8 +81,8 @@ class AnthropicAdapter(Adapter):
     def add_web_search(self, payload: dict[str, Any]) -> None:
         payload.setdefault("tools", []).append({"type": WEB_SEARCH_TOOL, "name": "web_search", "max_uses": 5})
 
-    def parser(self) -> StreamParser:
-        return _AnthropicParser()
+    def parser(self, payload: dict[str, Any]) -> StreamParser:
+        return _AnthropicParser(notes=(payload.get("thinking") or {}).get("display") == "updates")
 
     def ping_payload(self, model: str) -> dict[str, Any]:
         return {"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "ping"}]}
@@ -128,7 +147,9 @@ def _image(image: Image) -> dict[str, Any]:
 
 
 class _AnthropicParser(StreamParser):
-    def __init__(self) -> None:
+    def __init__(self, *, notes: bool = False) -> None:
+        self.notes = notes  # under display "updates", thinking text is a progress note, not reasoning
+        self.wrote = False  # text has gone out: a note after it starts a new paragraph
         self.blocks: dict[int, dict[str, Any]] = {}
         self.json: dict[int, list[str]] = {}
         self.stop_reason: str | None = None
@@ -174,6 +195,7 @@ class _AnthropicParser(StreamParser):
         match delta.get("type"):
             case "text_delta":
                 block["text"] = block.get("text", "") + delta["text"]
+                self.wrote = self.wrote or bool(delta["text"])
                 return [StreamChunk(text=delta["text"])]
             case "input_json_delta" if block.get("type") == "tool_use":  # not server-side tools
                 self.json.setdefault(index, []).append(delta["partial_json"])
@@ -183,7 +205,12 @@ class _AnthropicParser(StreamParser):
                     )
                 ]
             case "thinking_delta":
+                first = not block.get("thinking")
                 block["thinking"] = block.get("thinking", "") + delta["thinking"]
+                if self.notes and delta["thinking"]:  # the block itself is sent back unchanged
+                    text = ("\n\n" if first and self.wrote else "") + delta["thinking"]
+                    self.wrote = True
+                    return [StreamChunk(text=text)]
                 return [StreamChunk(reasoning_text=delta["thinking"])]
             case "signature_delta":
                 block["signature"] = delta["signature"]
@@ -191,6 +218,12 @@ class _AnthropicParser(StreamParser):
 
     def state(self) -> Any:
         """The reply's content blocks, kept only when it has thinking to send back."""
+        for index, block in self.blocks.items():
+            # A reply cut off at the output limit never closes its last block, so a tool call
+            # there never got its `input`; the API requires one. Seen live: the next request
+            # failed with `tool_use.input: Field required`, ending the turn.
+            if block.get("type") == "tool_use" and "input" not in block:
+                block["input"] = parse_arguments("".join(self.json.get(index, [])))
         blocks = [self.blocks[i] for i in sorted(self.blocks)]
         if any(b.get("type") in ("thinking", "redacted_thinking") for b in blocks):
             return blocks

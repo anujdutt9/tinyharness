@@ -77,7 +77,7 @@ class ChatAdapter(Adapter):
             raise NotImplementedError
         payload.update(self.provider.web_search)
 
-    def parser(self) -> StreamParser:
+    def parser(self, payload: dict[str, Any]) -> StreamParser:
         return _ChatParser()
 
     def ping_payload(self, model: str) -> dict[str, Any]:

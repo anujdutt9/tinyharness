@@ -7,6 +7,57 @@ the SDK, and every break is listed here.
 
 ## Unreleased
 
+### Changed
+- Edit no longer refuses a file that changed since the agent last read it (often by the
+  agent's own command). It applies the change to the file as it is now, since the text it
+  replaces must still be there word for word, and tells the model the file had changed.
+  Write still refuses, since overwriting would lose the change.
+- Large file writes with Claude (on GitHub Copilot and the Anthropic API) no longer sit
+  silent while the model writes: the file streams in as it's written, so the spinner names
+  it and counts characters. The total time is the same.
+- The spinner always says "Working", on every provider, and adds what's known after it:
+  "thinking", what's being written and how much, or the phase the model last said it was
+  in ("Checking each slide for clipped text"), until it moves on without saying what to.
+  Its timer counts from the last thing shown.
+- When the main result is ready and the agent moves on to checking it, it says so: where
+  the result is, that you can use it now, what it's checking, and at the end what changed.
+- Opening something in your browser or viewer no longer stops the agent to ask. It offers
+  instead: "↗ deck.html is ready to view · ctrl+g to open it" sits above the spinner while
+  the work carries on, and ctrl+g opens it whenever you like. Nothing opens without that
+  key; in `-p` mode the offer is a clickable link.
+
+### Fixed
+- Screenshots you drop into the input box are attached reliably: the image is taken the
+  moment it's dropped (macOS deletes the temporary copy within seconds), it's attached to
+  messages sent while the agent works too, and the path in your message is replaced with a
+  note that the image is attached, so the model no longer tries to read it and gets refused.
+  The "attached" line shows each image's size in pixels.
+- An image path in a message with an apostrophe ("what's wrong here?") is recognised.
+- Typing a message just as the agent asks a question no longer answers the question: keys
+  pressed in the first moment after a question appears are ignored, so the Enter meant for
+  your message can't pick an option you never saw.
+- A command stopped by Esc (to send your message now) or Ctrl+C keeps its row, marked
+  "stopped", instead of vanishing from the screen.
+- A long session that has looked at many images no longer ends with "413 Request body too
+  large" (seen on GitHub Copilot after reading a dozen slide screenshots). The images from
+  earlier steps are dropped from the request, with a note, and it's sent again.
+- A reply cut off by a dropped connection ("Network connection lost") no longer ends the
+  turn: the partial reply is dropped and the model asked again, once per turn.
+- A reply cut off at the output limit in the middle of a tool call no longer ends the turn
+  with `tool_use.input: Field required` (Claude, including on Copilot). The cut-off call was
+  sent back without its input; it now carries what arrived, and the model is told the call
+  didn't run. OpenAI models had the same gap and are fixed too.
+- Long file writes on GitHub Copilot no longer fail with "it sent nothing but blank output
+  for over 60 seconds". A provider can go silent while the model writes a large tool call,
+  and that silence was mistaken for blank output, so the reply and every retry were discarded.
+- Recent Claude models (Opus 5.5, Sonnet 5.5, and others) no longer go quiet for minutes
+  during long tasks. Their notes between tool calls ("the deck is written; checking each
+  slide") came back hidden, and now show as messages.
+- With reasoning shown (ctrl+t), recent Claude models' thinking now appears instead of an
+  empty "Thinking". They leave it out unless asked; tinyharness now asks.
+- A gateway that refuses one of these optional request fields gets the request again
+  without it, for the rest of the session, instead of failing.
+
 ## 0.1.3 (2026-11-02)
 
 ### Fixed

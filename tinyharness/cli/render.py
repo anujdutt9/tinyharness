@@ -21,8 +21,11 @@ run; once done they fold into its row (a failed one keeps a line of its own):
 
     ── 9s · 4 tools · 1 file +4 −1 · tests ✗ · 12.3k tokens · $0.03
 
-The spinner says "Working" while waiting on the model, and "Thinking" only once the
-model reports that it is actually reasoning (many replies involve none).
+The spinner always says "Working", the same on every provider; what's known goes after it:
+"thinking" once the model reports reasoning (many replies involve none), what it's writing
+and how much ("writing deck.html · 13.9k chars", when the provider streams tool input), or
+the phase from the model's latest note ("Checking each slide for clipped text"). Its clock
+counts from the last thing printed: how long since anything happened.
 """
 
 from __future__ import annotations
@@ -84,7 +87,7 @@ from tinyharness.permissions import Decision, PermissionRequest
 from tinyharness.tools.ask import AskQuestion
 
 WAITING = "Working"
-_WRITING_LABELS = ("Writing", "Editing", "Preparing")  # see Renderer._writing_label
+_WRITING = ("writing", "editing", "preparing")  # details that name a tool call being written
 
 _REJECTED = "The user rejected this tool call."
 
@@ -261,6 +264,17 @@ class _Turn:
     calls_before: int = 0  # the meter's call count when the turn started
 
 
+def _phase(note: str) -> str:
+    """The last sentence of a note, short enough for the spinner: "Checking each slide for
+    clipped text", from "The deck is written. Checking each slide for clipped text."."""
+    lines = [line for line in note.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    plain = re.sub(r"[*_`#>]", "", lines[-1]).strip()
+    sentence = re.split(r"(?<=[.!?])\s+", plain)[-1].strip().rstrip(".:")
+    return ellipsize(sentence, 60)
+
+
 class Renderer:
     def __init__(self, console: Console) -> None:
         self.console = console
@@ -282,14 +296,20 @@ class Renderer:
         self.embedded = False
         # Whether Ctrl+B can move a running command to the background (set by the REPL).
         self.can_detach: Callable[[], bool] = lambda: False
+        # Whether a key can open an offered artifact (the REPL's ctrl+g); elsewhere it's a link.
+        self.can_offer = False
+        self.offer: tuple[str, str] | None = None  # (target, title) waiting for that key
         # Taking the terminal for a question (a permission prompt) while the input box is up.
         self.exclusive: Callable[[], AbstractAsyncContextManager[None]] | None = None
         self._live: Live | None = None
         self._spinner = Spinner("dots", style=BRAND)
         self._activity: str | None = None
         self._activity_since = 0.0
-        self._last_activity: str | None = None  # survives a brief stop, so its clock does too
-        self._activity_detail = ""  # e.g. how much of a file has been written so far
+        self._last_activity: tuple[str, str] | None = None  # survives a brief stop, so its clock does too
+        self._activity_detail = ""  # e.g. what's being written, and how much so far
+        self._note = ""  # the model's text since its last tool call
+        self._phase = ""  # the last line of its latest note before a tool call, for the spinner
+        self._phase_ended = False  # results came back since: a reply with no note has moved on
         self._streaming = ""  # the Markdown block still being written
         self._running: list[_RunningTool] = []
         self._tools_parallel = True
@@ -350,9 +370,18 @@ class Renderer:
             room = LIVE_THOUGHT_LINES * max(self.console.width - 4, 20)
             shown = writing if len(writing) <= room else "…" + writing[-room:]
             parts.append(Padding(Text(shown, style="thinking"), (0, 0, 0, 2)))
+        if self.offer is not None:
+            parts.append(
+                Text("↗ ", style=BRAND)
+                .append(self.offer[1], style="bold")
+                .append(" is ready to view · ", style="muted")
+                .append("ctrl+g", style=f"bold {BRAND}")
+                .append(" to open it", style="muted")
+            )
         if self._activity:
             elapsed = int(now - self._activity_since)
-            detail = f" · {self._activity_detail}" if self._activity_detail else ""
+            shown = self._activity_detail or (self._phase if self._activity == WAITING else "")
+            detail = f" · {shown}" if shown else ""
             self._spinner.update(
                 text=Text.assemble(
                     (self._activity, BRAND),
@@ -386,12 +415,14 @@ class Renderer:
             self._live = None
 
     def wait(self, label: str, detail: str = "") -> None:
-        """Show `label` on the spinner. Its clock starts when the label changes, not when
-        the same activity comes back after a pause (text streamed between pieces of a
-        tool call used to restart it: 0s, 1s, 0s, 1s)."""
-        if label != self._last_activity:
+        """Show `label` and `detail` on the spinner. Its clock restarts when what it's doing
+        changes (a growing count doesn't count), not when the same activity comes back
+        after a pause (text streamed between pieces of a tool call used to restart it:
+        0s, 1s, 0s, 1s)."""
+        doing = (label, detail.split(" · ")[0])
+        if doing != self._last_activity:
             self._activity_since = time.monotonic()
-        self._activity = self._last_activity = label
+        self._activity, self._last_activity = label, doing
         self._activity_detail = detail
 
     def stop_waiting(self) -> None:
@@ -401,6 +432,7 @@ class Renderer:
 
     def _print(self, renderable: RenderableType) -> None:
         self.console.print(renderable, highlight=False)
+        self._activity_since = time.monotonic()  # the clock says how long since anything happened
 
     def _block(self, renderable: RenderableType) -> None:
         """Print a block with a blank line before it, so turns read as distinct steps."""
@@ -765,6 +797,9 @@ class Renderer:
             usage_before=self._usage(),
             calls_before=self.meter.calls if self.meter is not None else 0,
         )
+        self._note = self._phase = ""
+        self._phase_ended = False
+        self.offer = None
         self.wait(WAITING)
         self._start_live()
         try:
@@ -773,6 +808,10 @@ class Renderer:
                     self.handle(event)
         finally:
             self._flush_text(everything=True)
+            # Calls still running when the turn was stopped (Esc to send a message now, Ctrl+C):
+            # seen live, a killed `sleep 60` row vanished, leaving no sign it had been running.
+            for tool in self._running:
+                self._rows(self._row(Text("■", style="warn"), tool, Text("stopped", style="subtle")))
             self._running.clear()
             self._agents.clear()
             self._agent_since.clear()
@@ -787,16 +826,17 @@ class Renderer:
                 self._thought.append(text)
                 if self.show_thinking:
                     self._flush_thought()
-                if self._activity == WAITING:
-                    self.wait("Thinking")
-            case ModelStuck(reason=reason):
+                if self._activity == WAITING and not self._activity_detail:
+                    self.wait(WAITING, "thinking")
+            case ModelStuck(reason=reason, kind=kind):
                 self._finish_thought()
                 self._streaming = ""  # the stuck reply's unprinted text: discarded, as it was
-                self._block(
-                    Text(
-                        f"↻ The model got stuck: {reason}. Stopped it and asked it to carry on.", style="warn"
-                    )
+                said = (
+                    f"↻ The reply was cut off ({reason.rstrip('.')}). Asked again."
+                    if kind == "dropped"
+                    else f"↻ The model got stuck: {reason}. Stopped it and asked it to carry on."
                 )
+                self._block(Text(said, style="warn"))
                 self.wait(WAITING)
             case MessageDelivered(text=text):
                 self._flush_text(everything=True)
@@ -808,19 +848,29 @@ class Renderer:
                 if text.strip():  # blank lines between tool-call pieces aren't an answer
                     self.stop_waiting()
                 self._streaming += text
+                self._note += text
                 self._flush_text(everything=False)
             case ToolInputStreaming(name=name, chars=chars, target=target):
                 # Reasoning is over: the model is writing a tool call (a whole file, maybe),
                 # which shows nothing until it's complete. Say so, not "Thinking".
                 self._finish_thought()
                 self._flush_text(everything=True)
-                self.wait(
-                    self._writing_label(name, target), f"{tokens(chars)} chars" if chars >= 1000 else ""
-                )
+                label = self._writing_label(name, target)
+                writing = label[:1].lower() + label[1:]
+                self.wait(WAITING, f"{writing} · {tokens(chars)} chars" if chars >= 1000 else writing)
             case ToolUse(summary=summary, args=args):
                 self._finish_thought()
-                if self._activity and self._activity.startswith(_WRITING_LABELS):
+                if self._activity_detail.startswith(_WRITING):
                     self.wait(WAITING)  # the call is complete: its row takes over
+                # What it said before this call is what it's doing. The note covers that reply's
+                # calls and the wait for their results; a later reply that calls tools without
+                # a note has moved on to something it didn't announce, so the old note goes.
+                if note := _phase(self._note):
+                    self._phase = note
+                elif self._phase_ended:
+                    self._phase = ""
+                self._phase_ended = False
+                self._note = ""
                 self._flush_text(everything=True)
                 self._running.append(_RunningTool(summary, args, id=event.id))
                 self._turn.tools += 1
@@ -839,8 +889,10 @@ class Renderer:
                 self._tools_parallel = parallel
                 self.wait(f"Running {len(names)} tools" if parallel else f"Running {names[0]}")
             case ToolResult(name=("TodoWrite" | "Plan") as name, is_error=False):
+                self._phase_ended = True
                 self._running = [t for t in self._running if t.name != name]
             case ToolResult() as result:
+                self._phase_ended = True
                 running = self._running_for(result)
                 self.last_output = (running.summary if running else result.name, result.output)
                 self._finish_tool(result)
@@ -873,6 +925,8 @@ class Renderer:
                 head = Group(tool_line(f"Plan  {title}", "ok"), where)
                 self._block(head if in_reply else Group(head, Padding(markdown.render(text), (1, 0, 0, 4))))
                 self.wait(WAITING)
+            case ArtifactPresented(target=target, title=title, offer=True) if self.can_offer:
+                self.offer = (target, title or target)  # shown above the spinner until taken
             case ArtifactPresented(target=target, media_type=media_type, title=title):
                 label = title or target
                 style = (
@@ -915,7 +969,25 @@ class Renderer:
                     self._print(self._agent_line(left, last=i == len(self._finished_agents) - 1, glyph=mark))
                 self._finished_agents.clear()
                 self.stop_waiting()
+                self._leave_offer()
                 self._done(reason)
+
+    def take_offer(self) -> str | None:
+        """The offered artifact, for the key that opens it; it's no longer on offer."""
+        if self.offer is None:
+            return None
+        target, title = self.offer
+        self.offer = None
+        self._block(Text("  ↗ ", style="ok").append("opened ", style="subtle").append(title, style="bold"))
+        return target
+
+    def _leave_offer(self) -> None:
+        """The turn ended with the offer untaken: leave it in the scrollback as a link."""
+        if self.offer is None:
+            return
+        target, title = self.offer
+        self.offer = None
+        self.handle(ArtifactPresented(target, title=title))
 
     def _finish_thought(self) -> None:
         """The model moved on from reasoning: show it, or just how long it took."""

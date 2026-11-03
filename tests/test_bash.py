@@ -1242,10 +1242,22 @@ async def test_with_the_sandbox_off_nothing_is_an_escape_but_anything_can_send(t
 # ---- Open ----
 
 
-@pytest.mark.parametrize("mode", [PermissionMode.DEFAULT, PermissionMode.AUTO])
-async def test_open_external_always_asks_even_for_project_files(tmp_path, mode):
+@pytest.mark.parametrize("mode", [PermissionMode.DEFAULT, PermissionMode.AUTO, PermissionMode.ASK])
+async def test_open_external_offers_without_asking_and_launches_nothing(tmp_path, mode, monkeypatch):
+    """Seen live: an approval prompt to open a finished deck stopped the turn until it was
+    answered, so the agent sat idle instead of checking its slides. External Open now only
+    offers; the user's keypress opens it (`launch`), so nothing runs outside the sandbox
+    unless they choose it."""
+    (tmp_path / "report.html").write_text("<h1>report</h1>")
+    monkeypatch.setattr("tinyharness.tools.open._opener", lambda: pytest.fail("the tool launched it"))
     _, asked = await check(tmp_path, OpenTool(), mode, {"target": "report.html", "mode": "external"})
-    assert len(asked) == 1
+    assert asked == []
+    out = await OpenTool().run(
+        OpenTool().parse({"target": "report.html", "mode": "external"}), make_ctx(tmp_path)
+    )
+    assert isinstance(out, ToolOutput) and out.text.startswith("offered to the user; not open yet")
+    (artifact,) = out.artifacts
+    assert artifact.offer and artifact.target == str((tmp_path / "report.html").resolve())
 
 
 @pytest.mark.parametrize("mode", [PermissionMode.DEFAULT, PermissionMode.AUTO])
@@ -1294,19 +1306,6 @@ async def gate_check(tmp_path, mode, target, *, allow=(), deny=(), remember=True
     return decision, asked, gate
 
 
-@pytest.mark.parametrize("target", ["report.pdf", "report.html", "https://example.com/x"])
-async def test_saying_dont_ask_again_does_not_stop_open_asking(tmp_path, target):
-    _, asked, gate = await gate_check(tmp_path, PermissionMode.ASK, target)
-    assert asked[0].remember_label == ""  # not offered
-    _, asked_again, _ = await gate_check(tmp_path, PermissionMode.ASK, target)
-    assert len(asked_again) == 1 and gate.mode == PermissionMode.ASK
-
-
-async def test_an_allow_rule_does_not_approve_open(tmp_path):
-    decision, asked, _ = await gate_check(tmp_path, PermissionMode.ASK, "report.html", allow=["Open"])
-    assert decision.allow and len(asked) == 1  # it still asked
-
-
 @pytest.mark.parametrize(
     ("target", "deny"),
     [("private/report.pdf", "Open(private/*)"), ("https://evil.example/x", "Open(domain:evil.example)")],
@@ -1314,11 +1313,6 @@ async def test_an_allow_rule_does_not_approve_open(tmp_path):
 async def test_deny_rules_apply_to_open_by_path_and_site(tmp_path, target, deny):
     decision, asked, _ = await gate_check(tmp_path, PermissionMode.ASK, target, deny=[deny])
     assert not decision.allow and decision.source == "rule" and asked == []
-
-
-async def test_bypass_mode_still_asks_before_opening_a_host_app(tmp_path):
-    decision, asked, _ = await gate_check(tmp_path, PermissionMode.BYPASS, "report.pdf")
-    assert decision.allow and len(asked) == 1
 
 
 @pytest.mark.parametrize("name", ["run.command", "evil.sh", "App.app", "x.webloc", "noext"])
@@ -1340,16 +1334,30 @@ async def test_open_refuses_secrets(tmp_path):
         await call(OpenTool(), {"target": ".env.json", "mode": "preview"}, make_ctx(tmp_path))
 
 
-async def test_open_hands_documents_to_the_system_opener(tmp_path, monkeypatch):
+async def test_the_users_keypress_hands_the_offer_to_the_system_opener(tmp_path, monkeypatch):
+    from tinyharness.tools.open import launch
+
     (tmp_path / "report.html").write_text("<h1>hi</h1>")
     seen = tmp_path / "opened"
     opener = tmp_path / "fake-open"
     opener.write_text(f'#!/bin/sh\necho "$1" > {seen}\n')
     opener.chmod(0o755)
     monkeypatch.setattr("tinyharness.tools.open._opener", lambda: str(opener))
-    out = await call(OpenTool(), {"target": "report.html", "mode": "external"}, make_ctx(tmp_path))
-    assert out == f"opened {tmp_path.resolve() / 'report.html'}"
-    assert seen.read_text().strip() == str(tmp_path.resolve() / "report.html")
+    target = str(tmp_path.resolve() / "report.html")
+    assert await launch(target) == f"opened {target}"
+    assert seen.read_text().strip() == target
+
+
+@pytest.mark.parametrize("name", [".env.html", "run.command", "missing.html"])
+async def test_launch_checks_the_file_again_when_the_key_is_pressed(tmp_path, monkeypatch, name):
+    """The file can change between the offer and the keypress."""
+    from tinyharness.tools.open import launch
+
+    if name != "missing.html":
+        (tmp_path / name).write_text("x")
+    monkeypatch.setattr("tinyharness.tools.open._opener", lambda: pytest.fail("it launched"))
+    with pytest.raises(ToolError):
+        await launch(str(tmp_path / name))
 
 
 @pytest.mark.parametrize(
