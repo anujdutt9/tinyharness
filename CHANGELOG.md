@@ -7,6 +7,8 @@ the SDK, and every break is listed here.
 
 ## Unreleased
 
+## 0.1.4 (2026-11-02)
+
 ### Changed
 - Edit no longer refuses a file that changed since the agent last read it (often by the
   agent's own command). It applies the change to the file as it is now, since the text it
