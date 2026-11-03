@@ -352,7 +352,7 @@ class LLMClient:
             self.api_key = str(latest["access_token"])
 
     async def _route(self, model: str) -> tuple[str, dict[str, str]]:
-        """The model to send and the headers its router needs, for a routed entry like Copilot Auto."""
+        """The model to send and the headers its router needs for a routed Auto entry."""
         info = self.model_info(model)
         if info is None or not info.routed or self.provider.auth_refresh != "github_copilot":
             return model, {}
@@ -609,7 +609,7 @@ class LLMClient:
                         body = (await resp.aread()).decode(errors="replace")
                         if resp.status_code in (400, 422) and (refused := _refused(adapter, payload, body)):
                             # A gateway that doesn't know a field we can do without (seen live:
-                            # Copilot and `thinking.block_binding`): drop it, here and from now on.
+                            # a gateway and `thinking.block_binding`): drop it, here and from now on.
                             log.warning("%s refused %s; sending without it", endpoint, refused)
                             self.refused.setdefault(model, set()).add(refused)
                             _drop(payload, refused)

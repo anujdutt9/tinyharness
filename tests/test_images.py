@@ -178,7 +178,7 @@ def test_a_413_is_a_request_too_large():
 
 
 async def test_a_request_too_large_drops_the_images_already_looked_at(tmp_path):
-    """Seen live (Copilot): after reading 13 slide screenshots the request carried 34 MB of
+    """Seen live: after reading many slide screenshots the request carried 34 MB of
     images and failed with 413 "Request body too large", ending the turn. The images from
     earlier steps go (the model already saw them); the latest step's stay."""
     from tinyharness.llm.types import RequestTooLargeError
@@ -204,3 +204,28 @@ async def test_a_request_too_large_drops_the_images_already_looked_at(tmp_path):
     old, latest = history.messages[1], history.messages[3]
     assert old.images == [] and "[removed:" in (old.content or "")
     assert len(latest.images) == 1
+
+
+async def test_a_still_large_latest_image_batch_gets_a_second_recovery(tmp_path):
+    """Dropping old images may not be enough; a second 413 must shrink or remove the latest batch."""
+    from tinyharness.llm.types import RequestTooLargeError
+
+    class RejectsAnyImages(ScriptedLLM):
+        async def stream(self, messages, tools=None, **kw):
+            if any(m.images for m in messages):
+                raise RequestTooLargeError("LLM error 413: Request body too large.")
+            async for chunk in super().stream(messages, tools, **kw):
+                yield chunk
+
+    shot = as_image(png(800, 600))
+    history = History(
+        [
+            Message(role="system", content="s"),
+            Message(role="user", content="old", images=[shot]),
+            Message(role="assistant", content="checked"),
+            Message(role="user", content="latest", images=[shot, shot]),
+        ]
+    )
+    events = await run_with(tmp_path, RejectsAnyImages(["Done."]), history)
+    assert any(getattr(e, "text", "") == "Done." for e in events)
+    assert not any(m.images for m in history.messages)

@@ -910,6 +910,8 @@ class Repl:
             await launch(target)
         except ToolError as e:
             self.console.print(f"  [warn]Couldn't open it: {escape(str(e))}[/]")
+        else:
+            self.renderer.opened_offer(target)
 
     def show_thinking(self, show: bool) -> None:
         self.renderer.show_thinking = show

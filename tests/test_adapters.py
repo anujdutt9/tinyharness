@@ -118,7 +118,7 @@ ANTHROPIC_STREAM = sse(
     ("provider", "sent"), [("anthropic", True), ("openrouter", True), ("github_copilot", False)]
 )
 def test_block_binding_is_sent_only_where_the_provider_accepts_it(provider, sent):
-    """Seen live: Copilot's Claude endpoint answered `thinking.adaptive.block_binding: Extra
+    """Seen live: a hosted Anthropic-format endpoint answered `thinking.adaptive.block_binding: Extra
     inputs are not permitted`; Anthropic needs the field to survive compaction."""
     from tinyharness.llm.adapters.anthropic import AnthropicAdapter
     from tinyharness.llm.types import Request
@@ -163,7 +163,7 @@ PROGRESS_NOTE_STREAM = sse(
 
 
 async def test_progress_notes_between_tool_calls_reach_the_user(tmp_path):
-    """Seen live: Claude Opus 5.5 checked every slide of a finished deck for five minutes
+    """Seen live: a recent Anthropic model checked every slide of a finished deck for five minutes
     without a word. Its notes between tool calls come back as thinking blocks, empty unless
     asked for; asked for, they are shown as text, and the blocks are sent back unchanged."""
     server = Server(PROGRESS_NOTE_STREAM)
@@ -181,7 +181,7 @@ async def test_progress_notes_between_tool_calls_reach_the_user(tmp_path):
 
 async def test_shown_reasoning_asks_for_summaries(tmp_path):
     """Seen live: "Thinking" with nothing under ctrl+t. The model was thinking, but recent
-    Claude models leave the text out unless asked; with reasoning shown we ask."""
+    Anthropic models leave the text out unless asked; with reasoning shown we ask."""
     stream = sse(
         {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
         {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "Hmm."}},
@@ -223,7 +223,7 @@ async def test_a_note_after_text_starts_a_new_paragraph(tmp_path):
 
 @pytest.mark.parametrize("retries", [0, 2])
 async def test_a_gateway_that_refuses_display_gets_requests_without_it(tmp_path, retries):
-    """GitHub Copilot already refused one thinking field (`block_binding`); a gateway that
+    """A hosted gateway already refused one thinking field (`block_binding`); a gateway that
     refuses `display` gets the request again without it, for the rest of the session, and
     that costs none of the retries."""
     refusal = json.dumps({"error": {"message": "thinking.adaptive.display: Extra inputs are not permitted"}})
@@ -247,7 +247,7 @@ async def test_a_gateway_that_refuses_display_gets_requests_without_it(tmp_path,
 
 async def test_tool_input_streams_as_the_model_writes_it(tmp_path):
     """Seen live: by default the API held a 25,000-character Write back and sent it after
-    87 seconds of silence (Copilot and Anthropic alike), which looked stuck. Each tool asks
+    87 seconds of silence (across hosted and direct providers), which looked stuck. Each tool asks
     for its input to stream instead."""
     server = Server(PROGRESS_NOTE_STREAM)
     await run(anthropic_client(server, tmp_path), CONVERSATION, tools=(READ, READ))
@@ -327,7 +327,7 @@ async def test_anthropic_request_and_stream(tmp_path):
 
 
 async def test_a_tool_call_cut_off_by_the_output_limit_is_sent_back_with_an_input(tmp_path):
-    """Seen live (Opus 5.5 on Copilot): a Write cut off at the output limit was answered
+    """Seen live on a hosted Anthropic-format provider: a Write cut off at the output limit was answered
     "not run", then the next request failed with `messages.59.content.2.tool_use.input:
     Field required`, because the cut-off block never closed and was sent back without one."""
     cut_off = sse(

@@ -173,7 +173,7 @@ class Config(BaseModel):
 
     # --- cost ---
     # Dollars per million tokens, by "provider:model" or model id, for providers that don't
-    # report prices: pricing."anthropic:claude-sonnet-5" = { input = 3, output = 15, cached = 0.3 }
+    # report prices: pricing."gateway:model-name" = { input = 3, output = 15, cached = 0.3 }
     pricing: dict[str, Price] = Field(default_factory=dict)
 
     # --- planning ---

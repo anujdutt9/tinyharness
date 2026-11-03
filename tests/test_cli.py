@@ -178,7 +178,7 @@ async def test_the_input_box_grows_only_by_the_menu_it_shows(matches, rows):
     [
         ("/model", True),
         ("/key anthropic", True),
-        ("/claude-design-skill make a deck", True),
+        ("/design-skill make a deck", True),
         ("/var/folders/w4/T/Screenshot\\ 2026-09-30.png  - This is slide 1", False),  # a pasted path
         ("/Users/me/shot.png what's wrong here?", False),
         ("fix /model's help text", False),

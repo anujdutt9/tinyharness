@@ -61,7 +61,7 @@ def test_a_minute_of_only_whitespace_is_caught():
 
 
 def test_a_long_silence_before_an_empty_piece_is_not_blank_output():
-    """Seen live: GitHub Copilot sent a Write call's name, nothing for 87 seconds while the
+    """Seen live: a hosted provider sent a Write call's name, nothing for 87 seconds while the
     model wrote a large file, then `arguments: ''` and the rest at once. The guard stopped it
     as blank output, every retry did the same, and the turn failed."""
     now = [0.0]

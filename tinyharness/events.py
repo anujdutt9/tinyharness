@@ -188,7 +188,7 @@ class SubagentUpdate:
     detail: str = ""  # the tool it's running, or how it ended
     tools_used: int = 0
     elapsed: float = 0.0
-    model: str = ""  # the model it runs on, e.g. "claude-haiku-4-5"
+    model: str = ""  # the model it runs on, e.g. "small-model"
     phase: SubagentPhase = "tool"
     tool: str = ""  # the tool call being written, when phase is "writing"
     recent: tuple[SubagentCall, ...] = ()  # its last few tool calls, oldest first

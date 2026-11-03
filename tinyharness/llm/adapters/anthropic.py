@@ -7,12 +7,12 @@
   messages (our compaction, or switching models) would invalidate it. We opt in to
   `prefix_mismatch_behavior: "drop_block"` so the API drops such blocks instead of
   rejecting the request (unless the provider sets `block_binding = false`: some
-  gateways, GitHub Copilot among them, reject the field).
+  gateways reject the field).
 - Progress notes: what the model writes between tool calls ("Found it; now checking each
   slide") comes back as `thinking` blocks, empty unless asked for. We ask for
   `display: "updates"` and turn those notes back into text, as older models sent them;
   with reasoning shown (ctrl+t) we ask for `"summarized"`, reasoning and notes together.
-  Seen live: Claude Opus 5.5 checked a deck's slides for five minutes without a word.
+  Seen live: a recent model checked a deck's slides for five minutes without a word.
 - Tool input streams as the model writes it (`eager_input_streaming` on each tool). By
   default the API holds a tool call's input back and sends it in one burst at the end:
   seen live, a 25,000-character Write arrived after 87 seconds of silence, which looked

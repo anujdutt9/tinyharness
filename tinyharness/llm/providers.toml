@@ -82,7 +82,7 @@ auth_methods = ["github_copilot"]
 auth_refresh = "github_copilot"
 model_catalog = "github_copilot"
 request_headers = "github_copilot"
-block_binding = false  # Copilot's Claude endpoint rejects thinking.block_binding
+block_binding = false  # this gateway rejects thinking.block_binding
 default_model = "gpt-4.1"
 small_model = "gpt-4.1"
 

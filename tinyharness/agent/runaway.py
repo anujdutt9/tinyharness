@@ -11,7 +11,7 @@ each piece arrives:
 
 A stream that sends nothing at all is a stall, which the client's timeout handles, and so
 is a piece with no content (an empty delta): only whitespace the model actually wrote is
-blank output, timed from when it started. Seen live: GitHub Copilot sends a tool call's
+blank output, timed from when it started. Seen live: a hosted provider sends a tool call's
 name, goes silent while the model writes a large file, then sends `arguments: ''` before
 the rest; timing from the last real output called that silence blank output. A provider's
 hidden reasoning (no text) counts as progress, since it can't be judged.

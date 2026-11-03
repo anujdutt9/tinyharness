@@ -407,14 +407,14 @@ def test_skills_are_listed_in_the_prompt_with_where_to_read_them(tmp_path, monke
 
 async def test_a_prompt_naming_a_skill_is_sent_as_typed(session):
     """A note telling the model to load any skill the user named was appended to every
-    such prompt, even "don't use the claude-design-skill". The system prompt already says
+    such prompt, even "don't use the design-skill". The system prompt already says
     a skill the user asks for isn't optional."""
     from conftest import ScriptedLLM
     from tinyharness.skills import Skill
 
-    session.skills.add(Skill("claude-design-skill", "Design.", "..."))
+    session.skills.add(Skill("design-skill", "Design.", "..."))
     session.llm.stream = ScriptedLLM(["ok"]).stream
-    prompt = "Don't use the claude-design-skill for this one."
+    prompt = "Don't use the design-skill for this one."
     [e async for e in session.run(prompt)]
     assert [m.content for m in session.history.messages if m.role == "user"] == [prompt]
     assert "a skill, tool or approach they name isn't optional" in " ".join(

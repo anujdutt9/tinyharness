@@ -123,7 +123,7 @@ class ModelInfo:
     native_tools: bool | None = None  # accepts tool definitions through the API; None = not known
     tokenizer: str | None = None  # Hugging Face repo with its tokenizer, for exact token counts
     api: str | None = None  # wire format, when a provider routes each model differently
-    routed: bool = False  # a router picks the real model per session (Copilot Auto)
+    routed: bool = False  # a router picks the real model per session
 
     @property
     def display(self) -> str:

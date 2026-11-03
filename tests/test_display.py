@@ -949,7 +949,7 @@ def test_other_tools_being_written_say_so_after_the_same_label(renderer):
 
 def test_the_label_is_the_same_whether_or_not_the_provider_streams_tool_input(renderer):
     """Gemini and local models send a whole tool call at the end, so nothing names the file
-    until then; Claude streams it. The label was "Writing deck.html" for one and "Working"
+    until then; an Anthropic-format provider streams it. The label was "Writing deck.html" for one and "Working"
     for the other; now both say "Working", and what's known follows it."""
     from tinyharness.events import ToolInputStreaming
 
@@ -1544,8 +1544,20 @@ def test_taking_the_offer_opens_that_target_once(renderer):
     renderer.handle(ArtifactPresented("/repo/deck.html", "text/html", "deck.html", offer=True))
     assert renderer.take_offer() == "/repo/deck.html"
     assert renderer.take_offer() is None
+    assert not any("opened deck.html" in line for line in shown(renderer))
+    renderer.opened_offer("/repo/deck.html")
     assert any("opened deck.html" in line for line in shown(renderer))
     assert "ready to view" not in Text.from_ansi(renderer.live_ansi(120)).plain
+
+
+def test_a_second_offer_leaves_the_first_as_a_link(renderer):
+    from tinyharness.events import ArtifactPresented
+
+    renderer.can_offer = True
+    renderer.handle(ArtifactPresented("/repo/one.html", "text/html", "one.html", offer=True))
+    renderer.handle(ArtifactPresented("/repo/two.html", "text/html", "two.html", offer=True))
+    assert renderer.offer == ("/repo/two.html", "two.html")
+    assert any("Artifact  one.html" in line for line in shown(renderer))
 
 
 def test_an_offer_left_at_the_end_of_the_turn_stays_as_a_link(renderer):

@@ -343,8 +343,18 @@ async def _run_agent_loop(
                 raise
             deps.transcript.write("images_shrunk", count=changed)
             turn = _Turn()
-            async for event in _ask_model(history, available, deps, turn):
-                yield event
+            try:
+                async for event in _ask_model(history, available, deps, turn):
+                    yield event
+            except RequestTooLargeError:
+                # Dropping older images may still leave a large latest batch. The first
+                # recovery deliberately preserves that batch; only shrink it if needed.
+                if not older or not (changed := _shrink_images(history)):
+                    raise
+                deps.transcript.write("images_shrunk", count=changed)
+                turn = _Turn()
+                async for event in _ask_model(history, available, deps, turn):
+                    yield event
         except LLMError as dropped:
             # The reply broke off partway (a dropped connection, a provider error mid-stream).
             # Nothing has run yet, so drop what arrived and ask again, once a turn. Seen live
@@ -1148,8 +1158,8 @@ def _config_key(deps: LoopDeps) -> dict[str, str]:
 
 def _drop_older_images(history: History) -> int:
     """Drop the images of every message before the latest one that has any, with a note.
-    Seen live: 13 screenshots, read one step after another, made a 34 MB request that
-    Copilot refused (413), ending the turn. The model already saw them; its notes remain."""
+    Seen live: screenshots read one step after another made a 34 MB request that a hosted
+    provider refused (413), ending the turn. The model already saw them; its notes remain."""
     with_images = [m for m in history.messages if m.images]
     changed = 0
     for m in with_images[:-1]:

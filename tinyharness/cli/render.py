@@ -36,6 +36,7 @@ import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, aclosing
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from rich.console import Console, Group, RenderableType
@@ -926,6 +927,8 @@ class Renderer:
                 self._block(head if in_reply else Group(head, Padding(markdown.render(text), (1, 0, 0, 4))))
                 self.wait(WAITING)
             case ArtifactPresented(target=target, title=title, offer=True) if self.can_offer:
+                # Keep earlier distinct offers visible when a turn presents another one.
+                self._leave_offer()
                 self.offer = (target, title or target)  # shown above the spinner until taken
             case ArtifactPresented(target=target, media_type=media_type, title=title):
                 label = title or target
@@ -973,13 +976,20 @@ class Renderer:
                 self._done(reason)
 
     def take_offer(self) -> str | None:
-        """The offered artifact, for the key that opens it; it's no longer on offer."""
+        """The offered artifact for the key that opens it; success is reported by the caller."""
         if self.offer is None:
             return None
-        target, title = self.offer
+        target, _ = self.offer
         self.offer = None
-        self._block(Text("  ↗ ", style="ok").append("opened ", style="subtle").append(title, style="bold"))
         return target
+
+    def opened_offer(self, target: str) -> None:
+        """Report a successful launch after the system opener accepts it."""
+        self._block(
+            Text("  ↗ ", style="ok")
+            .append("opened ", style="subtle")
+            .append(Path(target).name or target, style="bold")
+        )
 
     def _leave_offer(self) -> None:
         """The turn ended with the offer untaken: leave it in the scrollback as a link."""
@@ -1258,5 +1268,5 @@ def _duration(seconds: float) -> str:
 
 
 def _short_model(model: str) -> str:
-    """The model id without a gateway's vendor prefix: "anthropic/claude-haiku-4.5" → "claude-haiku-4.5"."""
+    """The model id without a gateway's vendor prefix: "vendor/small-model" → "small-model"."""
     return model.rsplit("/", 1)[-1]
