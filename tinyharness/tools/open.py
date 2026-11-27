@@ -1,8 +1,10 @@
-"""Open: present an artifact safely, or explicitly launch it in another application.
+"""Open: present an artifact, as a link or as an offer to open it in another application.
 
-Preview is the normal path: it emits a typed artifact event for the UI and has no side
-effect. External mode is the sanctioned way out of the Bash sandbox, which blocks
-`open` and `xdg-open`; it accepts documents only and asks every time.
+Neither mode launches anything. Preview shows a link. External offers the artifact: the UI
+shows it with a key to press, and only that keypress opens it (`launch`), so a page the
+model wrote never runs outside the sandbox without the user choosing it. The offer used to
+be an approval prompt, which stopped the turn until it was answered: seen live, an agent
+sat waiting for the user while it could have been checking its work. Documents only.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field
@@ -35,9 +37,9 @@ class OpenInput(ToolInput):
     )
     mode: Literal["preview", "external"] = Field(
         description=(
-            "Required. Use 'external' when the user explicitly asks to open or launch the "
-            "artifact in a browser or viewer; it requires approval. Use 'preview' only to "
-            "present a clickable artifact link without rendering or opening it."
+            "Required. 'external' offers the artifact to the user to open in their browser or "
+            "viewer; they open it with a keypress when they choose, and your turn carries on. "
+            "'preview' only presents a clickable link."
         ),
     )
 
@@ -46,78 +48,66 @@ class OpenTool(Tool[OpenInput]):
     name = "Open"
     Input = OpenInput
     description = (
-        "Present or open a file or web page for the user. Choose the mode explicitly. If the "
-        "user says open, launch, browser, viewer, or otherwise asks to actually see it, use "
-        "'external'; that always asks before launching the host application. Use 'preview' only "
-        "when a clickable link is sufficient; preview does not render or open the artifact. "
+        "Offer a file or web page to the user. 'external' offers to open it in their browser or "
+        "viewer: use it when they ask to see something, or when a result they'll want to look at "
+        "is ready. It doesn't open anything or wait: the user opens it with a keypress whenever "
+        "they like, so don't offer the same thing twice. 'preview' only shows a clickable link. "
         f"Files must be documents ({', '.join(sorted(VIEWABLE))})."
     )
     read_only = True
 
     def describe(self, args: OpenInput) -> str:
-        return f"Open({args.mode}: {args.target})"
+        # Seen live: "Open external: report.html" put the mode's jargon on the user's screen.
+        return f"Open({args.target})" if args.mode == "external" else f"Open(link: {args.target})"
 
     def target_path(self, args: OpenInput) -> str | None:
-        # Safe to report (so path deny rules and protected paths apply): `escapes` makes
-        # every call ask, so no mode approves opening a project file by itself.
+        # Reported so path deny rules and protected paths apply to offers as well as links.
         return None if _is_url(args.target) else args.target
 
     def target_host(self, args: OpenInput) -> str | None:
         return urlsplit(args.target).hostname if _is_url(args.target) else None
 
-    def escapes(self, args: dict[str, Any]) -> str | None:
-        if args.get("mode") != "external":
-            return None
-        target = str(args.get("target", ""))
-        if _is_url(target):
-            return "it opens a web page in your browser, which can reach the network outside the sandbox"
-        if Path(target).suffix.lower() in _PAGES:
-            return (
-                "it opens a page in your browser, where its scripts can reach the network outside the sandbox"
-            )
-        return "it opens a file in another app, outside the sandbox"
-
-    def risk(self, args: dict[str, Any], path: Path | None) -> str | None:
-        if args.get("mode") == "external":
-            return "it opens something in another app, outside the sandbox"
-        return None
-
-    def is_read_only(self, args: OpenInput) -> bool:
-        return args.mode == "preview"
-
     async def run(self, args: OpenInput, ctx: ToolContext) -> str | ToolOutput:
         target = _check(args.target, ctx)
-        if args.mode == "preview":
-            media_type = "text/html" if target.lower().endswith((".html", ".htm")) else ""
-            if not media_type and not _is_url(target):
-                media_type = mimetypes.guess_type(target)[0] or ""
-            return ToolOutput(
-                f"linked {target} for the user; it was not rendered or opened",
-                artifacts=[
-                    ArtifactRef(target, media_type, Path(target).name if not _is_url(target) else target)
-                ],
-            )
-        opener = _opener()
-        if opener is None:
-            if sys.platform == "win32":
-                os.startfile(target)  # type: ignore[attr-defined]  # Windows only
-                return f"opened {target}"
-            raise ToolError("no way to open files here (xdg-open isn't installed)")
-        proc = await asyncio.create_subprocess_exec(
-            opener,
-            target,
-            env=sanitized_env(),
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            _, err = await asyncio.wait_for(proc.communicate(), 15)
-        except TimeoutError:
-            return f"opening {target} (the opener is still running)"
-        if proc.returncode:
-            raise ToolError(f"could not open {target}: {err.decode(errors='replace').strip()}")
-        return f"opened {target}"
+        media_type = "text/html" if target.lower().endswith((".html", ".htm")) else ""
+        if not media_type and not _is_url(target):
+            media_type = mimetypes.guess_type(target)[0] or ""
+        title = Path(target).name if not _is_url(target) else target
+        offer = args.mode == "external"
+        said = "offered to the user; not open yet" if offer else "linked for the user; not rendered or opened"
+        return ToolOutput(said, artifacts=[ArtifactRef(target, media_type, title, offer=offer)])
+
+
+async def launch(target: str) -> str:
+    """Open an offered artifact with the system's opener: only ever on the user's keypress.
+    The target is checked again here, since the file may have changed since it was offered."""
+    if not _is_url(target):
+        path = Path(target)
+        if not path.is_file():
+            raise ToolError(f"file not found: {target}")
+        if is_secret_path(path) or path.suffix.lower() not in VIEWABLE:
+            raise ToolError(f"refusing to open {path.name}")
+    opener = _opener()
+    if opener is None:
+        if sys.platform == "win32":
+            os.startfile(target)  # type: ignore[attr-defined]  # Windows only
+            return f"opened {target}"
+        raise ToolError("no way to open files here (xdg-open isn't installed)")
+    proc = await asyncio.create_subprocess_exec(
+        opener,
+        target,
+        env=sanitized_env(),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, err = await asyncio.wait_for(proc.communicate(), 15)
+    except TimeoutError:
+        return f"opening {target} (the opener is still running)"
+    if proc.returncode:
+        raise ToolError(f"could not open {target}: {err.decode(errors='replace').strip()}")
+    return f"opened {target}"
 
 
 def _check(target: str, ctx: ToolContext) -> str:

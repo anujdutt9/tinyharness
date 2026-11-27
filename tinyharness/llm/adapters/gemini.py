@@ -79,7 +79,7 @@ class GeminiAdapter(Adapter):
     def add_web_search(self, payload: dict[str, Any]) -> None:
         payload.setdefault("tools", []).append({"type": "google_search"})
 
-    def parser(self) -> StreamParser:
+    def parser(self, payload: dict[str, Any]) -> StreamParser:
         return _GeminiParser()
 
     def ping_payload(self, model: str) -> dict[str, Any]:

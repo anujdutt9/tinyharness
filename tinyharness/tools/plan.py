@@ -115,8 +115,14 @@ class PlanTool(Tool[PlanInput]):
         "'# Title' line. Call it in plan mode once the questions that would change the plan "
         "are answered; the plan goes here, not in your reply. Keep it short and specific:\n"
         "- the goal and context, in a line or two\n"
-        "- decisions made with the user; record a default you chose without asking as a "
-        "decision starting 'assumed:'\n"
+        "- decisions settled with the user and the evidence or trade-off that matters. Ask the "
+        "user about intent and meaningful alternatives; never turn an unresolved choice into a "
+        "stated decision. A dataset, base model, and a learning project's primary framework must "
+        "be chosen by the user after research unless their request or project already fixed it. "
+        "Verify exact external IDs, access, license and relevant compatibility before calling the "
+        "plan ready; do not infer one choice from a different answer, bundle several variants as "
+        "one choice, or defer verification to the build. Choose cheap, reversible details yourself "
+        "and state them directly\n"
         "- the steps in order, riskiest first, each a concrete change with the files it touches "
         "and how to check it works (a command where there is one); split a step that touches "
         "more than about five files, and never write a step that only says to investigate\n"
@@ -124,7 +130,8 @@ class PlanTool(Tool[PlanInput]):
         "Prefer reusing what exists to new files or abstractions, and add detail only where the "
         "builder would otherwise have to guess. Each call replaces the whole plan: when revising, "
         "keep what the feedback doesn't touch. With ready (the default) the user reviews it now "
-        "and your turn ends; use ready=false only to save a draft you're still working on."
+        "and your turn ends; call it ready only when every high-impact choice is settled. Use "
+        "ready=false only to save a draft you're still working on."
     )
     Input = PlanInput
     # It writes tinyharness's private planning state. That is deliberately available in

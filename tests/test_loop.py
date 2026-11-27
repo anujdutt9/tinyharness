@@ -1183,3 +1183,69 @@ def test_the_call_under_review_and_its_neighbors_are_kept_apart():
     assert '[same step, not under review] WebFetch({"url": "https://docs.example/0"})' in tail
     assert '[same step, not under review] WebFetch({"url": "https://docs.example/2"})' in tail
     assert '[agent called] WebSearch({"query": "q0"})' in tail
+
+
+class DropsMidReply:
+    """Streams some text, then the connection breaks, `drops` times; then answers."""
+
+    def __init__(self, drops: int, error: str = "LLM error: Network connection lost.") -> None:
+        self.drops, self.error, self.model, self.calls = drops, error, "fake", 0
+
+    async def stream(self, messages, tools=None, **_):
+        from tinyharness.llm.types import LLMError, StreamChunk
+
+        self.calls += 1
+        if self.calls <= self.drops:
+            yield StreamChunk(text="Looking at the ")
+            raise LLMError(self.error)
+        yield StreamChunk(text="All done.", finish_reason="stop")
+
+
+async def _run_dropping(tmp_path, llm):
+    from tinyharness.agent.compaction import Compactor
+    from tinyharness.agent.history import History, Message
+    from tinyharness.agent.loop import LoopDeps, run_agent_loop
+    from tinyharness.agent.transcript import Transcript
+    from tinyharness.permissions import PermissionGate, PermissionMode
+    from tinyharness.tools.registry import ToolRegistry
+    from tinyharness.workspace import Workspace
+
+    history = History([Message(role="system", content="s")])
+    with Transcript(tmp_path, "test") as transcript:
+        deps = LoopDeps(
+            llm=llm,
+            tools=ToolRegistry([]),
+            gate=PermissionGate(workspace=Workspace(tmp_path), mode=PermissionMode.BYPASS),
+            compactor=Compactor(llm),
+            transcript=transcript,
+            ctx=make_ctx(tmp_path),
+        )
+        events = [e async for e in run_agent_loop("go", history, deps)]
+    return events, history
+
+
+async def test_a_reply_cut_off_by_a_dropped_connection_is_asked_for_again(tmp_path):
+    """Seen live (OpenRouter): "Network connection lost" 18 seconds into a reply ended a long
+    deck run. Nothing had run yet, so the partial reply is dropped and the model asked again."""
+    from tinyharness.events import ModelStuck
+
+    events, history = await _run_dropping(tmp_path, DropsMidReply(1))
+    (dropped,) = [e for e in events if isinstance(e, ModelStuck)]
+    assert dropped.kind == "dropped"
+    assert [m.content for m in history.messages if m.role == "assistant"] == ["All done."]
+
+
+async def test_a_second_dropped_reply_in_a_turn_ends_it(tmp_path):
+    from tinyharness.llm.types import LLMError
+
+    with pytest.raises(LLMError, match="Network connection lost"):
+        await _run_dropping(tmp_path, DropsMidReply(2))
+
+
+async def test_a_reply_that_fails_for_a_lasting_reason_is_not_asked_again(tmp_path):
+    from tinyharness.llm.types import LLMError
+
+    llm = DropsMidReply(1, error="LLM error 400: messages: roles must alternate")
+    with pytest.raises(LLMError, match="roles must alternate"):
+        await _run_dropping(tmp_path, llm)
+    assert llm.calls == 1

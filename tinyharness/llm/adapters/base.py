@@ -34,6 +34,10 @@ class Adapter(ABC):
     name: ClassVar[str]
     request_path: ClassVar[str]  # appended to the provider's base_url
     models_path: ClassVar[str] = "/models"
+    # Fields a request can do without, as dotted paths (`tools[].x`: x on every tool): when a
+    # gateway refuses one (an error that names it), LLMClient sends the request again without
+    # it for the rest of the session.
+    optional: ClassVar[tuple[str, ...]] = ()
 
     def __init__(self, provider: Provider) -> None:
         self.provider = provider
@@ -45,7 +49,8 @@ class Adapter(ABC):
     def payload(self, request: Request) -> dict[str, Any]: ...
 
     @abstractmethod
-    def parser(self) -> StreamParser: ...
+    def parser(self, payload: dict[str, Any]) -> StreamParser:
+        """A parser for the reply to `payload`, the body as sent."""
 
     def add_web_search(self, payload: dict[str, Any]) -> None:
         """Switch on the provider's own web search tool in a request body."""

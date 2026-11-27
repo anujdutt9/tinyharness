@@ -60,6 +60,32 @@ def test_a_minute_of_only_whitespace_is_caught():
     assert why == "it sent nothing but blank output for over 60 seconds"
 
 
+def test_a_long_silence_before_an_empty_piece_is_not_blank_output():
+    """Seen live: a hosted provider sent a Write call's name, nothing for 87 seconds while the
+    model wrote a large file, then `arguments: ''` and the rest at once. The guard stopped it
+    as blank output, every retry did the same, and the turn failed."""
+    now = [0.0]
+    guard = RunawayGuard(clock=lambda: now[0])
+    assert guard.check(StreamChunk(tool_call_delta={"index": 0, "function": {"name": "Write"}})) is None
+    now[0] += 87
+    assert guard.check(StreamChunk(tool_call_delta={"index": 0, "function": {"arguments": ""}})) is None
+    assert guard.check(StreamChunk(text="\n")) is None
+    deltas = [{"index": 0, "function": {"arguments": f"line {i}\\n"}} for i in range(100)]
+    assert feed(guard, [StreamChunk(tool_call_delta=d) for d in deltas]) is None
+
+
+def test_a_minute_of_whitespace_after_a_silence_is_still_caught():
+    now = [0.0]
+    guard = RunawayGuard(clock=lambda: now[0])
+    assert guard.check(StreamChunk(text="Working on it.")) is None
+    now[0] += 90
+    why = None
+    for _ in range(int(QUIET_SECONDS) + 2):
+        now[0] += 1
+        why = guard.check(StreamChunk(text=" "))
+    assert why == "it sent nothing but blank output for over 60 seconds"
+
+
 def test_hidden_reasoning_counts_as_progress():
     now = [0.0]
     guard = RunawayGuard(clock=lambda: now[0])

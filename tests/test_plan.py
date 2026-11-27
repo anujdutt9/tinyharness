@@ -21,7 +21,7 @@ Refresh expired tokens without interrupting active sessions.
 
 ## Decisions
 - Reuse the existing token store
-- assumed: retry once after refreshing
+- retry once after refreshing
 
 ## Steps
 1. Add refresh to the auth client (`tinyharness/auth/client.py`); check: `uv run pytest -q tests/test_auth.py`
@@ -31,6 +31,22 @@ Refresh expired tokens without interrupting active sessions.
 - Changing provider auth formats
 """
 PLAN = {"plan": MARKDOWN}
+
+
+def test_plan_mode_does_not_invite_the_model_to_disguise_guesses_as_assumptions():
+    """Seen live: plans labelled an invented task, dataset and model as ``assumed:`` and
+    asked for approval while promising to verify them only during the build."""
+    from tinyharness.session import PLAN_ON
+
+    prompt = PLAN_ON + "\n" + PlanTool.description
+    assert "assum" not in prompt.lower()
+    assert "never turn an unresolved choice into a stated decision" in prompt
+    assert "dataset, base model, and a learning project's primary framework" in prompt
+    assert "Verify exact external IDs, access, license and relevant compatibility" in prompt
+    assert "do not infer one choice from a different answer" in prompt
+    assert "bundle several variants as one choice" in prompt
+    assert "no alternatives deferred to build time" in prompt
+    assert "promise to verify" in prompt and "settle them now" in prompt
 
 
 async def test_the_plan_is_saved_as_markdown_in_a_private_file(tmp_path):

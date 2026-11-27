@@ -148,25 +148,44 @@ def _titled_plan(text: str) -> str:
     return ""
 
 
-# The order is look, ask, plan, then revise: enough context before questions, and answers
-# before the plan is committed for review.
+# Settle discoverable facts and user-owned choices differently, then write one
+# decision-complete plan. Draft-first flows made models plan before they understood the task.
 PLAN_ON = (
     "You are in plan mode: you can read, search and research, but nothing that changes files "
     "or runs commands is available. Work in this order:\n"
-    "1. Look: read the files the request touches and what they use, enough to ask good "
-    "questions; don't explore everything first. Don't ask for facts the project or the web "
-    "can tell you.\n"
-    "2. Ask, only if an answer would change scope, data, keys, tools or checks: at most three "
-    "questions, each with options and your recommended one first. With the Ask tool, the user "
-    "picks the answers and you carry on. Without it, number them in your reply with your "
-    'recommended default for each, so "defaults" is a full answer, and end your turn to wait. '
-    "Offer different approaches only for a real trade-off. Ask another round only when an "
-    "answer opens a new blocking choice.\n"
-    "3. Plan: once every blocking choice is answered or has a default, write the plan in "
+    "1. Look: read the files the request touches and what they use, enough to ask informed "
+    "questions; don't explore everything first. Separate two kinds of unknowns. Discoverable "
+    "facts come from the project or current web research, not from asking the user or guessing "
+    "from memory. When several viable datasets, models, libraries, services or approaches would "
+    "materially change the result, research them, then use Ask to present the real candidates "
+    "with a one-line trade-off each and your recommendation first; don't choose for the user. "
+    "A dataset and a base model--and, for a learning project, its primary framework or stack--"
+    "are always high-impact unless the request or existing project already fixes them: research "
+    "current candidates and ask the user to choose before putting them in the plan. After a "
+    "choice, verify its exact ID, access, license and relevant compatibility from an authoritative "
+    "source now; inspecting its detailed schema can remain an implementation step. Each choice "
+    "needs its own explicit answer: hardware does not choose the framework, and choosing a model "
+    "family does not choose its exact model or size. Do not bundle several variants into one "
+    "option when the plan needs one of them. "
+    "User-owned choices--their intent, what an ambiguous task means, the desired outcome, and "
+    "preferences or constraints only they know--are questions: ask early instead of inferring.\n"
+    "2. Ask: ask only about high-impact choices. Use at most three questions per call, each "
+    "with options and your recommendation first. With the Ask tool, the user picks an option "
+    "or writes their own answer and you carry on. Without it, number the questions in your "
+    'reply with your recommended choice for each, so "defaults" is a full answer, and end your '
+    "turn to wait. Group related questions in one call, but keep each decision separate; ask "
+    "another round only when research or an answer reveals a new high-impact choice. If an "
+    "answer names something unavailable or unsuitable, explain what you found and ask again. "
+    "Choose cheap, reversible implementation details yourself and state them directly; a "
+    "dataset, base model or primary learning stack is not such a detail.\n"
+    "3. Plan: only when the plan is decision complete, write it in "
     "Markdown with the Plan tool (or, if you can't call it, put the whole plan in your reply "
     "between <plan> and </plan>). The user reviews it right away, approves "
-    "it by leaving plan mode, and tells you when to build. A small change gets a short plan "
-    "and no questions.\n"
+    "it by leaving plan mode, and tells you when to build. Decision complete means no open "
+    "high-impact choices, no alternatives deferred to build time, and no promise to verify "
+    "names, IDs, access or compatibility later: settle them now. If any high-impact ambiguity "
+    "remains, do not write the plan yet--ask. A small change with nothing to decide gets a short "
+    "plan and no questions.\n"
     "4. Revise: when the user asks for changes, call Plan again with the whole plan, changing "
     "only what they touched.\n"
     "Don't write the finished work (whole files or programs) into your reply; you'll be told "
@@ -500,7 +519,7 @@ class Session:
         self._calibration = CalibrationStore(home_dir() / "cache" / "tool-calls.json")
         self._connect_llm()
         self._started = False
-        self._steering: list[str] = []  # messages for the agent while a turn runs (see steer)
+        self._steering: list[Message] = []  # messages for the agent while a turn runs (see steer)
         # Subagents run side by side; their calls that change things take turns on this.
         self._agent_writes = asyncio.Lock()
         self.resume_report: world.ResumeReport | None = None  # what changed while away, when resumed
@@ -1363,7 +1382,7 @@ class Session:
                     error=f"{type(e).__name__}: {e}"[:1000],
                 )
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, images: Sequence[Image] = ()) -> None:
         """Queue a user message for a running turn.
 
         Parameters
@@ -1371,8 +1390,10 @@ class Session:
         text : str
             Message delivered before the agent's next step. It remains pending if the turn
             ends before delivery.
+        images : Sequence[Image], optional
+            Images attached to it (a screenshot dropped in while the agent works).
         """
-        self._steering.append(text)
+        self._steering.append(Message(role="user", content=text, images=list(images)))
 
     def record_suggestion(self, action: str, *, chars: int = 0) -> None:
         """Record suggestion UX outcomes without saving the suggested text."""
@@ -1383,14 +1404,14 @@ class Session:
     @property
     def pending_steering(self) -> tuple[str, ...]:
         """Messages from `steer` waiting for the agent's next step."""
-        return tuple(self._steering)
+        return tuple(m.content or "" for m in self._steering)
 
-    def _inbox(self) -> list[str]:
+    def _inbox(self) -> list[str | Message]:
         """What reaches the agent between steps: your messages, then notes about its jobs."""
         notes = self.ctx.jobs.take_notes() if self.ctx.jobs is not None else []
         return [*self.take_steering(), *notes]
 
-    def take_steering(self) -> list[str]:
+    def take_steering(self) -> list[Message]:
         """Messages from `steer` not delivered yet (and forget them)."""
         taken, self._steering = self._steering, []
         return taken

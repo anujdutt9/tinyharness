@@ -13,7 +13,7 @@ from tinyharness.tools.base import (
     ToolError,
     ToolInput,
     approved_path,
-    check_not_stale,
+    changed_since_seen,
     mark_seen,
 )
 from tinyharness.workspace.files import read_text, write_text
@@ -53,7 +53,12 @@ class EditTool(Tool[EditInput]):
         if path is None or not path.is_file():
             raise ToolError(f"file not found: {path or args.path}")
         unread = str(path) not in ctx.read_paths
-        check_not_stale(ctx, path)
+        # A change since the last Read doesn't stop an edit: old_string is matched against the
+        # file as it is now, so if that text changed the edit fails as "not found", and if it
+        # didn't, nothing is lost. Seen live: refusing made the model re-read big files after
+        # its own `cat >>` or `python3 -c` changes, and fail again after checking with Grep.
+        # (Write still refuses: overwriting would lose the change.) The result says so instead.
+        changed_since = changed_since_seen(ctx, path)
         if args.old_string == args.new_string:
             raise ToolError("old_string and new_string are identical")
 
@@ -105,6 +110,11 @@ class EditTool(Tool[EditInput]):
             raise ToolError(f"write failed: {e.strerror or e}") from e
         mark_seen(ctx, path)  # the model knows the change it just made
         more = f", {replaced - 1} more not shown" if replaced > 1 else ""
+        if changed_since:
+            more += (
+                "; the file had changed since you last read it (a command, another agent or the "
+                "user), so the rest of it may not be what you remember"
+            )
         return (
             f"edited {path} ({replaced} replacement{'s' if replaced != 1 else ''}{note}{more}). "
             f"The changed lines as they are now:\n{snippet(new_text, first, new)}"

@@ -33,9 +33,8 @@ COPILOT_HEADERS = {
     "Editor-Plugin-Version": "copilot-chat/0.35.0",
     "Copilot-Integration-Id": "vscode-chat",
 }
-# Copilot's own API (chat, models, Auto sessions) is versioned separately from api.github.com,
-# so this goes only to the Copilot endpoint. It matches VS Code's Copilot Chat; without it,
-# the Auto session route answered 404.
+# The subscription API (chat, models, Auto sessions) is versioned separately from api.github.com,
+# so this header goes only to that endpoint; omitting it made the Auto session route return 404.
 COPILOT_API_VERSION = "2026-08-01"
 OPENAI_ISSUER = "https://auth.openai.com"
 OPENAI_AUTHORIZE_URL = f"{OPENAI_ISSUER}/api/accounts/authorize"
@@ -90,7 +89,7 @@ class DeviceAuthorization:
 
 @dataclass(frozen=True)
 class CopilotCredential:
-    """The short-lived token and endpoint derived from a GitHub OAuth token."""
+    """A short-lived subscription token and endpoint derived from a GitHub OAuth token."""
 
     token: str
     expires_at: float
@@ -433,7 +432,7 @@ def _oauth_error_code(response: httpx.Response) -> str:
 async def start_github_copilot_login(
     *, transport: httpx.AsyncBaseTransport | None = None
 ) -> DeviceAuthorization:
-    """Start the device flow used by GitHub Copilot clients."""
+    """Start the device flow used by the GitHub subscription client."""
     response = await _post_github_form(
         GITHUB_DEVICE_URL,
         {"client_id": GITHUB_CLIENT_ID, "scope": "read:user"},
@@ -514,7 +513,7 @@ async def github_copilot_login(
 async def exchange_github_copilot_token(
     github_token: str, *, transport: httpx.AsyncBaseTransport | None = None
 ) -> CopilotCredential:
-    """Exchange a GitHub OAuth token for Copilot's short-lived API credential."""
+    """Exchange a GitHub OAuth token for the subscription's short-lived API credential."""
     try:
         async with httpx.AsyncClient(timeout=30, transport=transport) as client:
             response = await client.get(
@@ -548,7 +547,7 @@ async def exchange_github_copilot_token(
 
 @dataclass(frozen=True)
 class CopilotAutoSession:
-    """The models GitHub's Auto route offers right now, and the token to send with them."""
+    """The models GitHub's Auto route offers right now, and their session token."""
 
     models: tuple[str, ...]
     token: str
@@ -558,10 +557,10 @@ class CopilotAutoSession:
 async def open_github_copilot_auto_session(
     base_url: str, copilot_token: str, *, transport: httpx.AsyncBaseTransport | None = None
 ) -> CopilotAutoSession:
-    """Ask Copilot's Auto route which models to use.
+    """Ask the subscription's Auto route which models to use.
 
-    Auto is not a model id: VS Code's Copilot Chat posts this request, sends the first
-    model it names, and adds the session token as ``Copilot-Session-Token``.
+    Auto is not a model id: the client posts this request, sends the first model it names,
+    and adds the session token required by the protocol.
     """
     try:
         async with httpx.AsyncClient(timeout=30, transport=transport) as client:

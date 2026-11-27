@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from tinyharness.agent.history import Image
+from tinyharness.agent.history import Image, ToolCall
 from tinyharness.llm.adapters.base import Adapter, StreamParser
 from tinyharness.llm.types import LLMError, Request, StreamChunk
 
@@ -33,18 +33,14 @@ class ResponsesAdapter(Adapter):
             _flush_images(items, pending)
             if m.role == "assistant" and (output := request.echo(m)) is not None:
                 items.extend(output)  # exactly as received, reasoning included
+                # A reply cut off at the output limit never finished its last call, so the
+                # saved output lacks it, while the call still gets a ("not run") result.
+                echoed = {item.get("call_id") for item in output if item.get("type") == "function_call"}
+                items.extend(_call(c) for c in m.tool_calls if c.id not in echoed)
             elif m.role == "assistant":
                 if m.content:
                     items.append({"role": "assistant", "content": m.content})
-                items.extend(
-                    {
-                        "type": "function_call",
-                        "call_id": c.id,
-                        "name": c.name,
-                        "arguments": c.arguments or "{}",
-                    }
-                    for c in m.tool_calls
-                )
+                items.extend(_call(c) for c in m.tool_calls)
             elif m.images:
                 parts = [{"type": "input_text", "text": m.content or ""}, *map(_image_part, m.images)]
                 items.append({"role": "user", "content": parts})
@@ -97,7 +93,7 @@ class ResponsesAdapter(Adapter):
     def add_web_search(self, payload: dict[str, Any]) -> None:
         payload.setdefault("tools", []).append({"type": "web_search"})
 
-    def parser(self) -> StreamParser:
+    def parser(self, payload: dict[str, Any]) -> StreamParser:
         return _ResponsesParser()
 
     def ping_payload(self, model: str) -> dict[str, Any]:
@@ -170,6 +166,15 @@ class _ResponsesParser(StreamParser):
 
     def state(self) -> Any:
         return self.output or None
+
+
+def _call(call: ToolCall) -> dict[str, Any]:
+    return {
+        "type": "function_call",
+        "call_id": call.id,
+        "name": call.name,
+        "arguments": call.arguments or "{}",
+    }
 
 
 def _image_part(image: Image) -> dict[str, Any]:

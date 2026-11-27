@@ -9,8 +9,12 @@ each piece arrives:
                (a line of backticks), since a slow model takes minutes to repeat TAIL
   no progress  only whitespace for QUIET_SECONDS while the stream keeps going
 
-A stream that sends nothing at all is a stall, which the client's timeout handles; a
-provider's hidden reasoning (no text) counts as progress, since it can't be judged.
+A stream that sends nothing at all is a stall, which the client's timeout handles, and so
+is a piece with no content (an empty delta): only whitespace the model actually wrote is
+blank output, timed from when it started. Seen live: a hosted provider sends a tool call's
+name, goes silent while the model writes a large file, then sends `arguments: ''` before
+the rest; timing from the last real output called that silence blank output. A provider's
+hidden reasoning (no text) counts as progress, since it can't be judged.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ SHORT_TAIL = 600
 class RunawayGuard:
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
-        self._last_progress = clock()
+        self._blank_since: float | None = None  # when the current run of whitespace began
         self._tail = ""
         self._unchecked = 0
         self._prose = ""  # the latest text and reasoning, for the quick check
@@ -44,11 +48,14 @@ class RunawayGuard:
         if chunk.tool_call_delta:
             function = chunk.tool_call_delta.get("function") or {}
             visible += (function.get("name") or "") + (function.get("arguments") or "")
-        now = self._clock()
         if visible.strip() or (chunk.reasoning and not chunk.reasoning_text):
-            self._last_progress = now
-        elif now - self._last_progress > QUIET_SECONDS:
-            return f"it sent nothing but blank output for over {QUIET_SECONDS:.0f} seconds"
+            self._blank_since = None
+        elif visible:
+            now = self._clock()
+            if self._blank_since is None:
+                self._blank_since = now
+            elif now - self._blank_since > QUIET_SECONDS:
+                return f"it sent nothing but blank output for over {QUIET_SECONDS:.0f} seconds"
         if prose := chunk.text + chunk.reasoning_text:
             self._prose = (self._prose + prose)[-SHORT_TAIL:]
             if len(self._prose) == SHORT_TAIL and _repeats(self._prose, SHORT_PERIOD):

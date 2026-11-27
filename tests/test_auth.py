@@ -376,7 +376,9 @@ async def test_copilot_catalog_drives_each_models_wire_format_and_endpoint(tmp_p
                 },
             )
         assert request.url.path == "/v1/messages"
-        assert request.headers["anthropic-beta"] == "interleaved-thinking-2025-05-14"
+        assert request.headers["anthropic-beta"] == (
+            "interleaved-thinking-2025-05-14,thinking-display-updates-2026-08-18"
+        )
         return httpx.Response(200, json={})
 
     provider = load_catalog()["github_copilot"]
@@ -404,8 +406,8 @@ async def test_copilot_catalog_drives_each_models_wire_format_and_endpoint(tmp_p
 async def test_copilot_auto_sends_the_model_its_session_names_with_the_session_token(tmp_path):
     """Seen live: a Free account rejected a request for "auto" with no model id ("The
     requested model is not supported"). Auto is a session: GitHub names the model to send
-    and a token to send with it, as VS Code's Copilot Chat does. Seen live next: the
-    session route answered 404 until requests carried Copilot's API version."""
+    and a token to send with it, as the service protocol requires. Seen live next: the
+    session route answered 404 until requests carried the required API version."""
     sent: list[tuple[dict[str, object], str | None]] = []
     sessions: list[dict[str, object]] = []
 

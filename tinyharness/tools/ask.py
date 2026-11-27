@@ -56,8 +56,11 @@ class AskTool(Tool[AskInput]):
         "Ask the user up to three questions whose answers would change what you do (scope, "
         "data, tools, how it's checked), each with 2 to 4 options and your recommended one "
         "first. They pick an answer to each, or type their own, and you get the answers. "
-        "Look first: don't ask what the project or the web can tell you. Ask everything you "
-        "need in one call."
+        "Look and research first: ask user-owned preferences directly, but for a discoverable "
+        "choice with several viable answers, offer the real candidates you found and their "
+        "trade-offs. Each option must be one concrete answer, not a bundle of variants, when the "
+        "plan needs one exact choice. Group related questions in one call; ask another round only "
+        "if an answer or the research reveals a new high-impact choice."
     )
     Input = AskInput
     read_only = True  # it changes nothing: plan mode offers it

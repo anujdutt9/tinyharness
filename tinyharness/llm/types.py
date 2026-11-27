@@ -32,6 +32,11 @@ class ImageTooLargeError(LLMError):
     """The provider rejected an image in the request as too large (pixels or bytes)."""
 
 
+class RequestTooLargeError(ImageTooLargeError):
+    """The whole request was over the provider's size limit (HTTP 413). Images are what make
+    a request that big, so it's recovered from the same way: with fewer, smaller images."""
+
+
 class ImagesUnsupportedError(LLMError):
     """The model takes no image input at all (a text-only model, or one served without its
     vision encoder)."""
@@ -90,7 +95,7 @@ class StreamChunk:
     finish_detail: str = ""  # the provider's own word for it, for the session log
     route: str = ""  # on the last chunk: which upstream served it, when a router says (OpenRouter)
     state: ReasoningState | None = None  # on the last chunk: data the provider needs back next turn
-    reasoning: bool = False  # the model has started reasoning (shown as "Thinking")
+    reasoning: bool = False  # the model has started reasoning (shown as "Working · thinking")
     reasoning_text: str = ""  # readable reasoning (or a summary of it), when the provider shares it
     usage: Usage | None = None  # on the last chunk: tokens used, when the provider reports them
 
@@ -118,7 +123,7 @@ class ModelInfo:
     native_tools: bool | None = None  # accepts tool definitions through the API; None = not known
     tokenizer: str | None = None  # Hugging Face repo with its tokenizer, for exact token counts
     api: str | None = None  # wire format, when a provider routes each model differently
-    routed: bool = False  # a router picks the real model per session (Copilot Auto)
+    routed: bool = False  # a router picks the real model per session
 
     @property
     def display(self) -> str:

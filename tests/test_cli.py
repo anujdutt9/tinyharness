@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from tinyharness.cli.markdown import split_finished
@@ -122,7 +124,7 @@ def test_spinner_says_thinking_only_when_the_model_reasons():
     renderer = Renderer(Console(width=40, record=True))
     renderer.wait(WAITING)
     renderer.handle(Reasoning())
-    assert renderer._activity == "Thinking"
+    assert (renderer._activity, renderer._activity_detail) == ("Working", "thinking")
 
     plain = Renderer(Console(width=40, record=True))
     plain.wait(WAITING)
@@ -178,7 +180,7 @@ async def test_the_input_box_grows_only_by_the_menu_it_shows(matches, rows):
     [
         ("/model", True),
         ("/key anthropic", True),
-        ("/claude-design-skill make a deck", True),
+        ("/design-skill make a deck", True),
         ("/var/folders/w4/T/Screenshot\\ 2026-09-30.png  - This is slide 1", False),  # a pasted path
         ("/Users/me/shot.png what's wrong here?", False),
         ("fix /model's help text", False),
@@ -228,12 +230,16 @@ def test_pasted_screenshot_paths_are_attached(tmp_path):
         f"{shlex.quote(str(shots / f'Screenshot 2026-09-30 at 3.11.0{n} PM.png'))}  - This is slide {n}"
         for n in (1, 2)
     )
-    images, problems = attachments(line, tmp_path)
+    images, problems, text = attachments(line, tmp_path)
     assert [i.name for i in images] == [
         "Screenshot 2026-09-30 at 3.11.01 PM.png",
         "Screenshot 2026-09-30 at 3.11.02 PM.png",
     ]
     assert problems == []
+    # Seen live: with the path left in, the model tried to Read it too, and was refused.
+    assert str(shots) not in text
+    assert text.startswith("[image 1 attached: Screenshot 2026-09-30 at 3.11.01 PM.png, ")
+    assert "  - This is slide 2" in text
 
 
 def test_only_real_images_are_attached(tmp_path):
@@ -242,7 +248,7 @@ def test_only_real_images_are_attached(tmp_path):
     (tmp_path / "fake.png").write_text("not an image")
     (tmp_path / "broken.png").write_bytes(PNG[:20])
     (tmp_path / "notes.txt").write_text("hi")
-    images, problems = attachments("look at fake.png broken.png notes.txt missing.png", tmp_path)
+    images, problems, _ = attachments("look at fake.png broken.png notes.txt missing.png", tmp_path)
     assert images == []
     assert problems[0] == "fake.png isn't a PNG, JPEG, GIF or WebP image"
     assert problems[1].startswith("broken.png: not a readable image")
@@ -258,8 +264,48 @@ def test_a_pasted_retina_screenshot_is_shrunk(tmp_path):
     from tinyharness.cli.repl import attachments
 
     (tmp_path / "shot.png").write_bytes(png(3024, 1964))
-    [image], _ = attachments("look at shot.png", tmp_path)
+    [image], _, _ = attachments("look at shot.png", tmp_path)
     assert max(PILImage.open(io.BytesIO(base64.b64decode(image.data))).size) == 2000
+
+
+def test_a_dropped_screenshot_is_kept_even_after_macos_deletes_it(tmp_path):
+    """Seen live: a screenshot dragged in from its thumbnail is a copy under
+    /var/folders/…/TemporaryItems that macOS deletes within seconds; by the time the message
+    was sent it was gone, and the model's Read of the path was refused. It's taken on paste."""
+    from tinyharness.cli.repl import attachments, capture_pasted_images
+
+    shot = tmp_path / "TemporaryItems" / "Screenshot 2026-11-02 at 3.41.29 PM.png"
+    shot.parent.mkdir()
+    shot.write_bytes(png(1440, 900))
+    # How a terminal pastes a dropped file: Windows quotes it, the others escape its spaces.
+    dropped = f'"{shot}"' if os.name == "nt" else str(shot).replace(" ", "\\ ")
+    captured = capture_pasted_images(dropped, tmp_path)
+    shot.unlink()  # macOS cleans up
+    [image], problems, text = attachments(f"what's wrong here? {dropped}", tmp_path, captured)
+    assert image.name == shot.name and problems == []
+    assert text == f"what's wrong here? [image 1 attached: {shot.name}, 1440×900]"
+
+
+def test_a_dropped_file_that_is_gone_says_so(tmp_path):
+    from tinyharness.cli.repl import attachments
+
+    images, problems, _ = attachments(f"see {tmp_path}/gone/Screenshot.png", tmp_path)
+    assert images == [] and "isn't there any more" in problems[0]
+
+
+def test_a_windows_path_keeps_its_backslashes():
+    """Seen in CI: splitting as a POSIX shell does turned `C:\\Users\\shot.png` into
+    `C:Usersshot.png`, so a dropped screenshot wasn't found on Windows."""
+    from tinyharness.cli.repl import _words
+
+    text = r"""what's this? "C:\Users\me\My Shots\a b.png" and C:\tmp\x.png"""
+    assert _words(text, windows=True) == [
+        "what's",
+        "this?",
+        r"C:\Users\me\My Shots\a b.png",
+        "and",
+        r"C:\tmp\x.png",
+    ]
 
 
 @pytest.mark.parametrize("compact", [False, True])
