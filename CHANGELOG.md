@@ -8,6 +8,12 @@ the SDK, and every break is listed here.
 ## Unreleased
 
 ### Added
+- Sandboxed commands get a private home folder for the session (macOS and Linux). Tools that
+  write settings or state under `~` (IPython, matplotlib, Jupyter, `pip install --user`,
+  `git config --global`, `~/.cache/<tool>`) now work instead of failing or warning, and your
+  real home is still never written. Your git name, email and default branch come along, so
+  commits keep your identity. `[sandbox] home_read = ["~/.pyenv"]` links real-home folders in,
+  read-only; only `~/.tinyharness/config.toml` can set it.
 - `/jobs` lists background commands with their status and log, and `/jobs stop <id>` stops
   one (the agent is told). The status bar shows how many are running, and Ctrl+B moves a
   command that's running now to the background; its row says so once it has run a few
@@ -96,6 +102,16 @@ the SDK, and every break is listed here.
   off by default: a sandboxed command can then change what those tools load later.
 
 ### Changed
+- Settings and state that tools write inside the sandbox no longer carry over between
+  sessions; download caches (uv, pip, npm, Hugging Face, torch, Playwright) still do.
+- Pythons that uv downloads inside the sandbox are kept per project, no longer in the cache
+  every sandboxed command shares. A virtualenv runs its Python from your own terminal too, so
+  in the shared cache one project's sandboxed command could change what another project ran
+  outside the sandbox. The old shared Python folder is now read-only to sandboxed commands;
+  recreate an older virtualenv (`uv venv`) to move it to the per-project folder.
+- Bash calls the specific macOS xcrun "couldn't create cache file ... Operation not permitted"
+  error and OpenMP's "Can't set size of /tmp file" warning harmless, instead of saying the
+  command was blocked. Other xcrun cache errors remain failures.
 - With Ollama, the context window is the one the model is actually served with: a model
   with no `num_ctx` in its Modelfile runs at Ollama's default (4,096 tokens on most Macs),
   not its architecture's 262k, so conversations get compacted before Ollama silently cuts
@@ -212,6 +228,12 @@ the SDK, and every break is listed here.
 - The next-message suggestion stands on its own without repeating `tab to use` beside it.
 
 ### Fixed
+- With tinyharness started in your home folder (or `allow_write` including it), sandboxed
+  commands could write your shell startup files, `~/.ssh`, `~/.config` and `~/Library`, which run
+  code later outside the sandbox. Those, and every hidden file or folder already in your home,
+  are now read-only to them.
+- A sandboxed download that gave up while you were being asked about its host no longer
+  stops the session with "Unhandled exception in event loop ... Press ENTER to continue".
 - On Windows, a Job wait's `until` pattern matches whole lines: `^ready$` never matched,
   because output there ends lines with `\r\n`.
 - Two questions from the agent in one reply are asked one after the other, not both at once.

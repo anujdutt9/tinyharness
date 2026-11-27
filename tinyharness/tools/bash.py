@@ -40,6 +40,7 @@ from tinyharness.jobs import LOG_MAX_BYTES, Job, JobReason, JobScope
 from tinyharness.paths import pretty_path
 from tinyharness.process import kill_group
 from tinyharness.sandbox import Sandbox, SandboxPolicy
+from tinyharness.sandbox.home import without_git_overrides
 from tinyharness.sandbox.policy import PROTECTED_IN_PROJECT
 from tinyharness.sandbox.proxy import PACKAGE_REGISTRY_HOSTS, AllowlistProxy, host_allowed, service_hosts
 from tinyharness.security import is_secret_path, sanitized_env
@@ -728,7 +729,7 @@ def _python_install_environment(
     selected_python = python or scripts / ("python.exe" if sys.platform == "win32" else "python")
     env = {
         "VIRTUAL_ENV": str(environment),
-        "PATH": str(scripts) + os.pathsep + os.environ.get("PATH", ""),
+        "PATH": str(scripts) + os.pathsep + policy.env.get("PATH", os.environ.get("PATH", "")),
     }
     command = _rewrite_python_launchers(command, acquisition.python_launchers, selected_python)
     if create and not _MAKES_VENV.search(command):
@@ -858,6 +859,12 @@ class BashTool(Tool[BashInput]):
             "tests and other steps; naming a new package is reviewed first; run "
             "an already-installed executable directly to reuse it without another prompt. "
             "A bare Python install uses a writable active environment or a project-local .venv."
+            + (
+                " $HOME is private to this session: tools may write settings and caches there "
+                "without changing the user's real home. Use $TMPDIR for temporary files."
+                if self.policy.home is not None
+                else ""
+            )
             if sandbox
             else "The user turned the sandbox off: commands run as the user, can read and write any "
             "folder and reach any host, so network_host isn't needed. Commands that delete files, "
@@ -1056,13 +1063,13 @@ class BashTool(Tool[BashInput]):
         )
 
     def _cached_python_notes(self, command: str, since: float) -> tuple[str, ...]:
-        """Say so when a new virtualenv's Python lives in the private sandbox cache.
+        """Say so when a new virtualenv's Python lives in tinyharness's folder for the project.
 
         Seen live: `uv venv -p 3.12` downloaded Python into the sandbox cache, so the
         project's .venv worked from the user's terminal and IDE only while that cache lasted.
         """
-        cache = self.policy.cache_dir
-        if cache is None or "uv" in self.policy.shared_caches or not _MAKES_VENV.search(command):
+        pythons = self.policy.python_dir
+        if pythons is None or not _MAKES_VENV.search(command):
             return ()
         notes = []
         for root in self.policy.project_roots:
@@ -1077,11 +1084,11 @@ class BashTool(Tool[BashInput]):
                     )  # fmt: skip
                 except OSError:
                     continue
-                if home and Path(home).resolve().is_relative_to(cache):
+                if home and Path(home).resolve().is_relative_to(pythons):
                     notes.append(
                         f"[tinyharness:venv_uses_sandbox_python path={config.parent}] Tell the user: this "
                         "virtualenv works from their own terminal and IDE, but its Python is stored in "
-                        f"tinyharness's private sandbox cache ({cache}), so clearing that cache breaks it. "
+                        f"tinyharness's folder for this project ({pythons}), so deleting that folder breaks it. "
                         'To keep uv\'s Pythons where uv normally keeps them, set `share_caches = ["uv"]` '
                         "under [sandbox] in ~/.tinyharness/config.toml and recreate the venv."
                     )
@@ -1131,15 +1138,18 @@ class BashTool(Tool[BashInput]):
             if sandboxed:
                 assert self.sandbox is not None
                 argv = self.sandbox.wrap(argv, policy)
+            env = command_env(
+                {
+                    **(self.sandbox.environment(policy) if sandboxed and self.sandbox else {}),
+                    **install_env,
+                }
+            )
+            if sandboxed and policy.home is not None:
+                env = without_git_overrides(env)
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=ctx.workspace.root,
-                env=command_env(
-                    {
-                        **(self.sandbox.environment(policy) if sandboxed and self.sandbox else {}),
-                        **install_env,
-                    }
-                ),
+                env=env,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -1311,6 +1321,25 @@ def sandbox_notes(
             "The command stayed sandboxed. If this destination is required and trusted, "
             f"retry with network_host={blocked[0]!r}; do not change the command's containment."
         )
+    if sandboxed and "Can't set size of /tmp file" in text:
+        # libomp (torch, scikit-learn) registers itself in a file at a hard-coded /tmp path,
+        # ignoring $TMPDIR, so the sandbox refuses it; it carries on without. Seen live 44 times.
+        notes += (
+            "\n[tinyharness:harmless_warning] OpenMP's \"Can't set size of /tmp file\" warning "
+            "is harmless: the sandbox keeps the shared /tmp closed, and OpenMP runs normally "
+            "without that file. Don't work around it."
+        )
+    if sandboxed and _XCRUN_CACHE.search(text):
+        # Apple's /usr/bin/git, make, clang... keep xcrun's lookup cache keyed by $HOME, so
+        # from the private home each tries to update it in the shared temp folder, is refused,
+        # and works anyway. Seen in testing: the denial note sent the model after a non-problem.
+        # Only these lines are discounted: another refusal in the same output still counts.
+        text = _XCRUN_CACHE.sub("", text)
+        notes += (
+            "\n[tinyharness:harmless_warning] xcrun's \"couldn't create cache file\" errors are "
+            "harmless: Apple's developer tools can't update a shared lookup cache from inside the "
+            "sandbox and work without it. Don't work around them."
+        )
     # Sandbox failures don't say "sandbox": a blocked write says "Operation not permitted",
     # and a macOS app (which needs LaunchServices) dies with "Abort trap: 6".
     lowered = text.lower()  # Go and Node say "operation not permitted"
@@ -1346,14 +1375,18 @@ def sandbox_notes(
             "configured writable root; do not retry outside containment."
         )
         if path and _is_home_dot_dir(path):
-            # Seen live: SGLang hard-codes ~/.cache/sglang instead of following XDG.
+            # Seen live: SGLang hard-codes ~/.cache/sglang instead of following XDG. With a
+            # private $HOME that works, so a write still landing here found the real home
+            # some other way (getpwuid, or a path stored in its config).
             notes += (
-                f" The tool writes {path} directly instead of following $XDG_CACHE_HOME, which "
-                "already points at a writable sandbox cache. Find the variable that sets this "
+                f" The tool writes {path} in the real home directly instead of following $HOME, "
+                "which is private to this session and writable. Find the variable that sets this "
                 "folder (most tools have one, like FOO_CACHE_DIR or FOO_HOME) and point it beneath "
-                "$XDG_CACHE_HOME. If you have a Memory tool, save that variable there so later "
+                "$HOME. If you have a Memory tool, save that variable there so later "
                 "sessions set it from the start."
             )
+        elif path and _is_shared_tmp(path):
+            notes += " For temporary files use $TMPDIR, which is private to this session."
     return notes
 
 
@@ -1930,6 +1963,20 @@ _DENIED_PATH = re.compile(
     r"(?:Operation not permitted|Permission denied): '([^']+)'"
     r"|(?<![^\s'\"])([^\s:'\"]*/[^\s:'\"]+): (?:Operation not permitted|Permission denied)"
 )
+
+
+# Apple's xcrun failing to update its lookup cache in its shared macOS temp/cache
+# directory. Other paths and errors (disk full, for example) are real failures.
+_XCRUN_CACHE = re.compile(
+    r"^.*couldn't create cache file '(?:/private)?/var/folders/[^'\n]*/[CT]/xcrun_db[^'\n]*' "
+    r"\(errno=Operation not permitted\).*$\n?",
+    re.M,
+)
+
+
+def _is_shared_tmp(path: str) -> bool:
+    """Under the machine-wide /tmp, which stays closed: tmux and agents keep sockets there."""
+    return path.startswith(("/tmp/", "/private/tmp/", "/var/tmp/"))
 
 
 def _is_home_dot_dir(path: str) -> bool:

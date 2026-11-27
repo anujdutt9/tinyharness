@@ -118,8 +118,46 @@ async def test_long_output_keeps_head_and_tail(tmp_path, monkeypatch):
 
 async def test_sandbox_denials_come_with_a_hint(tmp_path):
     tool = BashTool(FakeSandbox(), SandboxPolicy(write_roots=(tmp_path,)))
-    out = await run(tool, "echo 'x: Operation not permitted'", tmp_path)
+    out = await run(tool, "echo 'x: Operation not permitted'; exit 1", tmp_path)
     assert "tinyharness:filesystem_or_process_denied" in out
+
+
+async def test_openmps_tmp_warning_is_called_harmless(tmp_path):
+    """Seen live 44 times: libomp's registration file is at a hard-coded /tmp path, which
+    the sandbox refuses, and it warns on every torch import."""
+    tool = BashTool(FakeSandbox(), SandboxPolicy(write_roots=(tmp_path,)))
+    out = await run(tool, 'echo "OMP: Warning #179: Function Can\'t set size of /tmp file failed:"', tmp_path)
+    assert "[tinyharness:harmless_warning]" in out and "Don't work around it" in out
+
+
+async def test_xcruns_cache_errors_are_called_harmless_and_dont_hide_other_refusals(tmp_path):
+    """Seen in testing: Apple's /usr/bin/git couldn't update xcrun's lookup cache from the
+    private $HOME, said "Operation not permitted", and committed fine; the denial note sent
+    the model after a problem that wasn't there."""
+    tool = BashTool(FakeSandbox(), SandboxPolicy(write_roots=(tmp_path,)))
+    xcrun = (
+        "git: error: couldn't create cache file '/var/folders/x/T/xcrun_db-a' (errno=Operation not permitted)"
+    )
+    out = await run(tool, f'echo "{xcrun}"', tmp_path)
+    assert "[tinyharness:harmless_warning]" in out and "filesystem_or_process_denied" not in out
+    both = await run(tool, f'echo "{xcrun}"; echo "touch: /blocked/x: Operation not permitted"', tmp_path)
+    assert "[tinyharness:filesystem_or_process_denied path=/blocked/x]" in both
+    disk_full = (
+        "fatal: couldn't create cache file '/project/xcrun_db-important' (errno=No space left on device)"
+    )
+    real_failure = await run(tool, f'echo "{disk_full}"; exit 1', tmp_path)
+    assert "harmless_warning" not in real_failure
+    wrong_path = "tool: couldn't create cache file '/project/T/xcrun_db-a' (errno=Operation not permitted)"
+    refused = await run(tool, f'echo "{wrong_path}"; exit 1', tmp_path)
+    assert "harmless_warning" not in refused and "filesystem_or_process_denied" in refused
+
+
+async def test_a_refused_step_in_a_command_that_exits_0_still_gets_its_note(tmp_path):
+    """Found in review: a shell list reports its last command's status, so `touch blocked;
+    echo continued` exits 0 though a step the task needed was refused."""
+    tool = BashTool(FakeSandbox(), SandboxPolicy(write_roots=(tmp_path,)))
+    out = await run(tool, "echo 'touch: /blocked/x: Operation not permitted'; echo continued", tmp_path)
+    assert "[tinyharness:filesystem_or_process_denied path=/blocked/x]" in out
 
 
 async def test_localhost_denial_explains_the_scoped_retry(tmp_path):
@@ -1410,7 +1448,7 @@ def test_a_blocked_write_names_the_folder_and_how_to_move_it(tmp_path):
         sandboxed=True,
     )
     assert f"[tinyharness:filesystem_or_process_denied path={blocked}]" in out
-    assert "$XDG_CACHE_HOME" in out and "Memory tool" in out and out.endswith("(exit code 1)")
+    assert "beneath $HOME" in out and "Memory tool" in out and out.endswith("(exit code 1)")
 
 
 def test_a_blocked_protected_path_says_the_user_must_approve_it(tmp_path):
@@ -1438,26 +1476,44 @@ def test_a_blocked_write_inside_a_writable_root_names_no_folder(tmp_path):
         args=BashInput(command="mkdir x"),
         sandboxed=True,
     )
-    assert "[tinyharness:filesystem_or_process_denied]" in out and "XDG_CACHE_HOME" not in out
+    assert "[tinyharness:filesystem_or_process_denied]" in out and "beneath $HOME" not in out
 
 
 def test_a_venv_whose_python_is_in_the_sandbox_cache_is_pointed_out(tmp_path):
     """Seen live: `uv venv -p 3.12` put the venv's Python in the sandbox cache, which the
     user's own terminal and IDE then depended on without knowing."""
-    cache = (tmp_path / "cache").resolve()
-    python_home = cache / "data" / "uv" / "python" / "cpython-3.12" / "bin"
-    python_home.mkdir(parents=True)
     project = (tmp_path / "project").resolve()
+    policy = SandboxPolicy.for_project(project, cache_dir=tmp_path / "cache", python_dir=tmp_path / "pythons")
+    assert policy.python_dir is not None
+    python_home = policy.python_dir / "cpython-3.12" / "bin"
+    python_home.mkdir(parents=True)
     venv = project / "sglang" / ".venv"
     venv.mkdir(parents=True)
     (venv / "pyvenv.cfg").write_text(f"home = {python_home}\nversion_info = 3.12\n")
-    policy = SandboxPolicy(write_roots=(project, cache), project_roots=(project,), cache_dir=cache)
     tool = BashTool(MarkingSandbox(), policy)
     (note,) = tool._cached_python_notes("cd sglang && uv venv -p 3.12 .venv", since=0)
     assert f"path={venv}" in note and 'share_caches = ["uv"]' in note
     assert tool._cached_python_notes("ls", since=0) == ()  # only after making a venv
-    shared = BashTool(MarkingSandbox(), replace(policy, shared_caches=("uv",)))
-    assert shared._cached_python_notes("uv venv", since=0) == ()
+    shared = SandboxPolicy.for_project(project, python_dir=tmp_path / "pythons", shared_caches=("uv",))
+    assert shared.python_dir is None
+    assert BashTool(MarkingSandbox(), shared)._cached_python_notes("uv venv", since=0) == ()
+
+
+def test_uv_pythons_are_kept_per_project_not_in_the_shared_cache(tmp_path):
+    """Found in review: in the shared cache, a sandboxed command in one project could change
+    the Python another project's venv runs from the user's own terminal."""
+    first = SandboxPolicy.for_project(
+        tmp_path / "a", cache_dir=tmp_path / "cache", python_dir=tmp_path / "a-py"
+    )
+    second = SandboxPolicy.for_project(
+        tmp_path / "b", cache_dir=tmp_path / "cache", python_dir=tmp_path / "b-py"
+    )
+    assert first.env["UV_PYTHON_INSTALL_DIR"] == str((tmp_path / "a-py").resolve())
+    assert not Path(first.env["UV_PYTHON_INSTALL_DIR"]).is_relative_to((tmp_path / "cache").resolve())
+    assert (tmp_path / "b-py").resolve() not in first.write_roots
+    assert (tmp_path / "a-py").resolve() not in second.write_roots
+    legacy = (tmp_path / "cache" / "data" / "uv" / "python").resolve()
+    assert legacy in first.protected and legacy in second.protected
 
 
 # ---- a new host while the command runs ----

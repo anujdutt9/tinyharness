@@ -59,7 +59,7 @@ from tinyharness.llm.textcalls import recover_calls, repair_arguments
 from tinyharness.llm.tokens import count_tokens, estimate_tokens, model_counter
 from tinyharness.llm.types import Effort
 from tinyharness.llm.usage import Usage, UsageMeter
-from tinyharness.paths import default_config_path, home_dir, move_legacy_state, project_dir
+from tinyharness.paths import default_config_path, home_dir, move_legacy_state, project_dir, state_dir
 from tinyharness.permissions import (
     Decision,
     PermissionCallback,
@@ -434,15 +434,25 @@ class Session:
                 "sandbox.required is true, but no supported sandbox backend is available; "
                 f"{setup_hint()}, or set sandbox.required = false"
             )
-        self.sandbox_policy = SandboxPolicy.for_project(
-            root,
-            scratch=self.scratch.dir,
-            cache_dir=home_dir() / "sandbox-cache",
-            extra_write=self.config.sandbox.allow_write,
-            allow_localhost=self.config.sandbox.allow_localhost,
-            allowed_hosts=self.config.sandbox.allow_hosts,
-            shared_caches=self.config.sandbox.share_caches,
-        )
+        try:
+            self.sandbox_policy = SandboxPolicy.for_project(
+                root,
+                scratch=self.scratch.dir,
+                cache_dir=home_dir() / "sandbox-cache",
+                extra_write=self.config.sandbox.allow_write,
+                allow_localhost=self.config.sandbox.allow_localhost,
+                allowed_hosts=self.config.sandbox.allow_hosts,
+                shared_caches=self.config.sandbox.share_caches,
+                # Made even with the sandbox off, so `/sandbox on` finds it ready. Only
+                # sandboxed commands use it.
+                private_home=True,
+                home_read=self.config.sandbox.home_read,
+                python_dir=state_dir(root) / "python",
+            )
+        except ValueError:  # a bad home_read entry: the message says which
+            self.transcript.close()
+            self.scratch.cleanup()
+            raise
         hosts = self.config.sandbox.allow_hosts
         self.proxy = (
             AllowlistProxy(tuple(hosts))

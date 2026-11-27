@@ -193,9 +193,8 @@ class AllowlistProxy:
         upstream = await self._open(host, port, writer)
         if upstream is None:
             return
-        writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
-        await writer.drain()
-        await _pipe_both(reader, writer, *upstream)
+        if await _send(writer, b"HTTP/1.1 200 Connection established\r\n\r\n", upstream[1]):
+            await _pipe_both(reader, writer, *upstream)
 
     async def _forward(
         self, host: str, port: int, head: bytes, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -204,9 +203,8 @@ class AllowlistProxy:
         if upstream is None:
             return
         up_reader, up_writer = upstream
-        up_writer.write(head)
-        await up_writer.drain()
-        await _pipe_both(reader, writer, up_reader, up_writer)
+        if await _send(up_writer, head, writer):
+            await _pipe_both(reader, writer, up_reader, up_writer)
 
     async def _open(
         self, host: str, port: int, writer: asyncio.StreamWriter
@@ -291,6 +289,19 @@ async def _reply(writer: asyncio.StreamWriter, status: int, message: str) -> Non
     with contextlib.suppress(ConnectionError):
         await writer.drain()
     writer.close()
+
+
+async def _send(writer: asyncio.StreamWriter, data: bytes, other: asyncio.StreamWriter) -> bool:
+    """Write `data`, or close both ends if this one has hung up. A client often has by the
+    time its host is allowed: it gave up waiting while the person was asked."""
+    writer.write(data)
+    try:
+        await writer.drain()
+    except ConnectionError:
+        writer.close()
+        other.close()
+        return False
+    return True
 
 
 async def _pipe_both(

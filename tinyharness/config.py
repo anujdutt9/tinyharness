@@ -77,6 +77,10 @@ class SandboxSettings(BaseModel):
     # "huggingface", "torch". Saves downloading and compiling twice; in exchange, a sandboxed
     # command can change what those tools load later, outside the sandbox.
     share_caches: list[Literal["uv", "pip", "npm", "huggingface", "torch"]] = Field(default_factory=list)
+    # Sandboxed commands get a private, per-session $HOME. These paths from your real home
+    # are linked into it for tools that need them ("~/.pyenv"): readable, never writable.
+    # Credential files and ~/.tinyharness can't be listed. Only this file can set it.
+    home_read: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _required_is_enabled(self) -> SandboxSettings:
@@ -786,6 +790,22 @@ def _read_toml(path: Path) -> dict[str, Any]:
         return tomllib.load(f)
 
 
+def _keep_home_read_yours(data: dict[str, Any], path: Path) -> None:
+    """`[sandbox] home_read` opens real-home folders to sandboxed commands, so only your own
+    ~/.tinyharness/config.toml may set it: a file passed with --config could come with a
+    repository."""
+    sandbox = data.get("sandbox")
+    if not isinstance(sandbox, dict) or "home_read" not in sandbox:
+        return
+    try:
+        yours = Path(path).expanduser().resolve() == default_config_path().expanduser().resolve()
+    except OSError:
+        yours = False
+    if not yours:
+        del sandbox["home_read"]
+        log.warning("ignoring [sandbox] home_read in %s: only %s may set it", path, default_config_path())
+
+
 def load_config(path: Path | None = None, *, use_last_model: bool = False) -> Config:
     """Load configuration and environment-based credentials.
 
@@ -805,6 +825,7 @@ def load_config(path: Path | None = None, *, use_last_model: bool = False) -> Co
         migrate_legacy_config()  # before reading it: it may be about to move here
     path = path or default_config_path()
     data = _read_toml(path)
+    _keep_home_read_yours(data, path)
     configured_providers = data.pop("providers", None) or {}
     provider_overrides = _saved_provider_overrides()
     for name, fields in configured_providers.items():

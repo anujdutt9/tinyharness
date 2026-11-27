@@ -24,6 +24,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tinyharness.sandbox.home import home_env
+from tinyharness.sandbox.home import private_home as make_private_home
 from tinyharness.security import public_path_regexes, secret_path_regexes
 
 # Caches a user may choose to share with their own terminal ([sandbox] share_caches):
@@ -58,6 +60,31 @@ PROTECTED_IN_PROJECT = (
     ".claude/agents",
 )
 
+# In your home folder, the files that run code later, outside the sandbox: shell startup,
+# git and ssh config, ~/.config and ~/.local, and on macOS ~/Library (LaunchAgents, app
+# plugins). Write roots normally never contain them, but a project at or above your home
+# would (`tinyharness` started in ~); then these stay read-only, along with every hidden
+# entry already there. Sandboxed tools have their own private $HOME, so they don't need them.
+PROTECTED_IN_HOME = (
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_logout",
+    ".profile",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".zlogout",
+    ".inputrc",
+    ".gitconfig",
+    ".ssh",
+    ".config",
+    ".local",
+    ".tinyharness",
+    "Library",
+)
+
 
 @dataclass(frozen=True)
 class SandboxPolicy:
@@ -72,6 +99,8 @@ class SandboxPolicy:
     cache_dir: Path | None = None  # package managers cache here instead of the user's own cache
     env: dict[str, str] = field(default_factory=dict)  # extra environment for the command
     shared_caches: tuple[str, ...] = ()  # SHAREABLE_CACHES names writing the user's own cache
+    home: Path | None = None  # the session's private $HOME (sandbox/home.py), if it has one
+    python_dir: Path | None = None  # this project's uv-installed Pythons (for_project)
 
     @classmethod
     def for_project(
@@ -84,26 +113,60 @@ class SandboxPolicy:
         allow_localhost: bool = False,
         allowed_hosts: Iterable[str] = (),
         shared_caches: Iterable[str] = (),
+        private_home: bool = False,
+        home_read: Iterable[str] = (),
+        python_dir: Path | None = None,
     ) -> SandboxPolicy:
-        """Build a project policy with private writes and explicit network destinations."""
+        """Build a project policy with private writes and explicit network destinations.
+        With `private_home` (and a `scratch`), commands get a session-private `$HOME` there
+        (sandbox/home.py); `home_read` links real-home paths into it. `python_dir` is where
+        uv installs Pythons: one folder per project, not the shared cache (see below)."""
         projects = [_real(root), *(_real(p) for p in extra_write)]
         roots = list(projects)
         if scratch is not None:
             scratch = _real(scratch)
             roots.append(scratch)
         env: dict[str, str] = {}
+        legacy_python_dir: Path | None = None
         if cache_dir is not None:
             cache_dir = _real(cache_dir)
             cache_dir.mkdir(parents=True, exist_ok=True)
             roots.append(cache_dir)
             env = _cache_env(cache_dir)
+            # Older versions put uv-managed Pythons here. Existing virtualenvs may still
+            # execute them outside the sandbox, so commands may read but never change them.
+            legacy_python_dir = cache_dir / "data" / "uv" / "python"
         private_tmp: Path | None = None
         if scratch is not None:
             private_tmp = scratch / "tmp"
             private_tmp.mkdir(parents=True, exist_ok=True)
             env.update({"TMPDIR": str(private_tmp), "TMP": str(private_tmp), "TEMP": str(private_tmp)})
+        home: Path | None = None
+        if scratch is not None and private_home and sys.platform != "win32":
+            home = make_private_home(scratch, home_read)
+            env.update(home_env(home))
+        elif cache_dir is not None:
+            # No private home (Windows): settings and state go to the shared cache, as before.
+            env.update(
+                {
+                    "XDG_CACHE_HOME": str(cache_dir),
+                    "XDG_CONFIG_HOME": str(cache_dir / "config"),
+                    "XDG_DATA_HOME": str(cache_dir / "data"),
+                    "XDG_STATE_HOME": str(cache_dir / "state"),
+                }
+            )
         roots.extend(_framework_scratch())  # cached: the answer is fixed for this user
         shared = tuple(dict.fromkeys(shared_caches))
+        pythons: Path | None = None
+        if python_dir is not None and "uv" not in shared:
+            # A venv made with a uv-downloaded Python runs that Python from your terminal and
+            # IDE too, outside the sandbox. In the shared cache, a sandboxed command in one
+            # project could change the Python another project's venv runs; here it can only
+            # change its own project's, whose .venv it can write anyway.
+            pythons = _real(python_dir)
+            pythons.mkdir(parents=True, exist_ok=True)
+            env["UV_PYTHON_INSTALL_DIR"] = str(pythons)
+            roots.append(pythons)
         for name in shared:
             for variable, default in SHAREABLE_CACHES[name].items():
                 path = _real(Path(os.environ.get(variable) or default))
@@ -112,7 +175,11 @@ class SandboxPolicy:
         return cls(
             write_roots=tuple(dict.fromkeys(roots)),
             project_roots=tuple(projects),
-            protected=tuple(p / rel for p in projects for rel in PROTECTED_IN_PROJECT),
+            protected=(
+                *(p / rel for p in projects for rel in PROTECTED_IN_PROJECT),
+                *((legacy_python_dir,) if legacy_python_dir is not None else ()),
+                *_home_startup(roots),
+            ),
             deny_read=secret_path_regexes(),
             allow_read=(*public_path_regexes(), *_test_fixtures(private_tmp)),
             allow_localhost=allow_localhost,
@@ -120,11 +187,25 @@ class SandboxPolicy:
             cache_dir=cache_dir,
             env=env,
             shared_caches=shared,
+            home=home,
+            python_dir=pythons,
         )
 
     def reopened(self) -> tuple[Path, ...]:
         """Write roots that sit inside a protected path (e.g. an extra write dir under .git)."""
         return tuple(r for r in self.write_roots if any(r.is_relative_to(p) for p in self.protected))
+
+
+def _home_startup(write_roots: Iterable[Path]) -> tuple[Path, ...]:
+    """PROTECTED_IN_HOME and the home's existing hidden entries, when a write root holds the home."""
+    home = _real(Path.home())
+    if not any(home.is_relative_to(root) for root in write_roots):
+        return ()
+    try:
+        hidden = sorted(entry.name for entry in home.iterdir() if entry.name.startswith("."))
+    except OSError:
+        hidden = []
+    return tuple(home / name for name in dict.fromkeys((*PROTECTED_IN_HOME, *hidden)))
 
 
 def _real(path: Path) -> Path:
@@ -169,13 +250,11 @@ def _test_fixtures(private_tmp: Path | None = None) -> tuple[str, ...]:
 
 
 def _cache_env(cache: Path) -> dict[str, str]:
-    """Point common package managers at a cache the sandbox owns. Letting them write
-    the user's real cache would let a command plant code that runs later, unsandboxed."""
+    """Point package managers' download caches at a cache the sandbox owns. Letting them
+    write the user's real cache would let a command plant code that runs later, unsandboxed.
+    These outlast the session, so downloads aren't repeated; settings and state don't
+    (the XDG folders are in the private home, sandbox/home.py)."""
     return {
-        "XDG_CACHE_HOME": str(cache),
-        "XDG_CONFIG_HOME": str(cache / "config"),
-        "XDG_DATA_HOME": str(cache / "data"),
-        "XDG_STATE_HOME": str(cache / "state"),
         "UV_CACHE_DIR": str(cache / "uv"),
         "PIP_CACHE_DIR": str(cache / "pip"),
         "npm_config_cache": str(cache / "npm"),

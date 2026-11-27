@@ -825,6 +825,14 @@ async def sandbox(repl: Repl, arg: str) -> None:
     table = _grid(12)
     table.add_row("  [bold default]writes[/]", ", ".join(pretty_path(p) for p in policy.write_roots[:4]))
     table.add_row("  [bold default]reads[/]", "anything except credential files (.env, keys, auth.json)")
+    if policy.home is not None:
+        linked = session.config.sandbox.home_read
+        table.add_row(
+            "  [bold default]home[/]",
+            "private to this session [muted]· settings tools write there are gone when it ends"
+            + (f"; links {', '.join(linked)} (read-only)" if linked else "")
+            + "[/]",
+        )
     if policy.cache_dir is not None:
         table.add_row("  [bold default]cache[/]", _cache_summary(policy.cache_dir))
     if policy.shared_caches:
