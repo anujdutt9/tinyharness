@@ -59,7 +59,7 @@ from tinyharness.llm.textcalls import recover_calls, repair_arguments
 from tinyharness.llm.tokens import count_tokens, estimate_tokens, model_counter
 from tinyharness.llm.types import Effort
 from tinyharness.llm.usage import Usage, UsageMeter
-from tinyharness.paths import default_config_path, home_dir, move_legacy_state, project_dir
+from tinyharness.paths import default_config_path, home_dir, move_legacy_state, project_dir, state_dir
 from tinyharness.permissions import (
     Decision,
     PermissionCallback,
@@ -451,17 +451,30 @@ class Session:
             self.scratch.cleanup()
             raise SandboxRequiredError(
                 "sandbox.required is true, but no supported sandbox backend is available; "
-                f"{setup_hint()}, or set sandbox.required = false"
+                f"{setup_hint()}. To deliberately run without it, set required = false "
+                "and enabled = false under [sandbox]."
             )
-        self.sandbox_policy = SandboxPolicy.for_project(
-            root,
-            scratch=self.scratch.dir,
-            cache_dir=home_dir() / "sandbox-cache",
-            extra_write=self.config.sandbox.allow_write,
-            allow_localhost=self.config.sandbox.allow_localhost,
-            allowed_hosts=self.config.sandbox.allow_hosts,
-            shared_caches=self.config.sandbox.share_caches,
-        )
+        try:
+            self.sandbox_policy = SandboxPolicy.for_project(
+                root,
+                scratch=self.scratch.dir,
+                cache_dir=home_dir() / "sandbox-cache",
+                extra_write=self.config.sandbox.allow_write,
+                allow_localhost=self.config.sandbox.allow_localhost,
+                allowed_hosts=self.config.sandbox.allow_hosts,
+                shared_caches=self.config.sandbox.share_caches,
+                # Made even with the sandbox off, so `/sandbox on` finds it ready. Only
+                # sandboxed commands use it.
+                private_home=True,
+                home_read=self.config.sandbox.home_read,
+                python_dir=state_dir(root) / "python",
+            )
+            if self.sandbox is not None:
+                self.sandbox.validate_policy(self.sandbox_policy)
+        except ValueError:
+            self.transcript.close()
+            self.scratch.cleanup()
+            raise
         hosts = self.config.sandbox.allow_hosts
         self.proxy = (
             AllowlistProxy(tuple(hosts))
@@ -1041,6 +1054,10 @@ class Session:
             backend = detect_sandbox()
             if backend is None:
                 return f"no sandbox backend is available here: {setup_hint()}"
+            try:
+                backend.validate_policy(self.sandbox_policy)
+            except ValueError as error:
+                return str(error)
         elif not on and self.sandbox is not None:
             if self.config.sandbox.required:
                 return "sandbox.required is true in config.toml"

@@ -41,6 +41,7 @@ from tinyharness.config import forget_model, recent_models, remember_model, save
 from tinyharness.llm.types import ModelInfo
 from tinyharness.paths import pretty_path
 from tinyharness.permissions import PermissionMode
+from tinyharness.sandbox import detect_sandbox, setup_hint
 from tinyharness.security import redact
 from tinyharness.session import MissingAPIKeyError, list_sessions
 
@@ -820,11 +821,21 @@ async def sandbox(repl: Repl, arg: str) -> None:
             "Auto mode reviews them; deleting files, sudo, credentials and files that run code later "
             "(git hooks, editor settings) ask you.[/]"
         )
+        if detect_sandbox() is None:  # not a choice: no backend can run here, so say why
+            repl.console.print(f"  [muted]not available on this system: {escape(setup_hint())}[/]")
         return
     policy = session.sandbox_policy
     table = _grid(12)
     table.add_row("  [bold default]writes[/]", ", ".join(pretty_path(p) for p in policy.write_roots[:4]))
     table.add_row("  [bold default]reads[/]", "anything except credential files (.env, keys, auth.json)")
+    if policy.home is not None:
+        linked = session.config.sandbox.home_read
+        table.add_row(
+            "  [bold default]home[/]",
+            "private to this session [muted]· settings tools write there are gone when it ends"
+            + (f"; links {', '.join(linked)} (read-only)" if linked else "")
+            + "[/]",
+        )
     if policy.cache_dir is not None:
         table.add_row("  [bold default]cache[/]", _cache_summary(policy.cache_dir))
     if policy.shared_caches:

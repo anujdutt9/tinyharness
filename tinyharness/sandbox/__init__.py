@@ -11,7 +11,7 @@ import sys
 from tinyharness.sandbox.base import Sandbox
 from tinyharness.sandbox.policy import SandboxPolicy
 from tinyharness.sandbox.seatbelt import Seatbelt
-from tinyharness.sandbox.srt import SandboxRuntime
+from tinyharness.sandbox.srt import SandboxRuntime, unusable_hint
 
 # Prefer the small native macOS profile we control. Sandbox Runtime supplies Linux and
 # Windows support and is a fallback when the native backend cannot run.
@@ -35,6 +35,8 @@ _LINUX_INSTALL = {
 
 def setup_hint() -> str:
     """Return platform-specific setup help when no backend is usable."""
+    if broken := unusable_hint():  # installed, so installing it again wouldn't help
+        return broken
     if sys.platform == "linux":
         # The exact command for the package manager that's here, so it can be pasted as is.
         manager = next((name for name in _LINUX_INSTALL if shutil.which(name)), None)

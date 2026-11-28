@@ -366,6 +366,44 @@ async def test_a_run_without_a_terminal_denies_approvals_instead_of_prompting(mo
     assert seen == {"callback": None, "interactive": False}
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_an_unattended_run_needs_a_sandbox_or_explicit_opt_out(tmp_path, monkeypatch, enabled):
+    """A failed backend probe used to send -p straight into an unsandboxed turn."""
+    import io
+
+    from rich.console import Console
+
+    from tinyharness import SandboxRequiredError
+    from tinyharness.cli import app
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr("tinyharness.session.detect_sandbox", lambda: None)
+    monkeypatch.setattr(app, "setup_hint", lambda: "SRT cannot start here")
+    monkeypatch.setattr(app.sys, "stdin", io.StringIO(""))
+    config = tmp_path / "config.toml"
+    config.write_text(f"[sandbox]\nenabled = {str(enabled).lower()}\n")
+    args = app.build_parser().parse_args(["--cwd", str(tmp_path), "--config", str(config), "-p", "hello"])
+    seen = []
+
+    class Repl:
+        def __init__(self, session, console, renderer):
+            pass
+
+        async def run_turn(self, turn):
+            seen.append(turn)
+            await turn.aclose()
+
+    monkeypatch.setattr(app, "Repl", Repl)
+    console = Console(file=io.StringIO())
+    if enabled:
+        with pytest.raises(SandboxRequiredError, match="SRT cannot start here"):
+            await app.run(args, console)
+        assert not seen
+    else:
+        await app.run(args, console)
+        assert len(seen) == 1
+
+
 async def test_sandbox_and_extensions_commands_show_config_names_literally(tmp_path, monkeypatch):
     """`[sandbox]` in a Rich string is markup and vanished from the hint."""
     import io
@@ -463,7 +501,13 @@ async def test_sandbox_off_and_on_from_the_command_line(tmp_path, monkeypatch):
             return argv
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setattr("tinyharness.session.detect_sandbox", lambda: Fake())
+    have_sandbox = True
+
+    def detect():
+        return Fake() if have_sandbox else None
+
+    monkeypatch.setattr("tinyharness.session.detect_sandbox", detect)
+    monkeypatch.setattr("tinyharness.cli.commands.detect_sandbox", detect)
 
     class Repl:
         pass
@@ -474,6 +518,12 @@ async def test_sandbox_off_and_on_from_the_command_line(tmp_path, monkeypatch):
     try:
         await COMMANDS["/sandbox"].handler(repl, "off")
         assert repl.session.sandbox is None and "Sandbox off" in repl.console.file.getvalue()
+        assert "not available on this system" not in repl.console.file.getvalue()  # it is: you chose
+        have_sandbox = False
+        monkeypatch.setattr("tinyharness.cli.commands.setup_hint", lambda: "srt can't run here")
+        await COMMANDS["/sandbox"].handler(repl, "off")  # already off: just the status
+        assert "not available on this system: srt can't run here" in repl.console.file.getvalue()
+        have_sandbox = True
         await COMMANDS["/sandbox"].handler(repl, "on")
         assert isinstance(repl.session.sandbox, Fake)
         await COMMANDS["/sandbox"].handler(repl, "maybe")

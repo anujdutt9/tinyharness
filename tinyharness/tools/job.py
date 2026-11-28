@@ -168,7 +168,14 @@ def _report(job: Job, text: str, outcome: str) -> str:
     body = text.rstrip() or "(no new output)"
     # The same advice Bash gives in the foreground: a server that can't bind localhost in the
     # sandbox needs network_host='localhost', not a different command (seen live: a model gave up).
-    hints = sandbox_notes(text, job.command, job.code, job.sandboxed, [] if job.running else job.blocked())
+    hints = sandbox_notes(
+        text,
+        job.command,
+        job.code,
+        job.sandboxed,
+        [] if job.running else job.blocked(),
+        sandbox_backend=job.sandbox_backend,
+    )
     # The outcome goes last, as with Bash: that's where the CLI and the model look for it.
     return f"{body}{hints}\n(job {job.id} {job.describe()}: {job.short_command(60)} · {outcome})"
 

@@ -64,6 +64,7 @@ class Job:
     seen: int = 0
     reported: bool = False  # the agent already knows it ended (no note needed)
     sandboxed: bool = False
+    sandbox_backend: str | None = None
     # Hosts it reached or was refused through the sandbox proxy, as "lists so far"
     # callables while it runs; frozen when it ends.
     reached: Callable[[], list[str]] = list

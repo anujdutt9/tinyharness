@@ -2,6 +2,8 @@
 nothing else (sandbox/proxy.py)."""
 
 import asyncio
+import socket
+import struct
 
 from tinyharness.sandbox import SandboxPolicy
 from tinyharness.sandbox.proxy import DEFAULT_ALLOWED_HOSTS, AllowlistProxy, host_allowed
@@ -203,3 +205,45 @@ async def test_time_spent_deciding_is_counted():
     proxy = AllowlistProxy((), ask=ask)
     assert not await proxy._granted("slow.example")
     assert proxy.asking_seconds >= 0.15  # Windows' clock can measure a 0.2s sleep a little short
+
+
+async def test_a_client_that_hangs_up_while_its_host_is_asked_about_is_let_go(monkeypatch):
+    """Seen live: Playwright's download gave up while its host waited for a yes, and the
+    proxy's 200 to the dead socket raised in the event loop ("Unhandled exception in event
+    loop ... Press ENTER to continue"). Now that connection just ends, upstream too."""
+    monkeypatch.setattr("tinyharness.sandbox.proxy._local", lambda address: False)
+    upstream_closed = asyncio.Event()
+
+    async def upstream(reader, writer):
+        await reader.read()
+        upstream_closed.set()
+        writer.close()
+
+    server = await asyncio.start_server(upstream, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    answer = asyncio.Event()
+
+    async def ask(host):
+        await answer.wait()
+        return True
+
+    loop = asyncio.get_running_loop()
+    unhandled = []
+    loop.set_exception_handler(lambda loop, context: unhandled.append(context))
+    proxy = AllowlistProxy((), ask=ask)
+    try:
+        proxy_port = await proxy.start()
+        _, writer = await _connect(proxy_port, f"127.0.0.1:{port}")
+        # Hang up with a reset, as a client's timeout does, before the answer comes.
+        sock = writer.get_extra_info("socket")
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        writer.close()
+        await asyncio.sleep(0.1)
+        answer.set()
+        await asyncio.wait_for(upstream_closed.wait(), timeout=5)
+        await asyncio.sleep(0.1)
+        assert unhandled == []
+    finally:
+        loop.set_exception_handler(None)
+        proxy.close()
+        server.close()
