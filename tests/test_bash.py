@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import shutil
 import sys
 import time
 from dataclasses import replace
@@ -18,7 +19,7 @@ from tinyharness.hooks import Hook, HookRunner
 from tinyharness.permissions import Decision, PermissionGate, PermissionMode, PermissionRules, Rule
 from tinyharness.permissions.classifier import ClassifierDecision
 from tinyharness.permissions.rules import CAPABILITY
-from tinyharness.sandbox import Sandbox, SandboxPolicy
+from tinyharness.sandbox import Sandbox, SandboxPolicy, SandboxRuntime
 from tinyharness.sandbox.proxy import AllowlistProxy
 from tinyharness.testing import scripted_session
 from tinyharness.tools import bash
@@ -120,6 +121,60 @@ async def test_sandbox_denials_come_with_a_hint(tmp_path):
     tool = BashTool(FakeSandbox(), SandboxPolicy(write_roots=(tmp_path,)))
     out = await run(tool, "echo 'x: Operation not permitted'; exit 1", tmp_path)
     assert "tinyharness:filesystem_or_process_denied" in out
+
+
+@pytest.mark.parametrize(
+    ("backend_name", "code", "has_hint"),
+    [(SandboxRuntime.name, 1, True), (SandboxRuntime.name, 0, False), ("seatbelt", 1, False)],
+)
+async def test_a_seccomp_line_is_only_a_startup_hint_for_failed_srt_calls(
+    tmp_path, backend_name, code, has_hint
+):
+    """Seen in CI (Ubuntu 26.04): SRT's seccomp helper failed before the command ran, and its
+    "Permission denied" got the filesystem-denial note, which sends the model after a command
+    that never started."""
+    backend = FakeSandbox()
+    backend.name = backend_name
+    tool = BashTool(backend, SandboxPolicy(write_roots=(tmp_path,)))
+    failure = (
+        "apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; "
+        "caller must provide CAP_SYS_ADMIN): Permission denied"
+    )
+    out = await run(tool, f"echo '{failure}'; exit {code}", tmp_path)
+    assert ("[tinyharness:sandbox_startup_hint]" in out) == has_hint
+    assert "The command never ran" not in out
+    if has_hint:
+        assert "filesystem_or_process_denied" not in out
+        out = await run(
+            tool, f"echo '{failure}'; echo 'mkdir: /other/dir: Permission denied'; exit 1", tmp_path
+        )
+        assert "sandbox_startup_hint" in out and "filesystem_or_process_denied" in out
+
+
+async def test_srt_uses_the_venv_path_for_commands_after_a_python_install(tmp_path, monkeypatch):
+    """SRT's inner PATH used to undo the virtualenv selection for the rest of the command."""
+    project = tmp_path / "project"
+    bin_dir = project / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    for name in ("python", "th-only-in-venv"):
+        executable = bin_dir / name
+        executable.write_text("#!/bin/sh\n" + ("echo venv-ok\n" if name != "python" else "exit 0\n"))
+        executable.chmod(0o755)
+    srt = tmp_path / "srt"
+    srt.write_text('#!/bin/sh\nshift 3\nexec "$@"\n')
+    srt.chmod(0o755)
+    real_which = shutil.which
+    monkeypatch.setattr(
+        "tinyharness.sandbox.srt.shutil.which",
+        lambda name: str(srt) if name == "srt" else real_which(name),
+    )
+    policy = SandboxPolicy.for_project(project, scratch=tmp_path / "scratch", private_home=True)
+    out = await run(
+        BashTool(SandboxRuntime(tmp_path / "settings"), policy),
+        "python -m pip install requests && th-only-in-venv",
+        project,
+    )
+    assert out == "venv-ok"
 
 
 async def test_openmps_tmp_warning_is_called_harmless(tmp_path):

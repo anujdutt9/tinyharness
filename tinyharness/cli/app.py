@@ -39,7 +39,13 @@ from tinyharness.config import note_launch, remember_model
 from tinyharness.paths import pretty_path, source_checkout
 from tinyharness.permissions import PermissionMode
 from tinyharness.sandbox import setup_hint
-from tinyharness.session import MissingAPIKeyError, Session, SessionOptions, list_sessions
+from tinyharness.session import (
+    MissingAPIKeyError,
+    SandboxRequiredError,
+    Session,
+    SessionOptions,
+    list_sessions,
+)
 from tinyharness.skills import import_skills
 from tinyharness.trust import TrustStore, scan
 
@@ -269,6 +275,11 @@ async def run(args: argparse.Namespace, console: Console) -> None:
     renderer.meter = session.ctx.usage
     renderer.show_thinking = session.config.show_thinking
     try:
+        if not interactive and session.config.sandbox.enabled and session.sandbox is None:
+            raise SandboxRequiredError(
+                f"Cannot run unattended with the sandbox unavailable: {setup_hint()}. "
+                "To deliberately run without it, set enabled = false under [sandbox]."
+            )
         repl = Repl(session, console, renderer)
         if args.prompt:
             if session.project_code.needs_trust and not session.project_trusted:

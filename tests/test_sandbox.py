@@ -16,6 +16,8 @@ from tinyharness.sandbox.seatbelt import profile
 from tinyharness.security import public_path_regexes, secret_path_regexes
 from tinyharness.tools.bash import BashTool
 
+posix = pytest.mark.skipif(sys.platform == "win32", reason="the fake srt is a shell script")
+
 not_windows = pytest.mark.skipif(sys.platform == "win32", reason="tests the macOS Seatbelt profile")
 
 
@@ -31,6 +33,8 @@ def test_native_seatbelt_is_preferred_when_macos_has_both_backends():
 
 
 def test_missing_sandbox_has_platform_specific_setup_help(monkeypatch):
+    # SRT isn't installed. (Faking sys.platform also sends shutil.which down Windows paths.)
+    monkeypatch.setattr("tinyharness.sandbox.unusable_hint", lambda: None)
     monkeypatch.setattr("tinyharness.sandbox.sys.platform", "linux")
     assert "bubblewrap" in setup_hint() and "sandbox-runtime" in setup_hint()
     monkeypatch.setattr("tinyharness.sandbox.sys.platform", "win32")
@@ -66,8 +70,10 @@ def test_project_policy_uses_private_scratch_temp_and_tool_caches(tmp_path):
     assert (scratch / "tmp").is_dir()
     fixture = scratch.resolve() / "tmp" / "pytest-of-user" / "pytest-0" / "test_auth" / "auth.json"
     assert any(re.search(pattern, fixture.as_posix()) for pattern in policy.allow_read)
-    settings = SandboxRuntime(tmp_path / "settings")._settings(policy)
-    assert f"{scratch.resolve().as_posix()}/tmp/pytest-of-*/**" in [
+    srt_scratch = tmp_path / "srt-scratch"
+    srt_policy = SandboxPolicy.for_project(root, scratch=srt_scratch)
+    settings = SandboxRuntime(tmp_path / "settings")._settings(srt_policy)
+    assert f"{srt_scratch.resolve().as_posix()}/tmp/pytest-of-*/**" in [
         native_text(path) for path in settings["filesystem"]["allowRead"]
     ]
     assert not policy.allow_localhost
@@ -130,9 +136,62 @@ def test_sandbox_runtime_requires_its_linux_helpers(monkeypatch):
         "tinyharness.sandbox.srt.shutil.which",
         lambda name: f"/usr/bin/{name}" if name in present else None,
     )
-    assert SandboxRuntime.available()
+    monkeypatch.setattr("tinyharness.sandbox.srt.cannot_run", lambda: None)
+    assert SandboxRuntime.installed() and SandboxRuntime.available()
     present.remove("socat")
-    assert not SandboxRuntime.available()
+    assert not SandboxRuntime.installed() and not SandboxRuntime.available()
+
+
+SECCOMP_FAILURE = (
+    "apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; "
+    "caller must provide CAP_SYS_ADMIN): Permission denied"
+)
+
+
+def fake_srt(tmp_path, monkeypatch, script: str) -> None:
+    """An `srt` on PATH that runs `script`, with the probe's cache cleared around the test."""
+    from tinyharness.sandbox import srt
+
+    executable = tmp_path / "bin" / "srt"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\n" + script)
+    executable.chmod(0o755)
+    real_which = __import__("shutil").which
+    monkeypatch.setattr(
+        srt.shutil, "which", lambda name: str(executable) if name == "srt" else real_which(name)
+    )
+    srt.cannot_run.cache_clear()
+
+
+@posix
+def test_an_installed_sandbox_runtime_that_cant_run_a_command_is_not_available(tmp_path, monkeypatch):
+    """Seen in CI: on Ubuntu 26.04, AppArmor's bwrap profile denies CAP_SYS_ADMIN to
+    bubblewrap's children, so SRT's seccomp helper aborted every command before it ran.
+    SRT counted as available because it was installed, and every Bash call failed."""
+    from tinyharness.sandbox import srt
+
+    fake_srt(tmp_path, monkeypatch, f"echo 'startup message' >&2; echo '{SECCOMP_FAILURE}' >&2; exit 1\n")
+    try:
+        assert srt.cannot_run() == SECCOMP_FAILURE
+        monkeypatch.setattr(SandboxRuntime, "installed", classmethod(lambda cls: True))
+        assert not SandboxRuntime.available()
+        hint = setup_hint()  # the startup warning, /sandbox, and the `required = true` error
+        assert "installed but can't run commands here" in hint and SECCOMP_FAILURE in hint
+        assert "sandbox-runtime/issues/429" in hint and "apt-get install" not in hint
+    finally:
+        srt.cannot_run.cache_clear()
+
+
+@posix
+def test_a_working_sandbox_runtime_passes_its_probe(tmp_path, monkeypatch):
+    from tinyharness.sandbox import srt
+
+    # Like SRT: run what follows `--`.
+    fake_srt(tmp_path, monkeypatch, 'while [ "$1" != "--" ]; do shift; done; shift; exec "$@"\n')
+    try:
+        assert srt.cannot_run() is None
+    finally:
+        srt.cannot_run.cache_clear()
 
 
 def test_sandbox_runtime_keeps_control_socket_temp_short(tmp_path, monkeypatch):

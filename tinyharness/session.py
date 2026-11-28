@@ -451,7 +451,8 @@ class Session:
             self.scratch.cleanup()
             raise SandboxRequiredError(
                 "sandbox.required is true, but no supported sandbox backend is available; "
-                f"{setup_hint()}, or set sandbox.required = false"
+                f"{setup_hint()}. To deliberately run without it, set required = false "
+                "and enabled = false under [sandbox]."
             )
         try:
             self.sandbox_policy = SandboxPolicy.for_project(
@@ -468,7 +469,9 @@ class Session:
                 home_read=self.config.sandbox.home_read,
                 python_dir=state_dir(root) / "python",
             )
-        except ValueError:  # a bad home_read entry: the message says which
+            if self.sandbox is not None:
+                self.sandbox.validate_policy(self.sandbox_policy)
+        except ValueError:
             self.transcript.close()
             self.scratch.cleanup()
             raise
@@ -1051,6 +1054,10 @@ class Session:
             backend = detect_sandbox()
             if backend is None:
                 return f"no sandbox backend is available here: {setup_hint()}"
+            try:
+                backend.validate_policy(self.sandbox_policy)
+            except ValueError as error:
+                return str(error)
         elif not on and self.sandbox is not None:
             if self.config.sandbox.required:
                 return "sandbox.required is true in config.toml"

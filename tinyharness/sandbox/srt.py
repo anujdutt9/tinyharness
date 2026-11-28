@@ -7,10 +7,13 @@ plus Windows Filtering Platform on Windows. tinyharness only detects an installe
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -18,7 +21,7 @@ from pathlib import Path
 from tinyharness.paths import home_dir
 from tinyharness.sandbox.base import Sandbox
 from tinyharness.sandbox.policy import SandboxPolicy
-from tinyharness.security import sandbox_path_globs
+from tinyharness.security import sandbox_path_globs, sanitized_env
 
 # Variables only the wrapped command gets, never SRT itself (see `environment`).
 _INNER_ONLY = frozenset(
@@ -48,6 +51,11 @@ class SandboxRuntime(Sandbox):
 
     @classmethod
     def available(cls) -> bool:
+        """Return whether SRT is installed and can run a command on this machine."""
+        return cls.installed() and cannot_run() is None
+
+    @classmethod
+    def installed(cls) -> bool:
         """Return whether SRT and its platform helpers are installed."""
         dependencies = {
             "darwin": ("srt", "rg"),
@@ -97,8 +105,19 @@ class SandboxRuntime(Sandbox):
         # goes the same way: SRT resolves paths like ~/.ssh itself, from its own $HOME.
         return {key: value for key, value in policy.env.items() if key not in _INNER_ONLY}
 
+    def validate_policy(self, policy: SandboxPolicy) -> None:
+        """Reject writable roots that would reopen a protected directory."""
+        # SRT's denies win over its allows. Enumerating existing siblings leaves any
+        # future entries unprotected, so refuse a policy that needs this exception.
+        if reopened := policy.reopened():
+            raise ValueError(
+                f"Sandbox Runtime cannot reopen a protected path for writing: {reopened[0]}. "
+                "Use a narrower project or allow_write root outside protected paths."
+            )
+
     def _settings(self, policy: SandboxPolicy) -> dict[str, object]:
         """Build SRT settings without exposing regex-based native policy details."""
+        self.validate_policy(policy)
         home = Path.home().expanduser().resolve()
         deny_read: list[Path | str] = [
             home / ".ssh",
@@ -157,7 +176,7 @@ class SandboxRuntime(Sandbox):
                 "denyRead": [str(path) for path in deny_read],
                 "allowRead": allow_read,
                 "allowWrite": [str(path) for path in policy.write_roots],
-                "denyWrite": [str(path) for path in _deny_write(policy)],
+                "denyWrite": [str(path) for path in policy.protected],
             },
             "enableWeakerNestedSandbox": False,
             "enableWeakerNetworkIsolation": False,
@@ -165,32 +184,62 @@ class SandboxRuntime(Sandbox):
         }
 
 
-def _deny_write(policy: SandboxPolicy) -> list[Path]:
-    """`policy.protected` as SRT denies, with write roots inside them kept open.
+# Ubuntu's AppArmor `bwrap-userns-restrict` profile, in SRT's words.
+_NESTED_USERNS = "nested userns is capability-restricted"
+SECCOMP_HELPER_FAILED = re.compile(rf"^apply-seccomp: [^\n]*{_NESTED_USERNS}[^\n]*$", re.M)
 
-    SRT's denyWrite beats its allowWrite, unlike Seatbelt's later rule (`reopened`). So a
-    protected folder holding a write root (~/.tinyharness, with the session's scratch, when
-    the project is your home) is denied entry by entry around that root instead. Entries
-    created there later aren't covered on this backend.
+
+@functools.cache
+def cannot_run() -> str | None:
+    """Why SRT can't run even `true` on this machine, or None when it can.
+
+    Being installed isn't enough. Seen in CI: on Ubuntu 26.04, AppArmor denies CAP_SYS_ADMIN
+    to bubblewrap's children, so SRT's seccomp helper aborted every command before it
+    started, and each Bash call failed with a note blaming the command. Checked once per
+    process, like Seatbelt's probe; only called once SRT is installed.
     """
-    denied: list[Path] = []
+    shell = shutil.which("sh") or shutil.which("bash")
+    if shell is None:
+        return "no POSIX shell (sh) to run commands with"
+    try:
+        with tempfile.TemporaryDirectory(prefix="th-srt-") as scratch:
+            root = Path(scratch).resolve()
+            argv = SandboxRuntime(root / "settings").wrap(
+                [shell, "-c", "true"], SandboxPolicy(write_roots=(root,))
+            )
+            probe = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=30,
+                stdin=subprocess.DEVNULL,
+                cwd=root,
+                env=sanitized_env(),
+            )
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        return f"srt didn't start ({error})"
+    if probe.returncode == 0:
+        return None
+    output = f"{probe.stderr}\n{probe.stdout}"
+    if helper := SECCOMP_HELPER_FAILED.search(output):
+        return helper[0][:300]
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return (lines[0][:300] if lines else "") or f"srt exited with code {probe.returncode}"
 
-    def around(path: Path, inside: list[Path]) -> None:
-        if not inside:
-            denied.append(path)
-            return
-        if path in inside:
-            return
-        try:
-            children = list(path.iterdir())
-        except OSError:
-            return
-        for child in children:
-            around(child, [root for root in inside if root.is_relative_to(child)])
 
-    for path in policy.protected:
-        around(path, [root for root in policy.write_roots if root.is_relative_to(path)])
-    return denied
+def unusable_hint() -> str | None:
+    """What to tell the user when SRT is installed but can't run here, or None."""
+    if not SandboxRuntime.installed() or (reason := cannot_run()) is None:
+        return None
+    hint = f"Sandbox Runtime is installed but can't run commands here: {reason}"
+    if _NESTED_USERNS in reason:
+        hint += (
+            ". Ubuntu's AppArmor profile for bubblewrap blocks its seccomp helper (Ubuntu 26.04 and "
+            "some 24.04 hosts), an open Sandbox Runtime issue: "
+            "https://github.com/anthropics/sandbox-runtime/issues/429"
+        )
+    return hint
 
 
 __all__ = ["SandboxRuntime"]

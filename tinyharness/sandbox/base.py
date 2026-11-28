@@ -26,3 +26,7 @@ class Sandbox(ABC):
     def environment(self, policy: SandboxPolicy) -> dict[str, str]:
         """Environment additions for the outer sandbox process and its child."""
         return policy.env
+
+    def validate_policy(self, policy: SandboxPolicy) -> None:
+        """Raise ValueError if this backend cannot enforce the requested policy."""
+        return None

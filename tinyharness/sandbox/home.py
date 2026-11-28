@@ -37,7 +37,7 @@ from tinyharness.security import is_secret_path
 GIT_IDENTITY = ("user.name", "user.email", "init.defaultBranch")
 
 
-def private_home(scratch: Path, home_read: Iterable[str] = ()) -> Path:
+def private_home(scratch: Path, home_read: Iterable[str] = (), *, write_roots: Iterable[Path] = ()) -> Path:
     """Create the session's private home in `scratch` and project what it needs.
 
     Parameters
@@ -46,6 +46,8 @@ def private_home(scratch: Path, home_read: Iterable[str] = ()) -> Path:
         The session's scratch directory (already a sandbox write root).
     home_read : iterable of str
         Real-home paths (`~/x` or absolute) to link in, from the user's own config.
+    write_roots : iterable of Path
+        Writable paths that must not overlap a read-only projection.
 
     Returns
     -------
@@ -56,9 +58,15 @@ def private_home(scratch: Path, home_read: Iterable[str] = ()) -> Path:
     ------
     ValueError
         When a `home_read` entry is missing, outside the home, a credential or
-        tinyharness path, or a symlink loop. The message names the entry.
+        tinyharness path, a symlink loop, or overlaps a writable path.
     """
-    links = [_checked(entry) for entry in home_read]  # before creating anything
+    roots = tuple(write_roots)
+    links = []
+    for entry in home_read:
+        relative, target = _checked(entry)
+        if any(target.is_relative_to(root) or root.is_relative_to(target) for root in roots):
+            raise ValueError(f"sandbox.home_read: {entry!r} overlaps a writable root")
+        links.append((relative, target))
     home = scratch / "home"
     scratch.mkdir(parents=True, exist_ok=True)
     home.mkdir(mode=0o700, exist_ok=True)

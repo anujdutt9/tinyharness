@@ -141,11 +141,8 @@ class SandboxPolicy:
             private_tmp = scratch / "tmp"
             private_tmp.mkdir(parents=True, exist_ok=True)
             env.update({"TMPDIR": str(private_tmp), "TMP": str(private_tmp), "TEMP": str(private_tmp)})
-        home: Path | None = None
-        if scratch is not None and private_home and sys.platform != "win32":
-            home = make_private_home(scratch, home_read)
-            env.update(home_env(home))
-        elif cache_dir is not None:
+        use_private_home = scratch is not None and private_home and sys.platform != "win32"
+        if not use_private_home and cache_dir is not None:
             # No private home (Windows): settings and state go to the shared cache, as before.
             env.update(
                 {
@@ -172,6 +169,10 @@ class SandboxPolicy:
                 path = _real(Path(os.environ.get(variable) or default))
                 env[variable] = str(path)
                 roots.append(path)
+        home = None
+        if use_private_home and scratch is not None:
+            home = make_private_home(scratch, home_read, write_roots=roots)
+            env.update(home_env(home))
         return cls(
             write_roots=tuple(dict.fromkeys(roots)),
             project_roots=tuple(projects),

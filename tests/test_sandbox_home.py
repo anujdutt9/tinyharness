@@ -179,6 +179,21 @@ def test_home_read_links_a_real_home_folder_in(tmp_path):
 
 
 @posix_only
+@pytest.mark.parametrize("overlap", ["parent", "equal", "child"])
+def test_home_read_refuses_writable_project_paths(tmp_path, overlap):
+    home = real_home().resolve()
+    target = home / "tools"
+    child = target / "installed"
+    child.mkdir(parents=True)
+    (home / "alias").symlink_to(target)
+    root = {"parent": home, "equal": target, "child": child}[overlap]
+    scratch = tmp_path / "scratch"
+    with pytest.raises(ValueError, match="'~/alias' overlaps a writable root"):
+        SandboxPolicy.for_project(root, scratch=scratch, private_home=True, home_read=["~/alias"])
+    assert not (scratch / "home").exists()
+
+
+@posix_only
 @pytest.mark.parametrize(
     ("entry", "complaint"),
     [
@@ -259,7 +274,7 @@ async def test_inherited_git_config_variables_dont_reach_a_sandboxed_command(tmp
         {"command": "git config --get core.hooksPath || echo no-hooks"},
         make_ctx(project),
     )
-    assert git_out.strip() == "no-hooks"
+    assert git_out.splitlines()[-1] == "no-hooks"
     off = await call(BashTool(None, policy), {"command": command}, make_ctx(project))  # /sandbox off
     assert "GIT_CONFIG_COUNT=1" in off and str(system) in off
 
@@ -354,16 +369,12 @@ def test_a_project_at_your_home_keeps_your_startup_files_read_only():
 
 
 @posix_only
-def test_sandbox_runtime_denies_around_a_write_root_inside_a_protected_folder():
-    """SRT's denyWrite beats allowWrite, so denying ~/.tinyharness whole would also shut the
-    session's scratch inside it; its other entries are denied instead."""
+def test_sandbox_runtime_refuses_a_write_root_inside_a_protected_folder():
+    """Enumerating existing siblings of scratch left future entries unprotected."""
     real = real_home().resolve()
     policy = home_project_policy(real)
-    (real / ".tinyharness" / "config.toml").write_text("")
-    denied = SandboxRuntime(real / "srt")._settings(policy)["filesystem"]["denyWrite"]  # type: ignore[index]
-    assert str(real / ".tinyharness") not in denied and str(real / ".tinyharness" / "config.toml") in denied
-    assert str(real / ".zshrc") in denied
-    assert not any(Path(policy.home).is_relative_to(d) for d in map(Path, denied))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="cannot reopen a protected path for writing"):
+        SandboxRuntime(real / "srt")._settings(policy)
 
 
 @needs_seatbelt

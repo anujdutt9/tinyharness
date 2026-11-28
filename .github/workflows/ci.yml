@@ -33,7 +33,11 @@ jobs:
       - run: uv run pytest
 
   sandbox-runtime-linux:
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest (26.04): there AppArmor's bwrap profile denies CAP_SYS_ADMIN to
+    # bwrap's children, so SRT's apply-seccomp helper aborts and no sandboxed command runs
+    # ("nested userns is capability-restricted"). Upstream, still open:
+    # https://github.com/anthropics/sandbox-runtime/issues/429. Move back once it's fixed.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0
@@ -46,7 +50,7 @@ jobs:
       - run: npm install -g @anthropic-ai/sandbox-runtime
       - run: uv sync --locked
       - run: uv run python -c "from tinyharness.sandbox import SandboxRuntime; assert SandboxRuntime.available()"
-      - run: uv run pytest -q tests/test_sandbox.py
+      - run: uv run pytest -q tests/test_sandbox.py tests/test_sandbox_home.py
 
   # The minimum versions in pyproject.toml are promises; test them.
   lowest-dependencies:
