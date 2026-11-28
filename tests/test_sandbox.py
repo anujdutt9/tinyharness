@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from conftest import call, make_ctx
+from tinyharness.paths import home_dir, state_dir
 from tinyharness.sandbox import BACKENDS, SandboxPolicy, SandboxRuntime, Seatbelt, setup_hint
 from tinyharness.sandbox.policy import PROTECTED_IN_PROJECT
 from tinyharness.sandbox.seatbelt import profile
@@ -339,6 +340,8 @@ async def test_the_default_project_policy_is_a_valid_profile(tmp_path):
 @pytest.mark.parametrize("backend_name", ["seatbelt", "srt"])
 async def test_sandboxed_pytest_reads_fixtures_from_its_private_tmp(tmp_path, backend_name):
     """Seen live: the child TMPDIR was absent from pytest's synthetic-secret exception."""
+    project = tmp_path / "project"
+    project.mkdir()
     if backend_name == "seatbelt":
         if not Seatbelt.available():
             pytest.skip("needs macOS sandbox-exec")
@@ -347,20 +350,25 @@ async def test_sandboxed_pytest_reads_fixtures_from_its_private_tmp(tmp_path, ba
         if not SandboxRuntime.available():
             pytest.skip("needs Sandbox Runtime")
         backend = SandboxRuntime(tmp_path / "settings")
-    test_file = tmp_path / "test_fixture.py"
+    test_file = project / "test_fixture.py"
     test_file.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "\n"
         "def test_fake_credentials(tmp_path):\n"
+        "    assert tmp_path.resolve().is_relative_to(Path(os.environ['TMPDIR']).resolve())\n"
         "    for name in ('.env', 'auth.json'):\n"
         "        path = tmp_path / name\n"
         "        path.write_text('synthetic-secret')\n"
         "        assert path.read_text() == 'synthetic-secret'\n"
     )
-    scratch = tmp_path / ".tinyharness" / "tmp" / "sandbox-test"
-    policy = SandboxPolicy.for_project(tmp_path, scratch=scratch, cache_dir=tmp_path / "cache")
+    # Sessions keep scratch in their state directory, outside the project's protected .tinyharness.
+    scratch = state_dir(project) / "tmp" / "sandbox-test"
+    policy = SandboxPolicy.for_project(project, scratch=scratch, cache_dir=home_dir() / "sandbox-cache")
     tool = BashTool(backend, policy)
     command = f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider {test_file.name}"
-    out = await call(tool, {"command": command, "timeout": 60}, make_ctx(tmp_path))
-    assert "1 passed" in out
+    out = await call(tool, {"command": command, "timeout": 60}, make_ctx(project))
+    assert "1 passed" in out, out
 
 
 @needs_seatbelt
